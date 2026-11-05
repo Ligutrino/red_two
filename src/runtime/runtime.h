@@ -11,6 +11,7 @@ namespace rt {
 // --- logging --------------------------------------------------------------------------
 void logf(const char* tag, const char* fmt, ...);
 [[noreturn]] void fatal(const char* fmt, ...);
+[[noreturn]] void quit(int code);  // terminate now (no DLL teardown)
 const char* symName(u32 addr);  // nearest known name or nullptr
 std::string describeAddr(u32 addr);
 bool envFlag(const char* name);

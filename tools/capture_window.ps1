@@ -8,7 +8,7 @@ param(
     [int]$Shots = 1,
     [double]$Interval = 2,
     [string]$Log = "build\capture_run.log",
-    [ValidateSet("print", "screen")][string]$Method = "screen"
+    [ValidateSet("print", "screen")][string]$Method = "print"
 )
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
@@ -27,7 +27,11 @@ public static class R2Win {
 "@
 
 [void][R2Win]::SetProcessDPIAware()
-$p = Start-Process -FilePath $Exe -ArgumentList $ExeArgs -PassThru -RedirectStandardError $Log
+# Background mode: no console window of its own (-NoNewWindow), and the game window opens
+# behind everything without taking focus (R2_BACKGROUND). PrintWindow still captures it.
+$env:R2_BACKGROUND = "1"
+$p = Start-Process -FilePath $Exe -ArgumentList $ExeArgs -PassThru -NoNewWindow -RedirectStandardError $Log
+Remove-Item Env:R2_BACKGROUND
 try {
     Start-Sleep -Milliseconds ([int]($Seconds * 1000))
     for ($i = 0; $i -lt $Shots; $i++) {
@@ -45,7 +49,8 @@ try {
             [void][R2Win]::PrintWindow($h, $hdc, 3)  # PW_CLIENTONLY | PW_RENDERFULLCONTENT
             $g.ReleaseHdc($hdc)
         } else {
-            # copy from the screen (needs the window visible; brings it to the front)
+            # copy from the screen: brings the window to the front and can catch other windows
+            # (avoid; kept for debugging PrintWindow problems)
             [void][R2Win]::SetForegroundWindow($h)
             Start-Sleep -Milliseconds 150
             $pt = New-Object R2Win+POINT

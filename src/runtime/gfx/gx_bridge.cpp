@@ -16,6 +16,9 @@
 #include <aurora/aurora.h>
 #include <aurora/event.h>
 #include <aurora/gfx.h>
+#include <SDL3/SDL_hints.h>
+#include <SDL3/SDL_properties.h>
+#include <SDL3/SDL_video.h>
 #include <xxhash.h>
 #include <dolphin/gx/GXAurora.h>
 #include <dolphin/gx/GXCommandList.h>
@@ -28,6 +31,9 @@
 #include <unordered_map>
 
 #include "../../../extern/aurora/lib/gx/fifo.hpp"
+
+// user32 SetWindowPos without pulling <windows.h> into this file (its macros clash with GX names).
+extern "C" __declspec(dllimport) int __stdcall SetWindowPos(void*, void*, int, int, int, int, unsigned);
 #include "../hw/gx_fifo.h"
 #include "../runtime.h"
 
@@ -82,13 +88,15 @@ void aur(u16 sub) {
 // ---------------------------------------------------------------------------------------
 // frames
 // ---------------------------------------------------------------------------------------
+u64 s_lastPollTb = 0;
+
 void pollEvents() {
+    s_lastPollTb = tbNow();
     const AuroraEvent* e = aurora_update();
     for (; e && e->type != AURORA_NONE; ++e) {
         if (e->type == AURORA_EXIT) {
             logf("gfx", "window closed");
-            aurora_shutdown();
-            exit(0);
+            quit(0);
         }
     }
 }
@@ -593,6 +601,11 @@ void onCommand(const u8* p, u32 len) {
     }
 }
 
+void sendToBack(void* hwnd) {
+    constexpr unsigned SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOACTIVATE = 0x10;
+    SetWindowPos(hwnd, reinterpret_cast<void*>(1) /* HWND_BOTTOM */, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+}
+
 void logCallback(AuroraLogLevel level, const char* module, const char* message, unsigned int len) {
     static const char* names[] = {"debug", "info", "warn", "error", "fatal"};
     static const bool debug = envFlag("R2_AURORA_DEBUG");
@@ -622,7 +635,20 @@ bool init(int argc, char** argv) {
     cfg.mem1Size = 0;
     cfg.mem2Size = 0;
     if (envFlag("R2_HEADLESS")) cfg.surface.type = AURORA_SURFACE_HEADLESS;
+    // R2_BACKGROUND: automated runs - the window opens behind everything without taking focus
+    // (it still renders, and PrintWindow can capture it).
+    const bool background = envFlag("R2_BACKGROUND");
+    if (background) {
+        SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
+        SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_RAISED, "0");
+    }
     const AuroraInfo info = aurora_initialize(argc, argv, &cfg);
+    if (background) {
+        if (SDL_Window* w = aurora_get_window()) {
+            if (void* hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(w), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr))
+                sendToBack(hwnd);
+        }
+    }
     static const char* backends[] = {"auto", "D3D11", "D3D12", "Metal", "Vulkan", "OpenGL", "OpenGL ES", "WebGPU", "null"};
     logf("gfx", "Aurora up: %s backend, window %ux%u", backends[info.backend], info.windowSize.width, info.windowSize.height);
     s_enabled = true;
@@ -634,11 +660,9 @@ bool init(int argc, char** argv) {
 void vblank() {
     if (!s_enabled) return;
     input::poll();
-    // Keep the window alive while the game is not presenting (loading screens).
-    if (!s_inFrame && tbNow() - s_lastFrameTb > kTbClock / 10) {
-        pollEvents();
-        s_lastFrameTb = tbNow();
-    }
+    // Keep the window responsive (and closable) while the game is not presenting: loading
+    // screens, or a frame that never ends. Polling only reads SDL events, so it is safe mid-frame.
+    if (tbNow() - s_lastPollTb > kTbClock / 10) pollEvents();
 }
 
 u64 frames() { return s_frames; }

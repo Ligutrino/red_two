@@ -50,7 +50,23 @@ void fatal(const char* fmt, ...) {
         printTraceRing(stderr, 40);
     }
     fflush(stderr);
-    ExitProcess(1);
+    quit(1);
+}
+
+// Ends the process at once. ExitProcess runs DLL teardown (Dawn/D3D12, SDL) while other host
+// threads may hold locks, which can leave a dead, unclosable window behind.
+void quit(int code) {
+    fflush(stdout);
+    fflush(stderr);
+    TerminateProcess(GetCurrentProcess(), UINT(code));
+}
+
+static LONG WINAPI onHostCrash(EXCEPTION_POINTERS* ep) {
+    fprintf(stderr, "\nFATAL: host exception %08lX at %p\n", ep->ExceptionRecord->ExceptionCode,
+            ep->ExceptionRecord->ExceptionAddress);
+    if (g_trace) printTraceRing(stderr, 40);
+    quit(3);
+    return EXCEPTION_EXECUTE_HANDLER;
 }
 
 bool envFlag(const char* name) {
@@ -237,6 +253,10 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--trace")) g_trace = true;
     }
     if (envFlag("R2_TRACE")) g_trace = true;
+    // A crash must end the process, not wait behind an error-reporting dialog.
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    SetUnhandledExceptionFilter(onHostCrash);
+    SetConsoleCtrlHandler([](DWORD) -> BOOL { quit(0); return TRUE; }, TRUE);  // Ctrl+C / console closed
     debugInit();
     if (const char* w = getenv("R2_WATCHDOG")) {
         const int secs = atoi(w) > 0 ? atoi(w) : 2;
