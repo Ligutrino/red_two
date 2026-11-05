@@ -89,7 +89,14 @@ size_t cmdLength(const u8* p, size_t avail) {
     const u8 op = p[0];
     if (op >= 0x80 && op < 0xC0) {
         if (avail < 3) return 0;
-        return 3 + size_t(be16(p + 1)) * vertexSize(op & 7);
+        const u32 vs = vertexSize(op & 7);
+        if (!vs && be16(p + 1)) {
+            static int warned = 0;
+            if (warned++ < 8)
+                logf("gx", "draw %02X with %u vertices of size 0: VCD %08X/%08X VAT %08X %08X %08X", op, be16(p + 1), s_vcdLo,
+                     s_vcdHi, s_vatA[op & 7], s_vatB[op & 7], s_vatC[op & 7]);
+        }
+        return 3 + size_t(be16(p + 1)) * vs;
     }
     switch (op) {
     case 0x00: case 0x48: return 1;
@@ -106,8 +113,17 @@ size_t cmdLength(const u8* p, size_t avail) {
 
 void runDisplayList(u32 addr, u32 size, int depth);
 
+struct Recent {  // last commands, for desync reports
+    u32 len = 0;
+    bool dl = false;
+    u8 bytes[12] = {};
+};
+Recent s_recent[48];
+u32 s_recentPos = 0;
+
 void execute(const u8* p, size_t len, int depth) {
     const u8 op = p[0];
+    bool known = true;
     if (op >= 0x80 && op < 0xC0) {
         s_stats.draws++;
         s_stats.vertices += be16(p + 1);
@@ -146,14 +162,31 @@ void execute(const u8* p, size_t len, int depth) {
             break;
         }
         default:
-            if (s_stats.unknown++ < 16) logf("gx", "unknown FIFO opcode %02X", op);
+            known = false;
+            if (s_stats.unknown++ < 16) {
+                logf("gx", "unknown FIFO opcode %02X (%s); last commands, oldest first:", op, depth ? "display list" : "FIFO");
+                for (u32 i = 0; i < 48; i++) {
+                    const Recent& r = s_recent[(s_recentPos + i) % 48];
+                    if (!r.len) continue;
+                    char hexb[64] = {};
+                    for (u32 k = 0; k < r.len && k < 12; k++) snprintf(hexb + 3 * k, 4, "%02X ", r.bytes[k]);
+                    logf("gx", "  %s len %5u: %s", r.dl ? "DL  " : "FIFO", r.len, hexb);
+                }
+            }
             break;
         }
     }
-    if (s_sink && depth == 0) s_sink(p, u32(len));
+    {
+        Recent& r = s_recent[s_recentPos++ % 48];
+        r.len = u32(len);
+        r.dl = depth != 0;
+        memcpy(r.bytes, p, len < 12 ? len : 12);
+    }
+    // The renderer gets every command, display list contents inline (not the CALL_DL).
+    if (s_sink && op != 0x40 && known) s_sink(p, u32(len));
 }
 
-// Commands in a display list run with the current CP state (the renderer gets the CALL_DL).
+// Commands in a display list run with the current CP state.
 void runDisplayList(u32 addr, u32 size, int depth) {
     const u8* base = physPtr(addr, size);
     if (!base) {
@@ -169,14 +202,46 @@ void runDisplayList(u32 addr, u32 size, int depth) {
     }
 }
 
-// Feed the bytes between the CP read and write pointers to the command splitter.
+// CP_CR bits
+constexpr u16 CR_READ = 1 << 0, CR_BP = 1 << 1, CR_OVFINT = 1 << 2, CR_UNFINT = 1 << 3, CR_LINK = 1 << 4,
+              CR_BPINT = 1 << 5;
+bool s_bpHit = false;  // CP_SR breakpoint: the GP stopped at the breakpoint
+
+// Bytes written but not yet read by the GP (it only lags behind a breakpoint).
+u32 cpDistance() {
+    const u32 size = s_cpEnd + 32 - s_cpBase;
+    if (!s_cpEnd || s_cpEnd <= s_cpBase) return 0;
+    return s_cpWp >= s_cpRp ? s_cpWp - s_cpRp : s_cpWp + size - s_cpRp;
+}
+// The watermark flags are live, as the hardware evaluates them: the SDK suspends the writing
+// thread on overflow and resumes it on underflow.
+bool cpOverflow() { return cpDistance() > s_cpHi; }
+bool cpUnderflow() { return cpDistance() < s_cpLo; }
+
+void cpUpdateIrq() {
+    const bool on = (s_bpHit && (s_cpCr & CR_BPINT)) || ((s_cpCr & CR_OVFINT) && cpOverflow()) ||
+                    ((s_cpCr & CR_UNFINT) && cpUnderflow());
+    piSetIrq(PI_CP, on);
+}
+
+// Feed the bytes between the CP read and write pointers to the command splitter. With the
+// breakpoint enabled the GP stops when its read pointer reaches it (the game keeps one trailing
+// its own write pointer and moves it from the breakpoint interrupt).
 void cpRun() {
-    if (!(s_cpCr & 1)) return;  // GP FIFO reading disabled
+    if (!(s_cpCr & CR_READ)) return;  // GP FIFO reading disabled
     if (!s_cpEnd || s_cpEnd <= s_cpBase) return;
     int guard = 0;
     while (s_cpRp != s_cpWp && guard++ < 1000000) {
+        if ((s_cpCr & CR_BP) && s_cpRp == s_cpBp) {
+            if (!s_bpHit) {
+                s_bpHit = true;
+                cpUpdateIrq();
+            }
+            break;
+        }
         // contiguous run up to the write pointer or the end of the buffer
-        const u32 stop = s_cpWp > s_cpRp ? s_cpWp : s_cpEnd + 32;
+        u32 stop = s_cpWp > s_cpRp ? s_cpWp : s_cpEnd + 32;
+        if ((s_cpCr & CR_BP) && s_cpBp > s_cpRp && s_cpBp < stop) stop = s_cpBp;
         const u32 n = stop - s_cpRp;
         const u8* src = physPtr(s_cpRp, n);
         if (!src) {
@@ -196,6 +261,7 @@ void cpRun() {
         pos += len;
     }
     s_cmd.erase(s_cmd.begin(), s_cmd.begin() + ptrdiff_t(pos));
+    cpUpdateIrq();
 }
 
 u32 regPair(u32 lo, u32 hi) { return (u32(s_cpReg[hi / 2] & 0x3FF) << 16) | s_cpReg[lo / 2]; }
@@ -216,7 +282,8 @@ void burst() {
     const u32 wp = s_piWp & 0x03FFFFE0;
     u8* dst = physPtr(wp, 32);
     if (!dst || !s_piEnd) {
-        if (s_stats.unknown++ < 4) logf("gx", "gather pipe burst with no CPU FIFO (wp %08X)", s_piWp);
+        static int n = 0;
+        if (n++ < 8) logf("gx", "gather pipe burst lost: no CPU FIFO (base %08X end %08X wp %08X)", s_piBase, s_piEnd, s_piWp);
         return;
     }
     memcpy(dst, s_gp, 32);
@@ -227,9 +294,11 @@ void burst() {
         wrap ^= 0x20000000u;
     }
     s_piWp = nwp | wrap;
-    if (s_cpCr & 0x10) {  // linked: the GP sees what the CPU writes
-        s_cpWp = nwp;
+    if (s_cpCr & CR_LINK) {  // linked: each burst also advances the GP's write pointer
+        s_cpWp += 32;
+        if (s_cpWp >= s_cpEnd + 32) s_cpWp = s_cpBase;
         cpRun();
+        cpUpdateIrq();  // watermarks (cpRun returns early while reading is off)
     }
 }
 }  // namespace
@@ -244,8 +313,20 @@ void gxFifoWrite(u32 v, int size) {
     }
 }
 
+void gxFlushGatherPipe() {
+    if (!s_gpLen) return;
+    memset(s_gp + s_gpLen, 0, 32 - s_gpLen);  // NOPs
+    s_gpLen = 0;
+    burst();
+}
+
 void gxResetGatherPipe() {
-    if (s_gpLen && s_log) logf("gx", "gather pipe reset with %u bytes pending", s_gpLen);
+    static int n = 0;
+    if (s_gpLen && n++ < 16) {
+        char b[100] = {};
+        for (u32 i = 0; i < s_gpLen && i < 32; i++) snprintf(b + 3 * i, 4, "%02X ", s_gp[i]);
+        logf("gx", "gather pipe reset with %u bytes pending: %s", s_gpLen, b);
+    }
     s_gpLen = 0;
 }
 
@@ -258,11 +339,20 @@ u32 gxPiRead(u32 off) {
     default: return 0;
     }
 }
+bool fifoLog() {
+    static const bool on = envFlag("R2_FIFO_LOG");
+    return on;
+}
+
 void gxPiWrite(u32 off, u32 v) {
+    if (fifoLog()) logf("fifo", "PI %02X = %08X (gp pending %u)", off, v, s_gpLen);
     switch (off) {
     case 0x0C: s_piBase = v & 0x03FFFFE0; break;
     case 0x10: s_piEnd = v & 0x03FFFFE0; break;
     case 0x14: s_piWp = v & 0x23FFFFE0; break;
+    case 0x18:  // FIFO reset: the write pointer goes back to the base
+        if (v & 1) s_piWp = s_piBase;
+        break;
     }
 }
 
@@ -270,9 +360,16 @@ void gxPiWrite(u32 off, u32 v) {
 u16 gxCpRead(u32 off) {
     off &= 0x7E;
     switch (off) {
-    case 0x00: return 0x0C;  // GP idle: read idle + command idle, no overflow
+    case 0x00: {  // status: overflow, underflow, read idle, command idle, breakpoint
+        const bool idle = s_cpRp == s_cpWp || s_bpHit || !(s_cpCr & CR_READ);
+        return u16((cpOverflow() ? 1 : 0) | (cpUnderflow() ? 2 : 0) | (idle ? 0x0C : 0) | (s_bpHit ? 0x10 : 0));
+    }
     case 0x02: return s_cpCr;
-    case 0x30: case 0x32: return 0;  // read-write distance: everything consumed
+    case 0x30: case 0x32: {  // read-write distance: what is still unread (behind a breakpoint)
+        const u32 size = s_cpEnd + 32 - s_cpBase;
+        const u32 d = s_cpWp >= s_cpRp ? s_cpWp - s_cpRp : s_cpWp + size - s_cpRp;
+        return off == 0x30 ? u16(d) : u16(d >> 16);
+    }
     case 0x34: return u16(s_cpWp);
     case 0x36: return u16(s_cpWp >> 16);
     case 0x38: return u16(s_cpRp);
@@ -282,20 +379,26 @@ u16 gxCpRead(u32 off) {
 }
 void gxCpWrite(u32 off, u16 v) {
     off &= 0x7E;
+    if (fifoLog() && off >= 0x02) logf("fifo", "CP %02X = %04X (rp %08X wp %08X pi wp %08X)", off, v, s_cpRp, s_cpWp, s_piWp);
     s_cpReg[off / 2] = v;
     switch (off) {
     case 0x02: {
         const u16 old = s_cpCr;
         s_cpCr = v;
         if (s_log && (old ^ v)) logf("gx", "CP_CR %04X (read %d, link %d)", v, v & 1, (v >> 4) & 1);
-        if (v & 0x10) s_cpWp = s_piWp & 0x03FFFFFF;
+        if (!(v & CR_BP)) s_bpHit = false;  // disabling the breakpoint releases the GP
+        cpUpdateIrq();
         cpRun();
         break;
     }
+    case 0x04:  // CP_CLEAR: the watermark flags are live; re-evaluate
+        cpUpdateIrq();
+        break;
     case 0x20: case 0x22: s_cpBase = regPair(0x20, 0x22) & 0x03FFFFE0; break;
     case 0x24: case 0x26: s_cpEnd = regPair(0x24, 0x26) & 0x03FFFFE0; break;
     case 0x28: case 0x2A: s_cpHi = regPair(0x28, 0x2A); break;
     case 0x2C: case 0x2E: s_cpLo = regPair(0x2C, 0x2E); break;
+    case 0x30: case 0x32: break;  // read-write distance: derived from the pointers
     case 0x34: case 0x36:
         s_cpWp = regPair(0x34, 0x36) & 0x03FFFFE0;
         if (off == 0x36) cpRun();
@@ -304,7 +407,14 @@ void gxCpWrite(u32 off, u16 v) {
         s_cpRp = regPair(0x38, 0x3A) & 0x03FFFFE0;
         s_cmd.clear();
         break;
-    case 0x3C: case 0x3E: s_cpBp = regPair(0x3C, 0x3E); break;
+    case 0x3C: case 0x3E:
+        s_cpBp = regPair(0x3C, 0x3E) & 0x03FFFFE0;
+        if (s_bpHit && s_cpRp != s_cpBp) {  // moved: the GP may go on
+            s_bpHit = false;
+            cpUpdateIrq();
+        }
+        if (off == 0x3E) cpRun();
+        break;
     }
 }
 

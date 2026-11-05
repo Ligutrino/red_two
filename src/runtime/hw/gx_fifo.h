@@ -27,6 +27,7 @@ void gxCpWrite(u32 off, u16 v);
 u32 gxPiRead(u32 off);
 void gxPiWrite(u32 off, u32 v);
 void gxResetGatherPipe();  // WPAR write
+void gxFlushGatherPipe();  // PPCSync: drain a partly filled gather buffer
 
 // PE events raised by the stream
 void peToken(u16 token, bool irq);

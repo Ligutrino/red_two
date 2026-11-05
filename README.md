@@ -6,8 +6,9 @@ The game's own PowerPC code is translated to C++ ahead of time and runs on a nat
 that stands in for the console's hardware. **No game data is included**: you need your own
 disc image of the USA release (`GSWE64`, revision 0).
 
-> Status: early development. The recompiler translates the whole game; the runtime is being
-> brought up (boot, then rendering, audio and input). It is not playable yet.
+> Status: early development. The recompiler translates the whole game, and the runtime boots it
+> through the legal screen and the memory-card menu with graphics (Aurora) and controls. It stops
+> after the menu, has no sound yet, and is not playable yet.
 
 ## Building (Windows)
 

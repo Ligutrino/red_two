@@ -48,7 +48,7 @@ void piUpdate() {
 
 u32 piRead(u32 off) {
     switch (off) {
-    case 0x00: return pi_intsr;
+    case 0x00: return pi_intsr | 0x00010000;  // bit 16: reset switch released
     case 0x04: return pi_intmr;
     case 0x0C: case 0x10: case 0x14: return gxPiRead(off);
     case 0x2C: return 0x246500B1;  // Flipper revision
@@ -59,7 +59,7 @@ void piWrite(u32 off, u32 v) {
     switch (off) {
     case 0x00: pi_intsr &= ~(v & (PI_ERROR | PI_RSW)); piUpdate(); break;
     case 0x04: pi_intmr = v; piUpdate(); break;
-    case 0x0C: case 0x10: case 0x14: gxPiWrite(off, v); break;
+    case 0x0C: case 0x10: case 0x14: case 0x18: gxPiWrite(off, v); break;
     case 0x24:
         logf("pi", "reset code write %08X (the game asked for a reset)", v);
         break;

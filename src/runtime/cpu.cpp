@@ -62,9 +62,11 @@ void dispatch(Ctx& c, u32 addr) {
         f(c);
         return;
     }
-    fatal("indirect call to %08X, which is not a known function entry (from %s, lr=%08X). "
-          "Add \"entry %08x\" to config/GSWE64/hooks.txt if it is code.",
-          addr, describeAddr(c.curFn).c_str(), c.lr, addr);
+    // No recompiled function: code built at runtime (the game's heap modules) or an entry the
+    // analysis missed. Interpret it; calls out of it reach recompiled code again.
+    if (!isMem1(addr) && !isVm(addr))
+        fatal("indirect call to %08X, outside memory (from %s, lr=%08X)", addr, describeAddr(c.curFn).c_str(), c.lr);
+    interpret(c, addr);
 }
 
 static u32 s_ring[64];
@@ -223,6 +225,8 @@ void dcbzl(Ctx&, u32 a) {
 void dcbi(Ctx&, u32) {}
 void icbi(Ctx&, u32) {}
 
+// System call (PPCSync): nothing to do. Draining a partly filled gather buffer here was tried
+// for the post-menu stall and did not help; the SDK pads with NOPs (GXFlush) before syncing.
 void sc(Ctx&, u32) {}
 
 void trap(Ctx& c, u32 pc) { logf("cpu", "trap at %08X (lr=%08X)", pc, c.lr); }

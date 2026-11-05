@@ -25,13 +25,18 @@ if (-not $ClangCl) {
 }
 if (-not $ClangCl) { throw "clang-cl not found (install LLVM or pass -ClangCl)" }
 $lld = Join-Path (Split-Path $ClangCl) "lld-link.exe"
-foreach ($p in @("$env:ProgramFiles\CMake\bin", "C:\msys64\ucrt64\bin")) {
-    if (Test-Path $p) { $env:PATH = "$env:PATH;$p" }
-}
+if (Test-Path "$env:ProgramFiles\CMake\bin") { $env:PATH = "$env:ProgramFiles\CMake\bin;$env:PATH" }
+$ninja = (Get-Command ninja -ErrorAction SilentlyContinue).Source
+if (-not $ninja -and (Test-Path "C:\msys64\ucrt64\bin\ninja.exe")) { $ninja = "C:\msys64\ucrt64\bin\ninja.exe" }
+if (-not $ninja) { throw "ninja not found" }
 
 if ($Configure -or -not (Test-Path "$build\build.ninja")) {
+    # MSYS2/MinGW libraries (fmt, zstd, ...) are not usable from an MSVC-ABI build: keep CMake
+    # from finding them through PATH or pkg-config so Aurora fetches its own.
+    $ignore = "C:/msys64/ucrt64;C:/msys64/mingw64;C:/msys64/clang64;C:/msys64/usr"
     $args = @("-S", $root, "-B", $build, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=$Config",
-        "-DCMAKE_C_COMPILER=$ClangCl", "-DCMAKE_CXX_COMPILER=$ClangCl")
+        "-DCMAKE_C_COMPILER=$ClangCl", "-DCMAKE_CXX_COMPILER=$ClangCl", "-DCMAKE_MAKE_PROGRAM=$ninja",
+        "-DCMAKE_IGNORE_PREFIX_PATH=$ignore", "-DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=ON")
     if (Test-Path $lld) { $args += "-DCMAKE_LINKER=$lld" }
     cmake @args
     if ($LASTEXITCODE) { throw "configure failed" }

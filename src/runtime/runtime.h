@@ -36,6 +36,7 @@ void vmSetSdr1(u32 v);
 GuestFn lookupFn(u32 addr);
 GuestFn lookupOrig(u32 addr);  // translated body of a hooked function
 void tableInit();
+void interpret(Ctx& c, u32 addr);  // interp.cpp: code with no recompiled function
 
 // --- time and events ------------------------------------------------------------------
 constexpr u64 kBusClock = 162000000, kCpuClock = 486000000, kTbClock = kBusClock / 4;
@@ -96,5 +97,10 @@ bool discRead(u64 off, void* dst, u32 len);
 std::string discFileAt(u64 off);  // "path+0xoffset" of the disc file containing off (debugging)
 void hwInit();
 void viFrameHook();  // called once per guest frame (XFB handoff)
+
+namespace input {
+void init();  // after the window exists
+void poll();  // once per frame: Aurora pads/keyboard -> SI controller state
+}  // namespace input
 
 }  // namespace rt

@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "gfx/gx_bridge.h"
 #include "hw/gx_fifo.h"
 #include "runtime.h"
 #include "table.h"
@@ -167,11 +168,14 @@ void dumpThreads() {
 static u32 s_frames = 0;
 void viFrameHook() {
     s_frames++;
+    gfx::vblank();
     if (envFlag("R2_GX_LOG") && s_frames % 60 == 0) {
         const GxStats& g = gxStats();
-        logf("gx", "frame %u: fifo %llu bytes, %llu draws, %llu verts, %llu BP, %llu XF, %llu CP, %llu DL", s_frames,
+        logf("gx", "vblank %u, presented %llu: fifo %llu bytes, %llu draws, %llu verts, %llu BP, %llu XF, %llu CP, %llu DL", s_frames,
+             (unsigned long long)gfx::frames(),
              (unsigned long long)g.bytes, (unsigned long long)g.draws, (unsigned long long)g.vertices,
              (unsigned long long)g.bp, (unsigned long long)g.xf, (unsigned long long)g.cp, (unsigned long long)g.dl);
+        logf("gx", "%s", gfx::stats().c_str());
     }
 }
 
@@ -255,6 +259,7 @@ int main(int argc, char** argv) {
     threadsInit(boot);
     Ctx& c = *boot;
     const u32 entry = bootDisc();
+    if (!envFlag("R2_NO_GFX")) gfx::init(argc, argv);
     hwInit();
     c.msr = 0x2032;  // FP, IR, DR, RI; interrupts off until the OS enables them
     logf("boot", "%u recompiled functions; jumping to %s", g_funcCount, describeAddr(entry).c_str());
