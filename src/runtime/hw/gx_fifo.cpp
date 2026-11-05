@@ -1,0 +1,311 @@
+// GX FIFOs: write-gather pipe -> PI FIFO in memory -> command processor.
+//
+// As on the console, everything the CPU writes to the gather pipe (0xCC008000) lands in the
+// CPU FIFO in main memory at the PI write pointer. The command processor reads its own FIFO
+// (CP base/end/read/write pointers) when reading is enabled; while the two are linked (CP_CR
+// GP link, the normal immediate mode) its write pointer follows the PI's. Display lists are
+// recorded by pointing the PI FIFO at a buffer with the link off, and executed later through
+// CALL_DL. The GPU is infinitely fast here: commands run as soon as they are complete.
+#include "gx_fifo.h"
+
+#include <cstring>
+#include <vector>
+
+#include "../runtime.h"
+
+namespace rt {
+namespace {
+
+GxStats s_stats;
+GxSink s_sink = nullptr;
+bool s_log = false;
+
+// --- PI (CPU side) FIFO ---
+u32 s_piBase = 0, s_piEnd = 0, s_piWp = 0;  // physical; wp bit 29 = wrap flag
+// --- CP (GPU side) FIFO ---
+u16 s_cpReg[0x40] = {};  // raw 16-bit registers 0x00..0x7E
+u32 s_cpBase = 0, s_cpEnd = 0, s_cpWp = 0, s_cpRp = 0, s_cpHi = 0, s_cpLo = 0, s_cpBp = 0;
+u16 s_cpCr = 0;
+std::vector<u8> s_cmd;  // bytes of an incomplete command read from the CP FIFO
+
+u32 s_vcdLo = 0, s_vcdHi = 0;
+u32 s_vatA[8] = {}, s_vatB[8] = {}, s_vatC[8] = {};
+
+u32 compSize(u32 fmt) {
+    switch (fmt) {
+    case 0: case 1: return 1;
+    case 2: case 3: return 2;
+    case 4: return 4;
+    default: return 0;
+    }
+}
+u32 colSize(u32 fmt) {
+    switch (fmt) {
+    case 0: case 3: return 2;
+    case 1: case 4: return 3;
+    case 2: case 5: return 4;
+    default: return 0;
+    }
+}
+u32 idxSize(u32 type) { return type == 2 ? 1 : type == 3 ? 2 : 0; }
+
+u32 vertexSize(u32 fmt) {
+    const u32 lo = s_vcdLo, hi = s_vcdHi, A = s_vatA[fmt], B = s_vatB[fmt], C = s_vatC[fmt];
+    u32 size = 0;
+    for (int i = 0; i < 9; i++)
+        if (lo & (1u << i)) size += 1;  // PNMTXIDX, TEX0..7MTXIDX
+    const u32 pos = (lo >> 9) & 3;
+    if (pos == 1) size += compSize((A >> 1) & 7) * ((A & 1) ? 3 : 2);
+    else size += idxSize(pos);
+    const u32 nrm = (lo >> 11) & 3;
+    const bool nbt = (A >> 9) & 1;
+    if (nrm == 1) size += compSize((A >> 10) & 7) * (nbt ? 9 : 3);
+    else if (nrm) size += idxSize(nrm) * ((nbt && (A >> 31)) ? 3 : 1);
+    const u32 c0 = (lo >> 13) & 3, c1 = (lo >> 15) & 3;
+    if (c0 == 1) size += colSize((A >> 14) & 7);
+    else size += idxSize(c0);
+    if (c1 == 1) size += colSize((A >> 18) & 7);
+    else size += idxSize(c1);
+    struct Tex {
+        u32 cnt, fmt;
+    } tex[8] = {
+        {(A >> 21) & 1, (A >> 22) & 7}, {B & 1, (B >> 1) & 7},         {(B >> 9) & 1, (B >> 10) & 7},
+        {(B >> 18) & 1, (B >> 19) & 7}, {(B >> 27) & 1, (B >> 28) & 7}, {(C >> 5) & 1, (C >> 6) & 7},
+        {(C >> 14) & 1, (C >> 15) & 7}, {(C >> 23) & 1, (C >> 24) & 7},
+    };
+    for (int i = 0; i < 8; i++) {
+        const u32 t = (hi >> (2 * i)) & 3;
+        if (t == 1) size += compSize(tex[i].fmt) * (tex[i].cnt ? 2 : 1);
+        else size += idxSize(t);
+    }
+    return size;
+}
+
+inline u32 be32(const u8* p) { return (u32(p[0]) << 24) | (u32(p[1]) << 16) | (u32(p[2]) << 8) | p[3]; }
+inline u32 be16(const u8* p) { return (u32(p[0]) << 8) | p[1]; }
+
+// Length of the command at p, or 0 if more bytes are needed.
+size_t cmdLength(const u8* p, size_t avail) {
+    const u8 op = p[0];
+    if (op >= 0x80 && op < 0xC0) {
+        if (avail < 3) return 0;
+        return 3 + size_t(be16(p + 1)) * vertexSize(op & 7);
+    }
+    switch (op) {
+    case 0x00: case 0x48: return 1;
+    case 0x08: return 6;
+    case 0x10:
+        if (avail < 5) return 0;
+        return 5 + 4 * size_t((be32(p + 1) >> 16) + 1);
+    case 0x20: case 0x28: case 0x30: case 0x38: return 5;
+    case 0x40: return 9;
+    case 0x61: return 5;
+    default: return 1;  // unknown: skip a byte and resynchronize
+    }
+}
+
+void runDisplayList(u32 addr, u32 size, int depth);
+
+void execute(const u8* p, size_t len, int depth) {
+    const u8 op = p[0];
+    if (op >= 0x80 && op < 0xC0) {
+        s_stats.draws++;
+        s_stats.vertices += be16(p + 1);
+    } else {
+        switch (op) {
+        case 0x00: case 0x48: break;
+        case 0x08: {
+            s_stats.cp++;
+            const u8 reg = p[1];
+            const u32 v = be32(p + 2);
+            if (reg == 0x50) s_vcdLo = v;
+            else if (reg == 0x60) s_vcdHi = v;
+            else if ((reg & 0xF8) == 0x70) s_vatA[reg & 7] = v;
+            else if ((reg & 0xF8) == 0x80) s_vatB[reg & 7] = v;
+            else if ((reg & 0xF8) == 0x90) s_vatC[reg & 7] = v;
+            break;
+        }
+        case 0x10: s_stats.xf++; break;
+        case 0x20: case 0x28: case 0x30: case 0x38: s_stats.xf++; break;
+        case 0x40: {
+            s_stats.dl++;
+            const u32 a = be32(p + 1), n = be32(p + 5);
+            if (s_log) logf("gx", "call display list %08X size %X", a, n);
+            if (depth == 0) runDisplayList(a, n, depth + 1);
+            break;
+        }
+        case 0x61: {
+            s_stats.bp++;
+            const u32 v = be32(p + 1);
+            const u8 reg = u8(v >> 24);
+            if (s_log && (reg == 0x45 || reg == 0x47 || reg == 0x48 || reg == 0x52))
+                logf("gx", "BP %02X = %06X%s", reg, v & 0xFFFFFF, depth ? " (display list)" : "");
+            if (reg == 0x45 && (v & 2)) peFinish();
+            else if (reg == 0x47) peToken(u16(v), true);
+            else if (reg == 0x48) peToken(u16(v), false);
+            break;
+        }
+        default:
+            if (s_stats.unknown++ < 16) logf("gx", "unknown FIFO opcode %02X", op);
+            break;
+        }
+    }
+    if (s_sink && depth == 0) s_sink(p, u32(len));
+}
+
+// Commands in a display list run with the current CP state (the renderer gets the CALL_DL).
+void runDisplayList(u32 addr, u32 size, int depth) {
+    const u8* base = physPtr(addr, size);
+    if (!base) {
+        logf("gx", "display list outside memory: %08X size %X", addr, size);
+        return;
+    }
+    size_t pos = 0;
+    while (pos < size) {
+        const size_t len = cmdLength(base + pos, size - pos);
+        if (!len || pos + len > size) break;
+        execute(base + pos, len, depth);
+        pos += len;
+    }
+}
+
+// Feed the bytes between the CP read and write pointers to the command splitter.
+void cpRun() {
+    if (!(s_cpCr & 1)) return;  // GP FIFO reading disabled
+    if (!s_cpEnd || s_cpEnd <= s_cpBase) return;
+    int guard = 0;
+    while (s_cpRp != s_cpWp && guard++ < 1000000) {
+        // contiguous run up to the write pointer or the end of the buffer
+        const u32 stop = s_cpWp > s_cpRp ? s_cpWp : s_cpEnd + 32;
+        const u32 n = stop - s_cpRp;
+        const u8* src = physPtr(s_cpRp, n);
+        if (!src) {
+            logf("gx", "CP FIFO outside memory: rp %08X wp %08X", s_cpRp, s_cpWp);
+            s_cpRp = s_cpWp;
+            break;
+        }
+        s_cmd.insert(s_cmd.end(), src, src + n);
+        s_cpRp += n;
+        if (s_cpRp >= s_cpEnd + 32) s_cpRp = s_cpBase;
+    }
+    size_t pos = 0;
+    while (pos < s_cmd.size()) {
+        const size_t len = cmdLength(&s_cmd[pos], s_cmd.size() - pos);
+        if (!len || pos + len > s_cmd.size()) break;
+        execute(&s_cmd[pos], len, 0);
+        pos += len;
+    }
+    s_cmd.erase(s_cmd.begin(), s_cmd.begin() + ptrdiff_t(pos));
+}
+
+u32 regPair(u32 lo, u32 hi) { return (u32(s_cpReg[hi / 2] & 0x3FF) << 16) | s_cpReg[lo / 2]; }
+
+}  // namespace
+
+GxStats& gxStats() { return s_stats; }
+void gxSetSink(GxSink sink) { s_sink = sink; }
+void gxInit() { s_log = envFlag("R2_GX_LOG"); }
+
+// --- gather pipe ------------------------------------------------------------------------
+// The CPU's write-gather buffer: memory sees 32-byte bursts (the SDK pads with NOPs to flush).
+namespace {
+u8 s_gp[64];
+u32 s_gpLen = 0;
+
+void burst() {
+    const u32 wp = s_piWp & 0x03FFFFE0;
+    u8* dst = physPtr(wp, 32);
+    if (!dst || !s_piEnd) {
+        if (s_stats.unknown++ < 4) logf("gx", "gather pipe burst with no CPU FIFO (wp %08X)", s_piWp);
+        return;
+    }
+    memcpy(dst, s_gp, 32);
+    u32 nwp = wp + 32;
+    u32 wrap = s_piWp & 0x20000000u;
+    if (nwp >= s_piEnd + 32) {  // past the end of the buffer: wrap
+        nwp = s_piBase;
+        wrap ^= 0x20000000u;
+    }
+    s_piWp = nwp | wrap;
+    if (s_cpCr & 0x10) {  // linked: the GP sees what the CPU writes
+        s_cpWp = nwp;
+        cpRun();
+    }
+}
+}  // namespace
+
+void gxFifoWrite(u32 v, int size) {
+    s_stats.bytes += u32(size);
+    for (int i = 0; i < size; i++) s_gp[s_gpLen++] = u8(v >> (8 * (size - 1 - i)));
+    if (s_gpLen >= 32) {
+        burst();
+        s_gpLen -= 32;
+        memmove(s_gp, s_gp + 32, s_gpLen);
+    }
+}
+
+void gxResetGatherPipe() {
+    if (s_gpLen && s_log) logf("gx", "gather pipe reset with %u bytes pending", s_gpLen);
+    s_gpLen = 0;
+}
+
+// --- PI FIFO registers (0xCC00300C..0x14) ---------------------------------------------------
+u32 gxPiRead(u32 off) {
+    switch (off) {
+    case 0x0C: return s_piBase;
+    case 0x10: return s_piEnd;
+    case 0x14: return s_piWp;
+    default: return 0;
+    }
+}
+void gxPiWrite(u32 off, u32 v) {
+    switch (off) {
+    case 0x0C: s_piBase = v & 0x03FFFFE0; break;
+    case 0x10: s_piEnd = v & 0x03FFFFE0; break;
+    case 0x14: s_piWp = v & 0x23FFFFE0; break;
+    }
+}
+
+// --- CP registers (0xCC000000) ------------------------------------------------------------
+u16 gxCpRead(u32 off) {
+    off &= 0x7E;
+    switch (off) {
+    case 0x00: return 0x0C;  // GP idle: read idle + command idle, no overflow
+    case 0x02: return s_cpCr;
+    case 0x30: case 0x32: return 0;  // read-write distance: everything consumed
+    case 0x34: return u16(s_cpWp);
+    case 0x36: return u16(s_cpWp >> 16);
+    case 0x38: return u16(s_cpRp);
+    case 0x3A: return u16(s_cpRp >> 16);
+    default: return s_cpReg[off / 2];
+    }
+}
+void gxCpWrite(u32 off, u16 v) {
+    off &= 0x7E;
+    s_cpReg[off / 2] = v;
+    switch (off) {
+    case 0x02: {
+        const u16 old = s_cpCr;
+        s_cpCr = v;
+        if (s_log && (old ^ v)) logf("gx", "CP_CR %04X (read %d, link %d)", v, v & 1, (v >> 4) & 1);
+        if (v & 0x10) s_cpWp = s_piWp & 0x03FFFFFF;
+        cpRun();
+        break;
+    }
+    case 0x20: case 0x22: s_cpBase = regPair(0x20, 0x22) & 0x03FFFFE0; break;
+    case 0x24: case 0x26: s_cpEnd = regPair(0x24, 0x26) & 0x03FFFFE0; break;
+    case 0x28: case 0x2A: s_cpHi = regPair(0x28, 0x2A); break;
+    case 0x2C: case 0x2E: s_cpLo = regPair(0x2C, 0x2E); break;
+    case 0x34: case 0x36:
+        s_cpWp = regPair(0x34, 0x36) & 0x03FFFFE0;
+        if (off == 0x36) cpRun();
+        break;
+    case 0x38: case 0x3A:
+        s_cpRp = regPair(0x38, 0x3A) & 0x03FFFFE0;
+        s_cmd.clear();
+        break;
+    case 0x3C: case 0x3E: s_cpBp = regPair(0x3C, 0x3E); break;
+    }
+}
+
+}  // namespace rt

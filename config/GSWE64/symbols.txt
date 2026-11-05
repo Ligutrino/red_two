@@ -1,0 +1,25 @@
+# Function names for GSWE64 (Star Wars: Rogue Leader, USA rev 0), identified by analysis.
+# <address> <name>
+80003100 __start
+80029c18 OSSetCurrentContext
+80029c74 OSGetCurrentContext
+80029c80 OSSaveContext
+80029d00 OSLoadContext
+80029dd8 OSGetStackPointer
+80029de0 OSClearContext
+80029e04 OSInitContext
+80029ec0 OSDumpContext
+8002bbf4 OSDisableInterrupts
+8002bc08 OSEnableInterrupts
+8002bc1c OSRestoreInterrupts
+80027BD8 PPCHalt                 # sync; nop; li r3,0; nop; b . (the end of every fatal path)
+8002A234 OSReport                # printf-like; saves f1-f8 when cr1[6] is set (varargs)
+80028288 OSDefaultExceptionHandler  # in the OS exception table for unhandled exceptions
+800098EC VMInstallDsiVector      # patches 0x80000300 with the stub at 0x800098A8, pager -> 0x80095D00
+80009AE4 VMInstallIsiVector      # same for 0x80000400, stub at 0x80009AA0, pager -> 0x80095D04
+800097AC VMDsiEntry              # builds a context frame on the stack, calls pager(2, frame), rfi
+800099A4 VMIsiEntry              # same for ISI: pager(3, frame)
+80008554 VMDsiPager              # passed to VMInstallDsiVector
+80008720 VMIsiPager              # passed to VMInstallIsiVector
+80008BF0 VMInit                  # SDR1, segment 7, page table, handlers
+80006A40 main

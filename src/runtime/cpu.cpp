@@ -1,0 +1,354 @@
+// CPU helpers called by recompiled code: SPRs, cache ops, paired-single quantization,
+// estimates, indirect dispatch.
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <vector>
+
+#include "runtime.h"
+#include "table.h"
+#include "hw/gx_fifo.h"
+#include <string>
+
+namespace rt {
+
+bool g_trace = false;
+volatile u32 g_irqPending = 0;
+
+// ---------------------------------------------------------------------------------------
+// Function lookup: dense tables over each cluster of code addresses.
+// ---------------------------------------------------------------------------------------
+namespace {
+struct Region {
+    u32 base = 0, end = 0;
+    std::vector<GuestFn> fns;
+};
+std::vector<Region> s_regions;
+std::vector<std::pair<u32, GuestFn>> s_orig;
+}  // namespace
+
+void tableInit() {
+    std::vector<FuncEntry> all(g_funcTable, g_funcTable + g_funcCount);
+    std::sort(all.begin(), all.end(), [](auto& a, auto& b) { return a.addr < b.addr; });
+    for (size_t i = 0; i < all.size();) {
+        size_t j = i + 1;
+        while (j < all.size() && all[j].addr - all[j - 1].addr < 0x100000) j++;
+        Region r;
+        r.base = all[i].addr;
+        r.end = all[j - 1].addr + 4;
+        r.fns.assign((r.end - r.base) / 4, nullptr);
+        for (size_t k = i; k < j; k++) r.fns[(all[k].addr - r.base) / 4] = all[k].fn;
+        s_regions.push_back(std::move(r));
+        i = j;
+    }
+    for (const FuncEntry* e = g_origTable; e->fn; e++) s_orig.push_back({e->addr, e->fn});
+}
+
+GuestFn lookupFn(u32 addr) {
+    for (auto& r : s_regions)
+        if (addr >= r.base && addr < r.end && !(addr & 3)) return r.fns[(addr - r.base) / 4];
+    return nullptr;
+}
+
+GuestFn lookupOrig(u32 addr) {
+    for (auto& [a, f] : s_orig)
+        if (a == addr) return f;
+    return nullptr;
+}
+
+void dispatch(Ctx& c, u32 addr) {
+    if (GuestFn f = lookupFn(addr)) [[likely]] {
+        f(c);
+        return;
+    }
+    fatal("indirect call to %08X, which is not a known function entry (from %s, lr=%08X). "
+          "Add \"entry %08x\" to config/GSWE64/hooks.txt if it is code.",
+          addr, describeAddr(c.curFn).c_str(), c.lr, addr);
+}
+
+static u32 s_ring[64];
+static volatile u32 s_ringPos;
+static std::vector<u32> s_logFns;  // R2_LOGFN=addr,addr,...
+static u32 s_watchLo = 0, s_watchHi = 0;
+bool g_watch = false;
+
+void debugInit() {
+    if (const char* v = getenv("R2_LOGFN")) {
+        for (const char* p = v; *p;) {
+            s_logFns.push_back(u32(strtoul(p, const_cast<char**>(&p), 16)));
+            while (*p == ',' || *p == ' ') p++;
+        }
+        if (!s_logFns.empty()) g_trace = true;
+    }
+    if (const char* v = getenv("R2_WATCH")) {
+        char* end = nullptr;
+        s_watchLo = u32(strtoul(v, &end, 16));
+        u32 len = 4;
+        if (end && *end == ',') len = u32(strtoul(end + 1, nullptr, 16));
+        s_watchHi = s_watchLo + len;
+        g_watch = true;
+    }
+}
+
+void watchStore(u32 a, u32 v, int size) {
+    if (a + u32(size) <= s_watchLo || a >= s_watchHi) return;
+    const Ctx& c = curCtx();
+    logf("watch", "store%d %08X = %08X in %s (lr %08X)", size * 8, a, v, describeAddr(c.curFn).c_str(), c.lr);
+}
+
+void traceEnter(Ctx& c, u32 addr) {
+    c.curFn = addr;
+    s_ring[s_ringPos & 63] = addr;
+    s_ringPos = s_ringPos + 1;
+    if (!s_logFns.empty()) [[unlikely]] {
+        for (u32 f : s_logFns)
+            if (f == addr) {
+                logf("call", "%s(r3=%08X r4=%08X r5=%08X r6=%08X r7=%08X) lr=%08X", describeAddr(addr).c_str(), c.r[3], c.r[4],
+                     c.r[5], c.r[6], c.r[7], c.lr);
+                break;
+            }
+    }
+}
+void printTraceRing(FILE* f, int n) {
+    const u32 pos = s_ringPos;
+    for (int i = n; i >= 1; i--) {
+        const u32 a = s_ring[(pos - u32(i)) & 63];
+        if (!a) continue;
+        const char* nm = symName(a);
+        fprintf(f, "  %08X %s\n", a, nm ? nm : "");
+    }
+}
+std::string traceRing(int n) {
+    std::string out;
+    const u32 pos = s_ringPos;
+    for (int i = n; i >= 1; i--) {
+        const u32 a = s_ring[(pos - u32(i)) & 63];
+        if (!a) continue;
+        out += describeAddr(a);
+        out += i > 1 ? " > " : "";
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------------------
+// Special purpose registers
+// ---------------------------------------------------------------------------------------
+namespace {
+u32 s_spr[1024];
+u64 s_tbOffset = 0;  // guest TB = host TB + offset (TBL/TBU writes)
+
+void lockedCacheDma() {
+    const u32 u = s_spr[922], l = s_spr[923];
+    u32 lines = ((u & 0x1F) << 2) | ((l >> 2) & 3);
+    if (!lines) lines = 128;
+    const u32 mem = u & ~0x1Fu;
+    const u32 lc = l & ~0x1Fu;
+    const bool load = (l >> 4) & 1;
+    const u32 bytes = lines * 32;
+    // MEM_ADDR is physical; LC_ADDR is the locked cache's effective address (0xE00xxxxx).
+    u8* lcp = g_base + kLockedCache + (lc & (kLockedCacheSize - 1));
+    if ((lc & (kLockedCacheSize - 1)) + bytes > kLockedCacheSize) fatal("locked cache DMA past the cache: lc=%08X len=%u", lc, bytes);
+    u8* mp = physPtr(mem, bytes);
+    if (!mp) fatal("locked cache DMA to unmapped memory %08X (len %u)", mem, bytes);
+    if (load) memcpy(lcp, mp, bytes);
+    else memcpy(mp, lcp, bytes);
+    s_spr[923] &= ~3u;  // T and F clear: done
+}
+}  // namespace
+
+u32 mfspr(Ctx& c, u32 spr) {
+    switch (spr) {
+    case 18: return c.dsisr;
+    case 19: return c.dar;
+    case 22: return decRead();
+    case 26: return c.srr0;
+    case 27: return c.srr1;
+    case 272: case 273: case 274: case 275: return c.sprg[spr - 272];
+    case 268: return u32(tbNow() + s_tbOffset);
+    case 269: return u32((tbNow() + s_tbOffset) >> 32);
+    case 287: return 0x00083214;  // PVR: Gekko
+    case 920: return s_spr[920] & ~0x0F000000u;  // HID2: DMA queue length 0
+    case 921: return s_spr[921] & ~1u;           // WPAR: buffer empty
+    default: return s_spr[spr & 1023];
+    }
+}
+
+void mtspr(Ctx& c, u32 spr, u32 v) {
+    switch (spr) {
+    case 18: c.dsisr = v; return;
+    case 19: c.dar = v; return;
+    case 22: decWrite(v); return;
+    case 26: c.srr0 = v; return;
+    case 27: c.srr1 = v; return;
+    case 272: case 273: case 274: case 275: c.sprg[spr - 272] = v; return;
+    case 284: s_tbOffset = (s_tbOffset & ~0xFFFFFFFFull) + v - u32(tbNow()); return;  // TBL write (approximate)
+    case 285: return;                                                                // TBU write
+    case 25:
+        s_spr[25] = v;
+        vmSetSdr1(v);
+        return;
+    case 921:
+        s_spr[921] = v;
+        gxResetGatherPipe();
+        return;
+    case 923:
+        s_spr[923] = v;
+        if (v & 2) lockedCacheDma();
+        return;
+    default: s_spr[spr & 1023] = v; return;
+    }
+}
+
+u32 mftb(Ctx&, u32 which) {
+    const u64 t = tbNow() + s_tbOffset;
+    return which == 269 ? u32(t >> 32) : u32(t);
+}
+
+extern volatile u32 g_irqLine;
+void mtmsr(Ctx& c, u32 v, u32 pc) {
+    c.msr = v;
+    if ((v & 0x8000) && (g_irqPending || g_irqLine)) safepoint(c, pc);
+}
+
+void dcbz(Ctx&, u32 a) {
+    a &= ~31u;
+    if (isIo(a)) return;
+    memset(hpw(a), 0, 32);
+}
+void dcbzl(Ctx&, u32 a) {
+    a &= ~31u;
+    memset(g_base + kLockedCache + (a & (kLockedCacheSize - 1)), 0, 32);
+}
+void dcbi(Ctx&, u32) {}
+void icbi(Ctx&, u32) {}
+
+void sc(Ctx&, u32) {}
+
+void trap(Ctx& c, u32 pc) { logf("cpu", "trap at %08X (lr=%08X)", pc, c.lr); }
+
+void illegal(Ctx& c, u32 pc, u32 word) {
+    fatal("illegal instruction %08X at %08X (fn %s)", word, pc, describeAddr(c.curFn).c_str());
+}
+
+void rfi(Ctx& c, u32 pc) {
+    fatal("rfi at %08X outside the HLE'd context switch (srr0=%08X)", pc, c.srr0);
+}
+
+void lswi(Ctx& c, u32 rd, u32 ea, u32 n) {
+    u32 r = rd - 1, sh = 0;
+    for (u32 i = 0; i < n; i++) {
+        if (sh == 0) {
+            r = (r + 1) & 31;
+            c.r[r] = 0;
+            sh = 32;
+        }
+        sh -= 8;
+        c.r[r] |= rd8(ea + i) << sh;
+    }
+}
+void stswi(Ctx& c, u32 rs, u32 ea, u32 n) {
+    u32 r = rs - 1, sh = 0;
+    for (u32 i = 0; i < n; i++) {
+        if (sh == 0) {
+            r = (r + 1) & 31;
+            sh = 32;
+        }
+        sh -= 8;
+        wr8(ea + i, (c.r[r] >> sh) & 0xFF);
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Floating point
+// ---------------------------------------------------------------------------------------
+double fres(double v) { return double(float(1.0 / v)); }
+double frsqrte(double v) { return 1.0 / std::sqrt(v); }
+
+u32 fctiw(Ctx& c, double v, bool truncate) {
+    if (v != v) return 0x80000000u;
+    double r;
+    if (truncate) r = std::trunc(v);
+    else {
+        switch (c.fpscr & 3) {
+        case 0: r = std::nearbyint(v); break;  // host default: round to nearest even
+        case 1: r = std::trunc(v); break;
+        case 2: r = std::ceil(v); break;
+        default: r = std::floor(v); break;
+        }
+    }
+    if (r >= 2147483648.0) return 0x7FFFFFFFu;
+    if (r < -2147483648.0) return 0x80000000u;
+    return u32(s32(r));
+}
+
+static inline s32 sext6(u32 v) { return (v & 0x20) ? s32(v | ~0x3Fu) : s32(v); }
+
+void psqLoad(Ctx& c, u32 fd, u32 a, bool w, u32 gqr) {
+    const u32 type = (gqr >> 16) & 7;
+    const float scale = std::ldexp(1.0f, -sext6((gqr >> 24) & 0x3F));
+    double p0, p1 = 1.0;
+    switch (type) {
+    case 4:
+        p0 = float(rd8(a)) * scale;
+        if (!w) p1 = float(rd8(a + 1)) * scale;
+        break;
+    case 5:
+        p0 = float(rd16(a)) * scale;
+        if (!w) p1 = float(rd16(a + 2)) * scale;
+        break;
+    case 6:
+        p0 = float(s8(rd8(a))) * scale;
+        if (!w) p1 = float(s8(rd8(a + 1))) * scale;
+        break;
+    case 7:
+        p0 = float(s16(rd16(a))) * scale;
+        if (!w) p1 = float(s16(rd16(a + 2))) * scale;
+        break;
+    default:
+        p0 = s2d(rd32(a));
+        if (!w) p1 = s2d(rd32(a + 4));
+        break;
+    }
+    c.f[fd] = p0;
+    c.ps1[fd] = p1;
+}
+
+template <typename T>
+static T quantize(double v, float scale) {
+    float f = float(v) * scale;
+    const float lo = float(std::numeric_limits<T>::min()), hi = float(std::numeric_limits<T>::max());
+    if (!(f >= lo)) f = lo;  // also NaN
+    if (f > hi) f = hi;
+    return T(f);
+}
+
+void psqStore(Ctx& c, u32 fs, u32 a, bool w, u32 gqr) {
+    const u32 type = gqr & 7;
+    const float scale = std::ldexp(1.0f, sext6((gqr >> 8) & 0x3F));
+    const double p0 = c.f[fs], p1 = c.ps1[fs];
+    switch (type) {
+    case 4:
+        wr8(a, quantize<u8>(p0, scale));
+        if (!w) wr8(a + 1, quantize<u8>(p1, scale));
+        break;
+    case 5:
+        wr16(a, quantize<u16>(p0, scale));
+        if (!w) wr16(a + 2, quantize<u16>(p1, scale));
+        break;
+    case 6:
+        wr8(a, u8(quantize<s8>(p0, scale)));
+        if (!w) wr8(a + 1, u8(quantize<s8>(p1, scale)));
+        break;
+    case 7:
+        wr16(a, u16(quantize<s16>(p0, scale)));
+        if (!w) wr16(a + 2, u16(quantize<s16>(p1, scale)));
+        break;
+    default:
+        wr32(a, d2s(p0));
+        if (!w) wr32(a + 4, d2s(p1));
+        break;
+    }
+}
+
+}  // namespace rt

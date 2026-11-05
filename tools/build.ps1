@@ -1,0 +1,40 @@
+# Configure and build from any shell: imports the MSVC environment (headers, libraries,
+# linker) and compiles with clang-cl.
+#   powershell -ExecutionPolicy Bypass -File tools\build.ps1 [-Configure] [-Target red_two] [-Config RelWithDebInfo]
+param(
+    [switch]$Configure,
+    [string]$Target = "",
+    [string]$Config = "RelWithDebInfo",
+    [string]$ClangCl = ""
+)
+$ErrorActionPreference = "Stop"
+$root = Split-Path -Parent $PSScriptRoot
+$build = Join-Path $root "build\windows"
+
+$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+$vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+if (-not $vsPath) { throw "Visual Studio C++ build tools not found" }
+cmd /c "`"$vsPath\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object {
+    if ($_ -match '^([^=]+)=(.*)$') { Set-Item -Path "env:$($Matches[1])" -Value $Matches[2] }
+}
+
+if (-not $ClangCl) {
+    foreach ($c in @("$vsPath\VC\Tools\Llvm\x64\bin\clang-cl.exe", "$env:ProgramFiles\LLVM\bin\clang-cl.exe", "C:\msys64\ucrt64\bin\clang-cl.exe", "C:\msys64\clang64\bin\clang-cl.exe")) {
+        if (Test-Path $c) { $ClangCl = $c; break }
+    }
+}
+if (-not $ClangCl) { throw "clang-cl not found (install LLVM or pass -ClangCl)" }
+$lld = Join-Path (Split-Path $ClangCl) "lld-link.exe"
+foreach ($p in @("$env:ProgramFiles\CMake\bin", "C:\msys64\ucrt64\bin")) {
+    if (Test-Path $p) { $env:PATH = "$env:PATH;$p" }
+}
+
+if ($Configure -or -not (Test-Path "$build\build.ninja")) {
+    $args = @("-S", $root, "-B", $build, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=$Config",
+        "-DCMAKE_C_COMPILER=$ClangCl", "-DCMAKE_CXX_COMPILER=$ClangCl")
+    if (Test-Path $lld) { $args += "-DCMAKE_LINKER=$lld" }
+    cmake @args
+    if ($LASTEXITCODE) { throw "configure failed" }
+}
+if ($Target) { cmake --build $build --target $Target } else { cmake --build $build }
+if ($LASTEXITCODE) { throw "build failed" }

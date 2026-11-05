@@ -1,0 +1,14 @@
+# Game data never goes in the repo: users bring their own disc.
+*.rvz
+*.iso
+*.gcm
+*.ciso
+*.dol
+orig/
+# Build output and generated (recompiled) code
+build/
+gen/
+# Local tool binaries
+.tools/
+__pycache__/
+*.pyc

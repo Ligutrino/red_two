@@ -1,0 +1,15 @@
+# <kind> <name|address>
+#   hle     replace with hle_<name> (src/runtime); the translated body stays as <fn>_orig
+#   savectx the function returns twice (its callers keep a jump buffer)
+#   entry   extra function entry the analysis cannot see
+#   noentry drop a false-positive entry
+
+# OS context switching runs on host fibers (src/runtime/threads.cpp)
+savectx OSSaveContext
+hle     OSSaveContext
+hle     OSLoadContext
+hle     OSInitContext
+
+# Debug output and fatal paths (src/runtime/hle_os.cpp)
+hle     OSReport
+hle     PPCHalt

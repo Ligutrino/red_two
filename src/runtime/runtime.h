@@ -1,0 +1,100 @@
+// Runtime internals shared by the host side (not used by generated code).
+#pragma once
+#include <cstdarg>
+#include <cstdio>
+#include <string>
+
+#include "ctx.h"
+
+namespace rt {
+
+// --- logging --------------------------------------------------------------------------
+void logf(const char* tag, const char* fmt, ...);
+[[noreturn]] void fatal(const char* fmt, ...);
+const char* symName(u32 addr);  // nearest known name or nullptr
+std::string describeAddr(u32 addr);
+bool envFlag(const char* name);
+std::string traceRing(int n);  // recent guest function entries (R2_TRACE)
+void printTraceRing(FILE* f, int n);
+void debugInit();  // R2_LOGFN, R2_WATCH
+void dumpThreads();  // guest OSThread list (debugging)
+
+// --- memory ---------------------------------------------------------------------------
+constexpr u32 kMem1Size = 0x01800000;
+constexpr u32 kVmBase = 0x7E000000, kVmSize = 0x02000000;
+constexpr u32 kLockedCache = 0xE0000000, kLockedCacheSize = 0x4000;
+bool memInit();
+inline bool isMem1(u32 a) { return (a >= 0x80000000u && a < 0x80000000u + kMem1Size) || (a >= 0xC0000000u && a < 0xC0000000u + kMem1Size); }
+// Physical address (as DMA engines see it) -> host pointer into MEM1, or nullptr.
+u8* physPtr(u32 phys, u32 len);
+
+// --- VM region (vm.cpp) ---------------------------------------------------------------
+void vmFlushAll();
+void vmSetSdr1(u32 v);
+
+// --- guest functions ------------------------------------------------------------------
+GuestFn lookupFn(u32 addr);
+GuestFn lookupOrig(u32 addr);  // translated body of a hooked function
+void tableInit();
+
+// --- time and events ------------------------------------------------------------------
+constexpr u64 kBusClock = 162000000, kCpuClock = 486000000, kTbClock = kBusClock / 4;
+u64 tbNow();                       // guest time base (40.5 MHz)
+void schedule(int id, u64 atTb);   // (re)arm event id at time base value
+void unschedule(int id);
+bool scheduled(int id);
+void eventsInit();
+void runDueEvents();               // on the guest thread: fire every due event
+void wakeGuest();                  // from any host thread: make the guest poll
+enum Event : int {
+    EV_VI = 0,
+    EV_DEC,
+    EV_DI,
+    EV_AI,
+    EV_ARAM,
+    EV_DSP,
+    EV_SI,
+    EV_EXI0,
+    EV_EXI1,
+    EV_EXI2,
+    EV_COUNT
+};
+void decWrite(u32 v);
+u32 decRead();
+
+// --- interrupts -----------------------------------------------------------------------
+// PI interrupt sources (INTSR bits)
+enum : u32 {
+    PI_ERROR = 1 << 0,
+    PI_RSW = 1 << 1,
+    PI_DI = 1 << 2,
+    PI_SI = 1 << 3,
+    PI_EXI = 1 << 4,
+    PI_AI = 1 << 5,
+    PI_DSP = 1 << 6,
+    PI_MEM = 1 << 7,
+    PI_VI = 1 << 8,
+    PI_PE_TOKEN = 1 << 9,
+    PI_PE_FINISH = 1 << 10,
+    PI_CP = 1 << 11,
+    PI_DEBUG = 1 << 12,
+    PI_HSP = 1 << 13,
+};
+void piSetIrq(u32 bits, bool on);
+bool piPending();
+bool decPending();
+void decAck();
+
+// --- threads (threads.cpp) ------------------------------------------------------------
+void threadsInit(Ctx*& bootCtx);
+Ctx& curCtx();
+void deliverException(Ctx& c, u32 exc, u32 pc);
+
+// --- devices --------------------------------------------------------------------------
+bool discOpen(const std::string& path);
+bool discRead(u64 off, void* dst, u32 len);
+std::string discFileAt(u64 off);  // "path+0xoffset" of the disc file containing off (debugging)
+void hwInit();
+void viFrameHook();  // called once per guest frame (XFB handoff)
+
+}  // namespace rt
