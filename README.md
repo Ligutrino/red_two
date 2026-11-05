@@ -30,7 +30,9 @@ The code generated from your disc ends up in `build/` and is yours alone: never 
 
 ### Playing
 
-- Gamepads work through SDL (with rumble). Keyboard: WASD or arrows steer, Space = A (fire),
+- Gamepads work through SDL (with rumble), also while the window is in the background. On an
+  Xbox-style pad the face buttons follow the GameCube positions: A = A (fire), X (left) = B,
+  B (right) = X, Y = Y; LT/RT = L/R, RB = Z, right stick = C-stick, Menu = Start. Keyboard: WASD or arrows steer, Space = A (fire),
   Left Shift = B, E = X, Q = Y, R = Z, 1/2 = L/R, Enter = Start, IJKL = C-stick, TFGH = D-pad.
 - F11 or Alt+Enter toggles fullscreen; `--fullscreen` starts that way.
 - Saves go to `saves/GSWE64_A.raw` (a Memory Card 59 in slot A; the game formats a new one).

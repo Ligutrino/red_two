@@ -189,6 +189,24 @@ void viFrameHook() {
     s_frames++;
     if (noGfx) input::poll();  // otherwise the renderer polls (Aurora pads)
     else gfx::vblank();
+    // R2_MEM_DUMP=<vblank>,<phys addr>,<len>[;...]: guest memory -> build/mem_<vblank>_<addr>.bin.
+    static const char* memDump = getenv("R2_MEM_DUMP");
+    for (const char* s = memDump; s && *s;) {
+        char* end;
+        const u32 at = u32(strtoul(s, &end, 10)), addr = u32(strtoul(end + 1, &end, 16)) & 0x1FFFFFFF,
+                  len = u32(strtoul(end + 1, &end, 16));
+        if (at == s_frames)
+            if (const u8* p = physPtr(addr, len)) {
+                char name[64];
+                snprintf(name, sizeof name, "build/mem_%u_%08X.bin", at, addr);
+                if (FILE* f = fopen(name, "wb")) {
+                    fwrite(p, 1, len, f);
+                    fclose(f);
+                    logf("dump", "wrote %s", name);
+                }
+            }
+        s = *end ? end + 1 : end;
+    }
     if (gxLog && s_frames % 60 == 0) {
         const GxStats& g = gxStats();
         logf("gx", "vblank %u, presented %llu: fifo %llu bytes, %llu draws, %llu verts, %llu BP, %llu XF, %llu CP, %llu DL", s_frames,

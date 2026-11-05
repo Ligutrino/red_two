@@ -117,6 +117,15 @@ void poll() {
         st[0].err = PAD_ERR_NONE;
         st[0].button |= scripted;
     }
+    static const bool padLog = envFlag("R2_PAD_LOG");
+    if (padLog && s_vblank % 30 == 0) {
+        for (int i = 0; i < 2; i++) {
+            const auto src = s_pads ? aurora::pad::port_controller(u32(i)) : 0;
+            logf("pad", "port %d: err %d buttons %04X stick %d,%d c %d,%d triggers %u,%u controller %llu", i, st[i].err,
+                 st[i].button, st[i].stickX, st[i].stickY, st[i].substickX, st[i].substickY, st[i].triggerLeft,
+                 st[i].triggerRight, (unsigned long long)src);
+        }
+    }
     for (int i = 0; i < PAD_CHANMAX; i++) {
         PadState& p = padState(i);
         if (st[i].err == PAD_ERR_NO_CONTROLLER) {

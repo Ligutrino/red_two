@@ -780,6 +780,13 @@ bool init(int argc, char** argv) {
     cfg.windowPosX = -1;
     cfg.windowPosY = -1;
     cfg.logCallback = logCallback;
+    // Controllers keep working when the window is not focused (SDL drops their events
+    // otherwise, and a window started from another program often opens unfocused). Not for
+    // automated runs: someone's controller must not steer a scripted test (R2_BG_PADS=0/1
+    // overrides).
+    const char* bgPads = getenv("R2_BG_PADS");
+    cfg.allowJoystickBackgroundEvents = bgPads ? *bgPads == '1'
+                                               : !envFlag("R2_BACKGROUND") && !envFlag("R2_HEADLESS") && !getenv("R2_INPUT");
     cfg.logLevel = envFlag("R2_AURORA_DEBUG") ? LOG_DEBUG : LOG_INFO;
     cfg.gxProcessingMode = GX_PROCESSING_INLINE;  // draws read guest memory when they are issued
     cfg.mem1Size = 0;

@@ -32,14 +32,20 @@ $ninja = (Get-Command ninja -ErrorAction SilentlyContinue).Source
 if (-not $ninja -and (Test-Path "C:\msys64\ucrt64\bin\ninja.exe")) { $ninja = "C:\msys64\ucrt64\bin\ninja.exe" }
 if (-not $ninja) { throw "ninja not found" }
 
-# Our fixes to Aurora (patches/aurora/*.patch) on top of the upstream submodule: apply each one
-# that is not applied yet (a patch that reverse-applies cleanly is already in).
+# Our fixes to Aurora (patches/aurora/*.patch) on top of the upstream submodule: on a clean
+# checkout all of them are applied; otherwise each one that is not applied yet (a patch that
+# reverse-applies cleanly is already in). Later patches can change the context of earlier ones,
+# so on a modified tree a patch that neither reverses nor applies is reported, not fatal.
+$auroraClean = -not (git -C "$root\extern\aurora" status --porcelain --untracked-files=no)
 foreach ($patch in Get-ChildItem "$root\patches\aurora\*.patch" -ErrorAction SilentlyContinue | Sort-Object Name) {
-    cmd /c "git -C `"$root\extern\aurora`" apply --reverse --check `"$($patch.FullName)`" 2>nul"
-    if ($LASTEXITCODE -eq 0) { continue }
-    git -C "$root\extern\aurora" apply $patch.FullName
-    if ($LASTEXITCODE) { throw "could not apply $($patch.Name) to extern/aurora" }
-    Write-Host "applied $($patch.Name)"
+    if (-not $auroraClean) {
+        cmd /c "git -C `"$root\extern\aurora`" apply --reverse --check `"$($patch.FullName)`" 2>nul"
+        if ($LASTEXITCODE -eq 0) { continue }
+    }
+    cmd /c "git -C `"$root\extern\aurora`" apply `"$($patch.FullName)`" 2>nul"
+    if ($LASTEXITCODE -eq 0) { Write-Host "applied $($patch.Name)"; continue }
+    if ($auroraClean) { throw "could not apply $($patch.Name) to extern/aurora" }
+    Write-Host "note: $($patch.Name) neither applies nor reverses on the modified extern/aurora (assumed applied)"
 }
 
 if ($Disc) {
