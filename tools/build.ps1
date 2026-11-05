@@ -30,6 +30,16 @@ $ninja = (Get-Command ninja -ErrorAction SilentlyContinue).Source
 if (-not $ninja -and (Test-Path "C:\msys64\ucrt64\bin\ninja.exe")) { $ninja = "C:\msys64\ucrt64\bin\ninja.exe" }
 if (-not $ninja) { throw "ninja not found" }
 
+# Our fixes to Aurora (patches/aurora/*.patch) on top of the upstream submodule: apply each one
+# that is not applied yet (a patch that reverse-applies cleanly is already in).
+foreach ($patch in Get-ChildItem "$root\patches\aurora\*.patch" -ErrorAction SilentlyContinue | Sort-Object Name) {
+    cmd /c "git -C `"$root\extern\aurora`" apply --reverse --check `"$($patch.FullName)`" 2>nul"
+    if ($LASTEXITCODE -eq 0) { continue }
+    git -C "$root\extern\aurora" apply $patch.FullName
+    if ($LASTEXITCODE) { throw "could not apply $($patch.Name) to extern/aurora" }
+    Write-Host "applied $($patch.Name)"
+}
+
 if ($Configure -or -not (Test-Path "$build\build.ninja")) {
     # MSYS2/MinGW libraries (fmt, zstd, ...) are not usable from an MSVC-ABI build: keep CMake
     # from finding them through PATH or pkg-config so Aurora fetches its own.

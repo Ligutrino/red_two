@@ -4,6 +4,7 @@
 // the public descriptions of the hardware (YAGCD and the SDK's own register usage).
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <ctime>
 #include <mutex>
 #include <set>
@@ -106,9 +107,26 @@ u16 viRead(u32 off) {
     if (off == 0x6E) return 0;  // VISEL: no component cable
     return vi[(off & 0x7F) / 2];
 }
+// Frame buffers the VI has been told to scan out (TFBL 0x1C, BFBL 0x24). The renderer
+// presents only display copies into one of these: the game also clears EFB bands with
+// display copies into a scratch buffer the VI never shows.
+std::vector<u32> s_viFbs;
+
+void viNoteFb(u32 hiOff) {
+    const u32 v = (u32(vi[hiOff / 2]) << 16) | vi[hiOff / 2 + 1];
+    const u32 addr = (v & 0x10000000) ? (v & 0x00FFFFFF) << 5 : v & 0x00FFFFFF;  // POFF: address >> 5
+    if (!addr || std::find(s_viFbs.begin(), s_viFbs.end(), addr) != s_viFbs.end()) return;
+    if (s_viFbs.size() >= 8) s_viFbs.erase(s_viFbs.begin());
+    s_viFbs.push_back(addr);
+    logf("vi", "frame buffer %08X", addr);
+}
+
+
 void viWrite(u32 off, u16 v) {
     vi[(off & 0x7F) / 2] = v;
     if (off >= 0x30 && off < 0x40) viUpdateIrq();
+    if (off == 0x1C || off == 0x1E) viNoteFb(0x1C);
+    else if (off == 0x24 || off == 0x26) viNoteFb(0x24);
 }
 
 // =======================================================================================
@@ -728,6 +746,8 @@ void peWrite(u32 off, u16 v) {
 }
 
 }  // namespace
+
+bool viIsFramebuffer(u32 addr) { return std::find(s_viFbs.begin(), s_viFbs.end(), addr) != s_viFbs.end(); }
 
 // --- events raised by the GX FIFO parser -----------------------------------------------
 void peToken(u16 token, bool irq) {

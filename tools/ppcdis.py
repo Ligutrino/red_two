@@ -238,8 +238,15 @@ def main(argv):
         for a, w in dol.text_words():
             op = w >> 26
             if op in (18, 16):
-                t = dis(w, a).split()[-1]
-                if int(t.split(",")[-1], 16) == tgt:
+                if op == 18:
+                    li = w & 0x03FFFFFC
+                    if li & 0x02000000: li -= 0x04000000
+                    t = (li if w & 2 else a + li) & 0xFFFFFFFF
+                else:
+                    bd = w & 0xFFFC
+                    if bd & 0x8000: bd -= 0x10000
+                    t = (bd if w & 2 else a + bd) & 0xFFFFFFFF
+                if t == tgt:
                     print(f"{a:08x}  {dis(w, a)}")
             if op == 15:
                 hi[(w >> 21) & 31] = ((w & 0xFFFF) << 16, a)

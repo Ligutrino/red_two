@@ -460,9 +460,11 @@ void prepareCopy(u32 cp) {
 // ---------------------------------------------------------------------------------------
 // the stream
 // ---------------------------------------------------------------------------------------
-// R2_GX_DUMP=<frame>: write every command of that presented frame to build/gx_frame.txt
+// R2_GX_DUMP=<frame>[,<count>]: write every command of those presented frames to build/gx_frame.txt
 FILE* s_dump = nullptr;
 u64 s_dumpFrame = ~0ull;
+u64 s_dumpCount = 1;  // R2_GX_DUMP=<first>[,<count>]
+u64 s_dumpLast = ~0ull;
 
 void dumpCommand(const u8* p, u32 len) {
     const u8 op = p[0];
@@ -496,8 +498,12 @@ void dumpCommand(const u8* p, u32 len) {
 
 void onCommand(const u8* p, u32 len) {
     ensureFrame();
-    if (s_frames == s_dumpFrame) [[unlikely]] {
+    if (s_frames >= s_dumpFrame && s_frames < s_dumpFrame + s_dumpCount) [[unlikely]] {
         if (!s_dump) s_dump = fopen("build/gx_frame.txt", "w");
+        if (s_dump && s_frames != s_dumpLast) {
+            fprintf(s_dump, "=== presented frame %llu\n", (unsigned long long)s_frames);
+            s_dumpLast = s_frames;
+        }
         if (s_dump) dumpCommand(p, len);
     } else if (s_dump) {
         fclose(s_dump);
@@ -580,14 +586,27 @@ void onCommand(const u8* p, u32 len) {
             return;
         } else if (reg == 0x52) {
             const bool disp = v & (1u << 14);
-            if (disp && !s_xfb) {  // present the EFB as it is before the copy clears it
+            // A display copy makes a picture only if it lands in a frame buffer the VI scans
+            // out. The game also uses display copies into a scratch buffer just to clear EFB
+            // bands (e.g. 640x16 strips around its 640x226 picture): send those as texture
+            // copies, which keeps the clear without presenting a near-empty frame.
+            const bool shown = disp && viIsFramebuffer((s_bp[0x4B] & 0xFFFFFF) << 5);
+            if (disp && !shown) {
+                const u32 tex = v & ~(1u << 14);
+                prepareCopy(tex);
+                fifo::write_u8(0x61);
+                fifo::write_u32(0x52000000u | tex);
+                fifo::publish();
+                return;
+            }
+            if (shown && !s_xfb) {  // present the EFB as it is before the copy clears it
                 endFrame();
                 ensureFrame();
             }
             prepareCopy(v);
             fifo::write_data(p, len);
             fifo::publish();
-            if (disp && s_xfb) endFrame();  // the frame is in the XFB
+            if (shown && s_xfb) endFrame();  // the frame is in the XFB
             return;
         }
         fifo::write_data(p, len);
@@ -622,7 +641,11 @@ bool init(int argc, char** argv) {
     cfg.desiredBackend = BACKEND_AUTO;
     cfg.vsync = false;  // the game paces itself on the emulated retrace
     s_testClear = envFlag("R2_GFX_TEST");
-    if (const char* d = getenv("R2_GX_DUMP")) s_dumpFrame = strtoull(d, nullptr, 10);
+    if (const char* d = getenv("R2_GX_DUMP")) {
+        char* end = nullptr;
+        s_dumpFrame = strtoull(d, &end, 10);
+        if (end && *end == ',') s_dumpCount = strtoull(end + 1, nullptr, 10);
+    }
     s_xfb = !envFlag("R2_NO_XFB");
     cfg.emulateXfb = s_xfb;
     cfg.windowWidth = 1280;

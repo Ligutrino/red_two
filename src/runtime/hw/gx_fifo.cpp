@@ -8,6 +8,8 @@
 // CALL_DL. The GPU is infinitely fast here: commands run as soon as they are complete.
 #include "gx_fifo.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -121,9 +123,17 @@ struct Recent {  // last commands, for desync reports
 Recent s_recent[48];
 u32 s_recentPos = 0;
 
+int s_cmdLog = 0;     // R2_FIFO_LOG=2: every command (first 16 bytes) once the GP FIFO has moved
+int s_gpFifoSets = 0;  // GP FIFO base writes (GXSetGPFifo)
+
 void execute(const u8* p, size_t len, int depth) {
     const u8 op = p[0];
     bool known = true;
+    if (s_cmdLog >= 2 && s_gpFifoSets >= 2 && op != 0x00) {
+        char hexb[64] = {};
+        for (size_t k = 0; k < len && k < 16; k++) snprintf(hexb + 3 * k, 4, "%02X ", p[k]);
+        logf("cmd", "%s%s(len %zu)", depth ? "DL " : "", hexb, len);
+    }
     if (op >= 0x80 && op < 0xC0) {
         s_stats.draws++;
         s_stats.vertices += be16(p + 1);
@@ -270,7 +280,10 @@ u32 regPair(u32 lo, u32 hi) { return (u32(s_cpReg[hi / 2] & 0x3FF) << 16) | s_cp
 
 GxStats& gxStats() { return s_stats; }
 void gxSetSink(GxSink sink) { s_sink = sink; }
-void gxInit() { s_log = envFlag("R2_GX_LOG"); }
+void gxInit() {
+    s_log = envFlag("R2_GX_LOG");
+    if (const char* v = getenv("R2_FIFO_LOG")) s_cmdLog = atoi(v);
+}
 
 // --- gather pipe ------------------------------------------------------------------------
 // The CPU's write-gather buffer: memory sees 32-byte bursts (the SDK pads with NOPs to flush).
@@ -361,8 +374,15 @@ u16 gxCpRead(u32 off) {
     off &= 0x7E;
     switch (off) {
     case 0x00: {  // status: overflow, underflow, read idle, command idle, breakpoint
-        const bool idle = s_cpRp == s_cpWp || s_bpHit || !(s_cpCr & CR_READ);
-        return u16((cpOverflow() ? 1 : 0) | (cpUnderflow() ? 2 : 0) | (idle ? 0x0C : 0) | (s_bpHit ? 0x10 : 0));
+        // A GP halted at a breakpoint with commands still behind it is not idle: before moving
+        // the GP FIFO the game spins on GXGetGPStatus until read+command idle, while its
+        // interrupt callback releases the queued frames one breakpoint at a time. Reporting
+        // idle at the breakpoint made it switch FIFOs with two frames (and their draw-dones)
+        // still unread, so its frames-in-flight counter never drained.
+        const bool readIdle = s_cpRp == s_cpWp;
+        const bool cmdIdle = readIdle || !(s_cpCr & CR_READ);
+        return u16((cpOverflow() ? 1 : 0) | (cpUnderflow() ? 2 : 0) | (readIdle ? 4 : 0) | (cmdIdle ? 8 : 0) |
+                   (s_bpHit ? 0x10 : 0));
     }
     case 0x02: return s_cpCr;
     case 0x30: case 0x32: {  // read-write distance: what is still unread (behind a breakpoint)
@@ -379,7 +399,10 @@ u16 gxCpRead(u32 off) {
 }
 void gxCpWrite(u32 off, u16 v) {
     off &= 0x7E;
-    if (fifoLog() && off >= 0x02) logf("fifo", "CP %02X = %04X (rp %08X wp %08X pi wp %08X)", off, v, s_cpRp, s_cpWp, s_piWp);
+    if (fifoLog() && off >= 0x02) {
+        logf("fifo", "CP %02X = %04X (rp %08X wp %08X pi wp %08X)", off, v, s_cpRp, s_cpWp, s_piWp);
+        if (s_cmdLog >= 3 && (off == 0x02 || off == 0x20 || off == 0x3C)) logf("fifo", "  from %s", traceRing(10).c_str());
+    }
     s_cpReg[off / 2] = v;
     switch (off) {
     case 0x02: {
@@ -394,7 +417,7 @@ void gxCpWrite(u32 off, u16 v) {
     case 0x04:  // CP_CLEAR: the watermark flags are live; re-evaluate
         cpUpdateIrq();
         break;
-    case 0x20: case 0x22: s_cpBase = regPair(0x20, 0x22) & 0x03FFFFE0; break;
+    case 0x20: case 0x22: s_cpBase = regPair(0x20, 0x22) & 0x03FFFFE0; if (off == 0x20) s_gpFifoSets++; break;
     case 0x24: case 0x26: s_cpEnd = regPair(0x24, 0x26) & 0x03FFFFE0; break;
     case 0x28: case 0x2A: s_cpHi = regPair(0x28, 0x2A); break;
     case 0x2C: case 0x2E: s_cpLo = regPair(0x2C, 0x2E); break;

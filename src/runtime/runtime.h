@@ -98,6 +98,7 @@ bool discRead(u64 off, void* dst, u32 len);
 std::string discFileAt(u64 off);  // "path+0xoffset" of the disc file containing off (debugging)
 void hwInit();
 void viFrameHook();  // called once per guest frame (XFB handoff)
+bool viIsFramebuffer(u32 addr);  // hw.cpp: has the VI been told to scan out this XFB?
 
 namespace input {
 void init();  // after the window exists
