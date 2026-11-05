@@ -18,6 +18,7 @@
 #include "gfx/gx_bridge.h"
 #include "hw/gx_fifo.h"
 #include "runtime.h"
+#include "../common/disc_image.h"
 #include "hw/musyx_dsp.h"
 #include "table.h"
 
@@ -89,22 +90,22 @@ std::string describeAddr(u32 addr) {
 }
 
 // --- disc -----------------------------------------------------------------------------
-static FILE* s_disc = nullptr;
-static u64 s_discSize = 0;
+
+// The disc: an ISO/GCM or RVZ/WIA image (src/common/disc_image.cpp).
+static std::unique_ptr<disc::Image> s_image;
 
 bool discOpen(const std::string& path) {
-    s_disc = fopen(path.c_str(), "rb");
-    if (!s_disc) return false;
-    _fseeki64(s_disc, 0, SEEK_END);
-    s_discSize = u64(_ftelli64(s_disc));
-    return s_discSize > 0x440;
+    std::string err;
+    s_image = disc::open(path, err);
+    if (!s_image) {
+        logf("disc", "%s", err.c_str());
+        return false;
+    }
+    logf("disc", "%s image %s (%llu MiB)", s_image->kind(), path.c_str(), (unsigned long long)(s_image->size() >> 20));
+    return s_image->size() > 0x440;
 }
 
-bool discRead(u64 off, void* dst, u32 len) {
-    if (off + len > s_discSize) return false;
-    _fseeki64(s_disc, s64(off), SEEK_SET);
-    return fread(dst, 1, len, s_disc) == len;
-}
+bool discRead(u64 off, void* dst, u32 len) { return s_image && s_image->read(off, dst, len); }
 
 static u32 be32(const u8* p) { return (u32(p[0]) << 24) | (u32(p[1]) << 16) | (u32(p[2]) << 8) | p[3]; }
 
@@ -259,7 +260,7 @@ static u32 bootDisc() {
 
 int main(int argc, char** argv) {
     using namespace rt;
-    std::string disc = "orig/GSWE64.iso";
+    std::string disc;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--disc") && i + 1 < argc) disc = argv[++i];
         else if (!strcmp(argv[i], "--trace")) g_trace = true;
@@ -286,6 +287,15 @@ int main(int argc, char** argv) {
     s_t0Tb = tbNow();
     if (!memInit()) fatal("could not reserve the guest address space");
     tableInit();
+    if (disc.empty()) {  // no --disc: the usual places
+        for (const char* p : {"orig/GSWE64.iso", "orig/GSWE64.rvz", "GSWE64.rvz", "GSWE64.iso"})
+            if (FILE* f = fopen(p, "rb")) {
+                fclose(f);
+                disc = p;
+                break;
+            }
+        if (disc.empty()) fatal("no disc image: pass --disc <your Rogue Leader .iso or .rvz>");
+    }
     if (!discOpen(disc)) fatal("cannot open the disc image %s", disc.c_str());
     loadFst();
     Ctx* boot = nullptr;

@@ -2,8 +2,11 @@
 #pragma once
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
+
+#include "../common/disc_image.h"
 
 struct Section {
     std::string name;
@@ -28,6 +31,20 @@ struct Image {
             return false;
         }
         fclose(f);
+        // A disc image (ISO/GCM with the GameCube magic, or RVZ/WIA): take its main.dol.
+        const bool rvz = file.size() >= 4 && (!memcmp(file.data(), "RVZ\x01", 4) || !memcmp(file.data(), "WIA\x01", 4));
+        const bool iso = file.size() > 0x440 && file[0x1C] == 0xC2 && file[0x1D] == 0x33 && file[0x1E] == 0x9F && file[0x1F] == 0x3D;
+        if (rvz || iso) {
+            std::string err, dol;
+            file.clear();
+            auto disc = disc::open(path, err);
+            if (!disc || !disc::readDol(*disc, dol, err)) {
+                fprintf(stderr, "%s: %s\n", path.c_str(), err.c_str());
+                return false;
+            }
+            file.assign(dol.begin(), dol.end());
+            fprintf(stderr, "main.dol from the %s image (%zu bytes)\n", disc->kind(), file.size());
+        }
         if (file.size() < 0x100) return false;
         auto be = [&](size_t o) {
             return uint32_t(file[o]) << 24 | uint32_t(file[o + 1]) << 16 | uint32_t(file[o + 2]) << 8 | file[o + 3];

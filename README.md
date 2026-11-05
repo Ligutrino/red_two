@@ -13,20 +13,18 @@ disc image of the USA release (`GSWE64`, revision 0).
 
 ## Building (Windows)
 
-Requirements: Visual Studio 2022 Build Tools (C++), CMake 3.25+, Ninja, clang-cl (LLVM),
-Python 3.10+ with a local `libzstd` (for reading RVZ images).
+Requirements: Visual Studio 2022 Build Tools (C++), CMake 3.25+, Ninja, clang-cl (LLVM).
 
 ```powershell
-# 1. Unpack your disc (RVZ or ISO) into orig/
-python tools\rvz.py extract "<your Rogue Leader.rvz>" orig\GSWE64
-python tools\rvz.py iso     "<your Rogue Leader.rvz>" orig\GSWE64.iso
+# 1. Build: recompiles the game straight from your disc image (RVZ, WIA, ISO or GCM)
+powershell -ExecutionPolicy Bypass -File tools\build.ps1 -Disc "<your Rogue Leader.rvz>"
 
-# 2. Build (recompiles orig\GSWE64\sys\main.dol, then compiles the runtime)
-powershell -ExecutionPolicy Bypass -File tools\build.ps1
-
-# 3. Run
-build\windows\red_two.exe --disc orig\GSWE64.iso
+# 2. Run
+build\windows\red_two.exe --disc "<your Rogue Leader.rvz>"
 ```
+
+Without `--disc` the game looks for `orig\GSWE64.iso`, `orig\GSWE64.rvz`, `GSWE64.rvz` and
+`GSWE64.iso`. `tools\rvz.py` (Python + libzstd) can still extract a disc or convert it to ISO.
 
 The code generated from your disc ends up in `build/` and is yours alone: never share it.
 

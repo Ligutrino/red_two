@@ -1,7 +1,9 @@
 # Configure and build from any shell: imports the MSVC environment (headers, libraries,
 # linker) and compiles with clang-cl.
-#   powershell -ExecutionPolicy Bypass -File tools\build.ps1 [-Configure] [-Target red_two] [-Config RelWithDebInfo]
+#   powershell -ExecutionPolicy Bypass -File tools\build.ps1 [-Disc <game.rvz|.iso>] [-Configure] [-Target red_two]
+# -Disc: the user's disc image (or main.dol) to recompile; CMake remembers it (R2_DOL).
 param(
+    [string]$Disc = "",
     [switch]$Configure,
     [string]$Target = "",
     [string]$Config = "RelWithDebInfo",
@@ -40,6 +42,10 @@ foreach ($patch in Get-ChildItem "$root\patches\aurora\*.patch" -ErrorAction Sil
     Write-Host "applied $($patch.Name)"
 }
 
+if ($Disc) {
+    $Disc = (Resolve-Path $Disc).Path
+    $Configure = $true
+}
 if ($Configure -or -not (Test-Path "$build\build.ninja")) {
     # MSYS2/MinGW libraries (fmt, zstd, ...) are not usable from an MSVC-ABI build: keep CMake
     # from finding them through PATH or pkg-config so Aurora fetches its own.
@@ -48,6 +54,7 @@ if ($Configure -or -not (Test-Path "$build\build.ninja")) {
         "-DCMAKE_C_COMPILER=$ClangCl", "-DCMAKE_CXX_COMPILER=$ClangCl", "-DCMAKE_MAKE_PROGRAM=$ninja",
         "-DCMAKE_IGNORE_PREFIX_PATH=$ignore", "-DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=ON")
     if (Test-Path $lld) { $args += "-DCMAKE_LINKER=$lld" }
+    if ($Disc) { $args += "-DR2_DOL=$Disc" }
     cmake @args
     if ($LASTEXITCODE) { throw "configure failed" }
 }

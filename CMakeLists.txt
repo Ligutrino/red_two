@@ -17,8 +17,16 @@ set(AURORA_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
 set(AURORA_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(extern/aurora EXCLUDE_FROM_ALL)
 
-# The game's own main.dol (from the user's disc; never committed).
-set(R2_DOL "${CMAKE_SOURCE_DIR}/orig/GSWE64/sys/main.dol" CACHE FILEPATH "main.dol of Star Wars: Rogue Leader (GSWE64)")
+# The game's own main.dol, or the user's disc image (ISO/GCM/RVZ/WIA) it is read from; never
+# committed. Defaults to the first that exists of the usual places.
+set(_r2_dol_default "${CMAKE_SOURCE_DIR}/orig/GSWE64/sys/main.dol")
+foreach(_c orig/GSWE64/sys/main.dol orig/GSWE64.iso orig/GSWE64.rvz)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/${_c}")
+        set(_r2_dol_default "${CMAKE_SOURCE_DIR}/${_c}")
+        break()
+    endif()
+endforeach()
+set(R2_DOL "${_r2_dol_default}" CACHE FILEPATH "main.dol or disc image of Star Wars: Rogue Leader (GSWE64)")
 set(R2_GEN_FILES 96 CACHE STRING "number of generated code files")
 # Generated files are large: cap how many compile at once (memory).
 set(R2_GEN_JOBS 12 CACHE STRING "parallel compiles of generated code")
@@ -29,8 +37,14 @@ add_executable(r2recomp
     src/recompiler/main.cpp
     src/recompiler/analysis.cpp
     src/recompiler/emit.cpp
-    src/recompiler/ppc.cpp)
+    src/recompiler/ppc.cpp
+    src/common/disc_image.cpp)
 target_compile_definitions(r2recomp PRIVATE ${R2_DEFS})
+target_link_libraries(r2recomp PRIVATE zstd::libzstd)
+
+# disc_compare <a> <b>: check the disc image reader (not built by default)
+add_executable(disc_compare EXCLUDE_FROM_ALL src/common/disc_compare.cpp src/common/disc_image.cpp)
+target_link_libraries(disc_compare PRIVATE zstd::libzstd)
 
 # --- generated code ---------------------------------------------------------------------
 set(GEN_DIR "${CMAKE_BINARY_DIR}/gen")
@@ -80,6 +94,7 @@ add_executable(red_two
     src/runtime/profiler.cpp
     src/runtime/audio.cpp
     src/runtime/hle_musyx.cpp
+    src/common/disc_image.cpp
     src/runtime/hw/musyx_dsp.cpp
     src/runtime/hle_os.cpp
     src/runtime/hw/hw.cpp
@@ -88,7 +103,7 @@ add_executable(red_two
     src/runtime/input.cpp)
 target_include_directories(red_two PRIVATE src/runtime "${GEN_DIR}" extern/aurora/lib)
 target_compile_definitions(red_two PRIVATE ${R2_DEFS})
-target_link_libraries(red_two PRIVATE r2game winmm aurora::core aurora::gx aurora::vi aurora::pad xxHash::xxhash dbghelp)
+target_link_libraries(red_two PRIVATE r2game winmm aurora::core aurora::gx aurora::vi aurora::pad xxHash::xxhash zstd::libzstd dbghelp)
 if(MSVC)
     target_compile_options(red_two PRIVATE -fno-strict-aliasing)
     target_link_options(red_two PRIVATE /STACK:16777216)
