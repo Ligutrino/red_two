@@ -474,7 +474,7 @@ void dumpCommand(const u8* p, u32 len) {
         const u32 n = be16(p + 1), vs = n ? (len - 3) / n : 0;
         fprintf(s_dump, "DRAW prim %02X fmt %u count %u vsize %u vcd %08X/%08X vat %08X %08X %08X:", op & 0xF8, op & 7, n,
                 vs, s_vcdLo, s_vcdHi, s_vatA[op & 7], s_vatB[op & 7], s_vatC[op & 7]);
-        for (u32 i = 3; i < len && i < 3 + 2 * vs; i++) fprintf(s_dump, " %02X", p[i]);
+        for (u32 i = 3; i < len && i < 3 + 4 * vs && i < 67; i++) fprintf(s_dump, " %02X", p[i]);
         fputc('\n', s_dump);
     } else if (op == 0x61) {
         fprintf(s_dump, "BP %02X = %06X\n", p[1], be32(p + 1) & 0xFFFFFF);
@@ -673,8 +673,14 @@ void onCommand(const u8* p, u32 len) {
             const bool shown = disp && viLocateCopy(dest, stride, line, lines);
             const bool completes = shown && line + h >= lines;  // reaches the bottom: frame done
             if (disp && s_copyLog)
-                logf("gfx", "display copy src y %u h %u -> %08X: %s line %u of %u", (s_bp[0x49] >> 10) & 0x3FF, h, dest,
-                     shown ? "XFB" : "not in XFB", line, lines);
+                logf("gfx", "display copy src %u,%u %ux%u stride %u -> %08X: %s line %u of %u", s_bp[0x49] & 0x3FF,
+                     (s_bp[0x49] >> 10) & 0x3FF, (s_bp[0x4A] & 0x3FF) + 1, h, stride, dest, shown ? "XFB" : "not in XFB",
+                     line, lines);
+            static const bool presentAtTexCopy = getenv("R2_NO_XFB") && atoi(getenv("R2_NO_XFB")) == 2;
+            if (!disp && presentAtTexCopy) {  // debugging: show the EFB as a texture copy sees it
+                endFrame();
+                ensureFrame();
+            }
             if (disp && !shown) {
                 const u32 tex = v & ~(1u << 14);
                 prepareCopy(tex);
