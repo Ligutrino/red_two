@@ -3,6 +3,7 @@
 // The whole SDK runs recompiled; devices are modelled at the register level, written from
 // the public descriptions of the hardware (YAGCD and the SDK's own register usage).
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #include <ctime>
@@ -26,6 +27,7 @@ u64 g_viLateMaxTb = 0, g_viLateSumTb = 0;  // how late retraces fire (R2_GX_LOG 
 namespace {
 
 void siPollAll();
+void cardFlushAll();
 
 bool s_logIo = false;
 std::set<u32> s_seen;            // outside the register block (EFB etc.)
@@ -111,6 +113,7 @@ void onVi() {
     }
     viUpdateIrq();
     siPollAll();
+    cardFlushAll();
     viFrameHook();
     schedule(EV_VI, s_viFrameStartTb + kViPeriod);
 }
@@ -461,6 +464,7 @@ struct MemCard {
     u8 args[5] = {};
     u32 addr = 0;
     u32 dirtyLo = ~0u, dirtyHi = 0;
+    FILE* file = nullptr;  // the image, open for the whole session
 } s_card[2];
 constexpr u32 kCardLatency = 4;  // dummy bytes between a read command and its data
 
@@ -471,17 +475,26 @@ void cardMarkDirty(MemCard& m, u32 lo, u32 hi) {
     m.dirtyHi = std::max(m.dirtyHi, hi);
 }
 
+// Changes reach the image file once a frame (cardFlushAll from the retrace) through a handle
+// kept open: opening the file for every 128-byte page program cost several milliseconds each
+// on Windows (file-open scanning), so saving stalled the game for seconds.
 void cardFlush(MemCard& m) {
     if (m.dirtyLo >= m.dirtyHi || m.path.empty()) return;
-    if (FILE* f = fopen(m.path.c_str(), "r+b")) {
-        fseek(f, long(m.dirtyLo), SEEK_SET);
-        fwrite(m.data.data() + m.dirtyLo, 1, m.dirtyHi - m.dirtyLo, f);
-        fclose(f);
+    if (!m.file) m.file = fopen(m.path.c_str(), "r+b");
+    if (m.file && fseek(m.file, long(m.dirtyLo), SEEK_SET) == 0 &&
+        fwrite(m.data.data() + m.dirtyLo, 1, m.dirtyHi - m.dirtyLo, m.file) == m.dirtyHi - m.dirtyLo &&
+        fflush(m.file) == 0) {
+        m.dirtyLo = ~0u;
+        m.dirtyHi = 0;
     } else {
-        logf("card", "cannot write %s", m.path.c_str());
+        static bool warned = false;
+        if (!warned) logf("card", "cannot write %s", m.path.c_str());
+        warned = true;
     }
-    m.dirtyLo = ~0u;
-    m.dirtyHi = 0;
+}
+void cardFlushAll() {
+    for (auto& m : s_card)
+        if (m.present) cardFlush(m);
 }
 
 void cardInit(int slot, const std::string& path) {
@@ -503,6 +516,9 @@ void cardInit(int slot, const std::string& path) {
         return;
     }
     m.present = true;
+    m.file = fopen(path.c_str(), "r+b");
+    static const bool atExit = [] { return std::atexit(cardFlushAll) == 0; }();
+    (void)atExit;
 }
 
 // A formatted card's header serial is the console's flash ID scrambled by a generator seeded
@@ -552,18 +568,15 @@ void cardDeselect(int ch) {
         const u32 a = ((u32(m.args[1] & 0x7F) << 17) | (u32(m.args[2]) << 9)) & ~0x1FFFu & (size - 1);
         memset(&m.data[a], 0xFF, 0x2000);
         cardMarkDirty(m, a, a + 0x2000);
-        cardFlush(m);
         cardRaiseIrq(ch);
         break;
     }
     case 0xF2:  // page program (bytes were stored as they arrived)
-        cardFlush(m);
         cardRaiseIrq(ch);
         break;
     case 0xF4:  // erase card
         std::fill(m.data.begin(), m.data.end(), u8(0xFF));
         cardMarkDirty(m, 0, size);
-        cardFlush(m);
         cardRaiseIrq(ch);
         break;
     default: break;

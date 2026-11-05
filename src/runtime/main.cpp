@@ -207,6 +207,24 @@ void viFrameHook() {
             }
         s = *end ? end + 1 : end;
     }
+    // R2_PEEK=<addr>:<len>[,...] (hex; virtual VM addresses work while their page is mapped):
+    // log those guest words every R2_PEEK_EVERY vblanks (default 30).
+    static const char* peekSpec = getenv("R2_PEEK");
+    static const u32 peekEvery = getenv("R2_PEEK_EVERY") ? u32(atoi(getenv("R2_PEEK_EVERY"))) : 30;
+    if (peekSpec && peekEvery && s_frames % peekEvery == 0) {
+        for (const char* s = peekSpec; *s;) {
+            char* end;
+            const u32 addr = u32(strtoul(s, &end, 16)), len = *end == ':' ? u32(strtoul(end + 1, &end, 16)) : 4;
+            std::string line;
+            for (u32 o = 0; o < len; o += 4) {
+                char b[12];
+                snprintf(b, sizeof b, "%s%08X", o % 32 ? " " : (o ? " | " : ""), peek32(addr + o));
+                line += b;
+            }
+            logf("peek", "v%u %08X: %s", s_frames, addr, line.c_str());
+            s = *end ? end + 1 : end;
+        }
+    }
     if (gxLog && s_frames % 60 == 0) {
         const GxStats& g = gxStats();
         logf("gx", "vblank %u, presented %llu: fifo %llu bytes, %llu draws, %llu verts, %llu BP, %llu XF, %llu CP, %llu DL", s_frames,

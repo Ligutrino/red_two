@@ -5,6 +5,8 @@
 // 4 KiB frames in from ARAM on demand. We walk that page table on a TLB miss, keep the
 // referenced/changed bits the game's pager relies on, and deliver page faults to the game's
 // own handler (exception 2) exactly where the access happens.
+#include <unordered_map>
+
 #include "runtime.h"
 
 namespace rt {
@@ -137,8 +139,39 @@ void tlbie(Ctx&, u32 ea) {
     }
 }
 
+// R2_RWATCH=<addr>,<len> (hex, VM region): log guest reads of that range, by function (with
+// tracing on) and LR. Its pages stay out of the read TLB so every read comes through here.
+// Each reader (function, LR, address) is logged at most once a second, with its read count.
+static u32 s_rwLo = 0, s_rwHi = 0;
+static bool rwatchPage(u32 a) { return s_rwHi && (a & ~0xFFFu) < s_rwHi && (a | 0xFFFu) >= s_rwLo; }
+static void rwatchNote(u32 a) {
+    if (a < s_rwLo || a >= s_rwHi) return;
+    struct Seen { u64 logged; u64 count; };
+    static std::unordered_map<u64, Seen> seen;
+    const Ctx& c = curCtx();
+    const u64 key = (u64(c.curFn) << 32) ^ (u64(c.lr) << 12) ^ a, now = tbNow();
+    auto [it, fresh] = seen.try_emplace(key, Seen{now, 0});
+    it->second.count++;
+    if (fresh || now - it->second.logged > kTbClock) {
+        logf("rwatch", "read %08X in %s (lr %08X), %llu reads", a, describeAddr(c.curFn).c_str(), c.lr,
+             (unsigned long long)it->second.count);
+        it->second.logged = now;
+    }
+}
+
 u8* vmMiss(u32 a, bool write) {
     const u32 idx = (a - kVmStart) >> 12;
+    static const bool rwInit = [] {
+        if (const char* s = getenv("R2_RWATCH")) {
+            char* end;
+            s_rwLo = u32(strtoul(s, &end, 16));
+            s_rwHi = s_rwLo + (*end == ',' ? u32(strtoul(end + 1, nullptr, 16)) : 4);
+            logf("rwatch", "watching reads of %08X-%08X", s_rwLo, s_rwHi);
+        }
+        return true;
+    }();
+    (void)rwInit;
+    if (!write && rwatchPage(a)) rwatchNote(a);
     for (int attempt = 0; attempt < 8; attempt++) {
         const Walk w = walk(a);
         u32 dsisr;
@@ -151,7 +184,7 @@ u8* vmMiss(u32 a, bool write) {
                 const u32 frame = w1 & 0xFFFFF000u;
                 u8* host = physPtr(frame, 0x1000);
                 if (!host) fatal("VM page %08X maps to frame %08X outside MEM1", a & ~0xFFFu, frame);
-                g_vmRead[idx] = host;
+                g_vmRead[idx] = rwatchPage(a) ? nullptr : host;
                 // writes go straight through once C is set and the page is writable
                 g_vmWrite[idx] = ((w1 & 0x80) && ppAllows(s_sr[a >> 28], pp, true)) ? host : nullptr;
                 return host;

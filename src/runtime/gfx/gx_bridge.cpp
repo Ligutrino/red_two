@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <initializer_list>
 #include <unordered_map>
@@ -48,6 +49,8 @@ bool s_enabled = false;
 bool s_inFrame = false;
 u64 s_lastFrameTb = 0;
 u64 s_frames = 0;
+u64 s_vblanks = 0;    // retraces seen (R2_GX_SKIP windows)
+u32 s_frameDraws = 0;  // draws so far in this presented frame (R2_GX_SKIP i<from>-<to>)
 
 // --- raw state shadowed from the stream ---
 u32 s_bpMask = 0xFFFFFF;
@@ -180,6 +183,7 @@ void endFrame() {
     aurora_end_frame();
     s_inFrame = false;
     s_frames++;
+    s_frameDraws = 0;
     s_lastFrameTb = tbNow();
 }
 
@@ -475,11 +479,18 @@ void prepareCopy(u32 cp) {
 // ---------------------------------------------------------------------------------------
 // the stream
 // ---------------------------------------------------------------------------------------
-// R2_GX_DUMP=<frame>[,<count>]: write every command of those presented frames to build/gx_frame.txt
+// R2_GX_DUMP=<frame>[,<count>]: write every command of those presented frames to
+// build/gx_frame_<frame>.txt
 FILE* s_dump = nullptr;
 u64 s_dumpFrame = ~0ull;
 u64 s_dumpCount = 1;  // R2_GX_DUMP=<first>[,<count>]
 u64 s_dumpLast = ~0ull;
+// indexed XF loads seen in the dump: their memory is printed again when the dump closes, to
+// compare what the GP read with what the CPU had written by the end of the frame
+struct DumpedLoad {
+    u32 addr, words;
+};
+std::vector<DumpedLoad> s_dumpLoads;
 
 void dumpCommand(const u8* p, u32 len) {
     const u8 op = p[0];
@@ -489,6 +500,22 @@ void dumpCommand(const u8* p, u32 len) {
                 vs, s_vcdLo, s_vcdHi, s_vatA[op & 7], s_vatB[op & 7], s_vatC[op & 7]);
         for (u32 i = 3; i < len && i < 3 + 4 * vs && i < 67; i++) fprintf(s_dump, " %02X", p[i]);
         fputc('\n', s_dump);
+        // Indexed positions: the array and the raw data behind the first indices (offline decoding).
+        const u32 posType = (s_vcdLo >> 9) & 3;
+        if (posType >= 2 && n && vs) {
+            const u32 off = (s_vcdLo & 1) + u32(__builtin_popcount((s_vcdLo >> 1) & 0xFF));
+            const Array& a = s_arrays[0];
+            fprintf(s_dump, "  POS array %08X stride %u:", a.base, a.stride);
+            for (u32 v = 0; v < n && v < 6; v++) {
+                const u8* vp = p + 3 + v * vs + off;
+                const u32 idx = posType == 2 ? vp[0] : be16(vp);
+                fprintf(s_dump, " [%u]", idx);
+                const u32 bytes = a.stride && a.stride < 12 ? a.stride : 12;
+                if (const u8* d = physPtr(a.base + idx * a.stride, bytes))
+                    for (u32 b = 0; b < bytes; b++) fprintf(s_dump, "%02X", d[b]);
+            }
+            fputc('\n', s_dump);
+        }
     } else if (op == 0x61) {
         fprintf(s_dump, "BP %02X = %06X\n", p[1], be32(p + 1) & 0xFFFFFF);
     } else if (op == 0x08) {
@@ -504,8 +531,14 @@ void dumpCommand(const u8* p, u32 len) {
         }
         fputc('\n', s_dump);
     } else if (op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38) {
-        fprintf(s_dump, "LOAD_INDX %c idx %u len %u dst %03X\n", 'A' + (op - 0x20) / 8, be16(p + 1), (be16(p + 3) >> 12) + 1,
-                be16(p + 3) & 0xFFF);
+        const u32 idx = be16(p + 1), cnt = (be16(p + 3) >> 12) + 1;
+        const Array& a = s_arrays[12 + (op - 0x20) / 8];
+        fprintf(s_dump, "LOAD_INDX %c idx %u len %u dst %03X from %08X:", 'A' + (op - 0x20) / 8, idx, cnt, be16(p + 3) & 0xFFF,
+                a.base + idx * a.stride);
+        if (const u8* d = physPtr(a.base + idx * a.stride, cnt * 4))
+            for (u32 i = 0; i < cnt; i++) fprintf(s_dump, " %08X", be32(d + 4 * i));
+        fputc('\n', s_dump);
+        s_dumpLoads.push_back({a.base + idx * a.stride, cnt});
     } else {
         fprintf(s_dump, "OP %02X len %u\n", op, len);
     }
@@ -574,23 +607,96 @@ void sendProjection() {
     for (u32 w : pr) fifo::write_u32(w);
 }
 
+// Debugging: R2_GX_SKIP=<first>-<last>:<filter>[;...] drops the draws matching <filter> while
+// the retrace count (vblanks, as in R2_INPUT) is in [first, last]. Filters: v<VCD low hex> (e.g. v1E00),
+// p<primitive hex> (e.g. pB8), t<map 0 image address hex> (BP 0x94 value, e.g. t47F9B),
+// b<BP 0x41 blend mode hex>, z<BP 0x40 z mode hex>, i<first>-<last> (draw index within the
+// frame, decimal), or * (everything). One rule per window: screenshots taken
+// meanwhile show what each group of draws is.
+struct SkipRule {
+    u64 first, last;
+    char kind;
+    u32 value, value2;
+};
+std::vector<SkipRule> parseSkipRules() {
+    std::vector<SkipRule> rules;
+    const char* s = getenv("R2_GX_SKIP");
+    while (s && *s) {
+        char* end;
+        SkipRule r{};
+        r.first = strtoull(s, &end, 10);
+        r.last = *end == '-' ? strtoull(end + 1, &end, 10) : r.first;
+        if (*end != ':') break;
+        r.kind = end[1];
+        if (r.kind == '*') {
+            end += 2;
+        } else if (r.kind == 'i') {
+            r.value = u32(strtoul(end + 2, &end, 10));
+            r.value2 = *end == '-' ? u32(strtoul(end + 1, &end, 10)) : r.value;
+        } else {
+            r.value = u32(strtoul(end + 2, &end, 16));
+        }
+        rules.push_back(r);
+        logf("gfx", "skip rule: vblanks %llu-%llu drop %c%X", (unsigned long long)r.first, (unsigned long long)r.last,
+             r.kind, r.value);
+        s = *end == ';' ? end + 1 : end;
+    }
+    return rules;
+}
+bool skipDraw(u8 op) {
+    static const std::vector<SkipRule> rules = parseSkipRules();
+    const u32 draw = s_frameDraws++;
+    static u64 announced = ~0ull;
+    for (size_t i = 0; i < rules.size(); i++) {
+        const SkipRule& r = rules[i];
+        if (s_vblanks < r.first || s_vblanks > r.last) continue;
+        if (announced != i) {
+            announced = i;
+            logf("gfx", "skip rule %zu active (vblank %llu, frame %llu)", i, (unsigned long long)s_vblanks, (unsigned long long)s_frames);
+        }
+        if (r.kind == '*' || (r.kind == 'v' && s_vcdLo == r.value) || (r.kind == 'p' && (op & 0xF8) == r.value) ||
+            (r.kind == 't' && (s_bp[0x94] & 0xFFFFFF) == r.value) || (r.kind == 'i' && draw >= r.value && draw <= r.value2) ||
+            (r.kind == 'b' && (s_bp[0x41] & 0xFFFF) == r.value) || (r.kind == 'z' && (s_bp[0x40] & 0x1F) == r.value))
+            return true;
+    }
+    return false;
+}
+
 void onCommand(const u8* p, u32 len) {
     ensureFrame();
     if (s_frames >= s_dumpFrame && s_frames < s_dumpFrame + s_dumpCount) [[unlikely]] {
-        if (!s_dump) s_dump = fopen("build/gx_frame.txt", "w");
+        if (!s_dump) {
+            char name[64];
+            snprintf(name, sizeof name, "build/gx_frame_%llu.txt", (unsigned long long)s_frames);
+            s_dump = fopen(name, "w");
+        }
         if (s_dump && s_frames != s_dumpLast) {
-            fprintf(s_dump, "=== presented frame %llu\n", (unsigned long long)s_frames);
+            // the frame's starting state: every BP register and the vertex arrays
+            fprintf(s_dump, "=== presented frame %llu\nBP state:", (unsigned long long)s_frames);
+            for (int r = 0; r < 256; r++) fprintf(s_dump, "%s%02X=%06X", r % 16 ? " " : "\n  ", r, s_bp[r] & 0xFFFFFF);
+            fprintf(s_dump, "\nCP arrays:");
+            for (int r = 0; r < 16; r++) fprintf(s_dump, " %d:%08X/%u", r, s_arrays[r].base, s_arrays[r].stride);
+            fputc('\n', s_dump);
             s_dumpLast = s_frames;
         }
         if (s_dump) dumpCommand(p, len);
     } else if (s_dump) {
+        for (const auto& l : s_dumpLoads) {
+            fprintf(s_dump, "LATER %08X:", l.addr);
+            if (const u8* d = physPtr(l.addr, l.words * 4))
+                for (u32 i = 0; i < l.words; i++) fprintf(s_dump, " %08X", be32(d + 4 * i));
+            fputc('\n', s_dump);
+        }
+        s_dumpLoads.clear();
         fclose(s_dump);
         s_dump = nullptr;
         s_dumpFrame = ~0ull;
-        logf("gfx", "frame dumped to build/gx_frame.txt");
+        logf("gfx", "frames dumped to build/gx_frame_*.txt");
     }
     const u8 op = p[0];
     if (op >= 0x80 && op < 0xC0) {
+        if (skipDraw(op)) [[unlikely]]
+            return;
         prepareArrays(p);
         prepareTextures();
         // Aurora merges consecutive draws with unchanged state. That broke on this game's
@@ -716,6 +822,18 @@ void onCommand(const u8* p, u32 len) {
             if (completes && s_xfb) endFrame();  // the XFB is complete
             return;
         }
+        // Debugging: R2_GX_OVERRIDE=nocull,zalways,aalways,nofog relaxes per-draw tests to find
+        // what rejects missing geometry.
+        static const char* ovr = getenv("R2_GX_OVERRIDE");
+        if (ovr && (reg == 0x00 || reg == 0x40 || reg == 0xF3 || reg == 0xF1)) {
+            u32 w = v;
+            if (reg == 0x00 && strstr(ovr, "nocull") && ((w >> 14) & 3) != 3) w &= ~(3u << 14);  // not CULL_ALL
+            if (reg == 0x40 && strstr(ovr, "zalways")) w |= 7u << 1;
+            if (reg == 0xF3 && strstr(ovr, "aalways")) w = (w & ~(0xFFu << 16)) | (7u << 16) | (7u << 19);
+            if (reg == 0xF1 && strstr(ovr, "nofog")) w &= ~(7u << 21);
+            bpFull((u32(reg) << 24) | w);
+            return;
+        }
         fifo::write_data(p, len);
         return;
     }
@@ -764,6 +882,18 @@ void logCallback(AuroraLogLevel level, const char* module, const char* message, 
 bool init(int argc, char** argv) {
     AuroraConfig cfg{};
     cfg.appName = "Red Two";
+    // Pipeline cache and other Aurora files: %APPDATA%\Red Two for the player. Automated runs
+    // (R2_BACKGROUND, R2_HEADLESS or R2_INPUT) keep their own in build/test_cache, so debugging
+    // overrides never leave pipelines in the player's cache (Aurora warms the whole cache at
+    // startup: one bad entry crashed every start). R2_CACHE_DIR picks any directory.
+    static std::string cacheDir;
+    if (const char* dir = getenv("R2_CACHE_DIR")) cacheDir = dir;
+    else if (envFlag("R2_BACKGROUND") || envFlag("R2_HEADLESS") || getenv("R2_INPUT")) cacheDir = "build/test_cache/";
+    if (!cacheDir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(cacheDir, ec);
+        cfg.cachePath = cacheDir.c_str();
+    }
     cfg.desiredBackend = BACKEND_AUTO;
     cfg.vsync = false;  // the game paces itself on the emulated retrace
     s_testClear = envFlag("R2_GFX_TEST");
@@ -817,6 +947,7 @@ bool init(int argc, char** argv) {
 }
 
 void vblank() {
+    s_vblanks++;
     if (!s_enabled) return;
     input::poll();
     // Keep the window responsive (and closable) while the game is not presenting: loading
