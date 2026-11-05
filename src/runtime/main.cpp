@@ -18,6 +18,7 @@
 #include "gfx/gx_bridge.h"
 #include "hw/gx_fifo.h"
 #include "runtime.h"
+#include "hw/musyx_dsp.h"
 #include "table.h"
 
 namespace rt {
@@ -202,6 +203,7 @@ void viFrameHook() {
         logf("gx", "safepoints %llu, timer flags %llu, idle waits %llu", (unsigned long long)g_safepoints,
              (unsigned long long)g_timerFlags, (unsigned long long)g_idleWaits);
         g_safepoints = g_timerFlags = g_idleWaits = 0;
+        logf("gx", "dsp: %s", musyxDspStats().c_str());
     }
 }
 
@@ -292,6 +294,7 @@ int main(int argc, char** argv) {
     const u32 entry = bootDisc();
     if (!envFlag("R2_NO_GFX")) gfx::init(argc, argv);
     else input::init(false);  // scripted input still works without a renderer
+    audio::init();
     hwInit();
     c.msr = 0x2032;  // FP, IR, DR, RI; interrupts off until the OS enables them
     logf("boot", "%u recompiled functions; jumping to %s", g_funcCount, describeAddr(entry).c_str());

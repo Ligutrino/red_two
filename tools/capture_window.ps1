@@ -8,7 +8,8 @@ param(
     [int]$Shots = 1,
     [double]$Interval = 2,
     [string]$Log = "build\capture_run.log",
-    [ValidateSet("print", "screen")][string]$Method = "print"
+    [ValidateSet("print", "screen")][string]$Method = "print",
+    [switch]$Sound
 )
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
@@ -30,8 +31,11 @@ public static class R2Win {
 # Background mode: no console window of its own (-NoNewWindow), and the game window opens
 # behind everything without taking focus (R2_BACKGROUND). PrintWindow still captures it.
 $env:R2_BACKGROUND = "1"
+# Silent unless asked: the user works meanwhile (R2_NO_AUDIO); pass -Sound to hear it.
+if (-not $Sound -and -not $env:R2_NO_AUDIO) { $env:R2_NO_AUDIO = "1"; $setNoAudio = $true }
 $p = Start-Process -FilePath $Exe -ArgumentList $ExeArgs -PassThru -NoNewWindow -RedirectStandardError $Log
 Remove-Item Env:R2_BACKGROUND
+if ($setNoAudio) { Remove-Item Env:R2_NO_AUDIO }
 try {
     Start-Sleep -Milliseconds ([int]($Seconds * 1000))
     for ($i = 0; $i -lt $Shots; $i++) {

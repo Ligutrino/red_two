@@ -14,6 +14,7 @@
 
 #include "../runtime.h"
 #include "gx_fifo.h"
+#include "musyx_dsp.h"
 
 namespace rt {
 
@@ -782,9 +783,11 @@ void dspMailFromCpu(u32 m) {
             }
         }
         break;
-    case DspState::Ucode:
-        if (envFlag("R2_DSP_LOG")) logf("dsp", "ucode mail %08X (not implemented)", m);
+    case DspState::Ucode: {  // the MusyX ucode (musyx_dsp.cpp)
+        u32 reply = 0;
+        if (musyxDspMail(m, reply)) dspPostMail(reply, true);
         break;
+    }
     default:
         break;
     }
@@ -831,6 +834,8 @@ void onAi() {
     dspUpdateIrq();
     const u64 samples = u64(s_aiDma.blocks ? s_aiDma.blocks : 1) * 32 / 4;
     const u32 rate = (ai[0] & 0x40) ? 32000 : 48000;
+    // the latched block plays now: hand it to the host
+    if (const u8* p = physPtr(s_aiDma.addr, u32(samples) * 4)) audio::push(p, u32(samples), rate);
     schedule(EV_AI, tbNow() + samples * kTbClock / rate);
 }
 
@@ -978,6 +983,8 @@ void peWrite(u32 off, u16 v) {
 }  // namespace
 
 bool viIsFramebuffer(u32 addr) { return std::find(s_viFbs.begin(), s_viFbs.end(), addr) != s_viFbs.end(); }
+
+u8* aramBase() { return s_aram.data(); }
 
 // Lines in the frame buffer the VI scans out: active lines per field (VTR ACV), times two
 // when interlaced (DCR NIN clear).
