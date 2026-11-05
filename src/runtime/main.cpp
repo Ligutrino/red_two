@@ -198,9 +198,10 @@ void viFrameHook() {
         logf("gx", "retrace lateness: avg %.2f ms, max %.2f ms", double(g_viLateSumTb) * 1000.0 / 60.0 / double(kTbClock),
              double(g_viLateMaxTb) * 1000.0 / double(kTbClock));
         g_viLateMaxTb = g_viLateSumTb = 0;
-        extern u64 g_safepoints, g_timerFlags;
-        logf("gx", "safepoints %llu, timer flags %llu", (unsigned long long)g_safepoints, (unsigned long long)g_timerFlags);
-        g_safepoints = g_timerFlags = 0;
+        extern u64 g_safepoints, g_timerFlags, g_idleWaits;
+        logf("gx", "safepoints %llu, timer flags %llu, idle waits %llu", (unsigned long long)g_safepoints,
+             (unsigned long long)g_timerFlags, (unsigned long long)g_idleWaits);
+        g_safepoints = g_timerFlags = g_idleWaits = 0;
     }
 }
 

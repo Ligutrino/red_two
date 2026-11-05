@@ -90,7 +90,8 @@ bool Emitter::insn(const Function& f, u32 pc, u32 w, std::string& o, bool& usesJ
         // intra-function goto or tail call into another entry
         const bool intra = f.labels.count(t) && std::binary_search(f.insns.begin(), f.insns.end(), t);
         std::string body;
-        if (intra) body = (t <= pc ? fmt("poll(c, %s); ", hex(t).c_str()) : std::string()) + fmt("goto L_%08X;", t);
+        if (intra && t <= pc && cfg_.idleLoops.count(t)) body = fmt("idleWait(c, %s); goto L_%08X;", hex(t).c_str(), t);
+        else if (intra) body = (t <= pc ? fmt("poll(c, %s); ", hex(t).c_str()) : std::string()) + fmt("goto L_%08X;", t);
         else body = callTo(t, pc, false) + " return;";
         if (c == "true") line(body);
         else line("if (" + c + ") { " + body + " }");

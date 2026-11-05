@@ -3,6 +3,8 @@
 #   savectx the function returns twice (its callers keep a jump buffer)
 #   entry   extra function entry the analysis cannot see
 #   noentry drop a false-positive entry
+#   idle    head of a spin-wait loop: its back-edge blocks the host thread until an event
+#           is due instead of spinning (the loop can only end through an interrupt)
 
 # OS context switching runs on host fibers (src/runtime/threads.cpp)
 savectx OSSaveContext
@@ -13,3 +15,7 @@ hle     OSInitContext
 # Debug output and fatal paths (src/runtime/hle_os.cpp)
 hle     OSReport
 hle     PPCHalt
+
+# OS idle loop in __OSReschedule (0x8002E5EC): no runnable thread, interrupts enabled,
+# spins on RunQueueBits until an interrupt handler readies a thread
+idle    8002E724

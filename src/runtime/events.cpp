@@ -42,6 +42,12 @@ void recomputeEarliest() {
 // fired a 15.6 ms tick late while the game idled waiting for them (the intro ran at ~1/3 speed).
 HANDLE s_timer = nullptr;   // high-resolution waitable timer
 HANDLE s_wakeEv = nullptr;  // schedule() changed the earliest event
+HANDLE s_guestEv = nullptr; // g_irqPending was raised (wakes an idle guest)
+
+void raisePending() {
+    g_irqPending = 1;
+    SetEvent(s_guestEv);
+}
 
 void sleepUs(u64 us, bool wakeable) {
     LARGE_INTEGER due;
@@ -56,7 +62,7 @@ void timerThread() {
         const u64 e = s_earliest.load();
         const u64 now = tbNow();
         if (e <= now) {
-            g_irqPending = 1;
+            raisePending();
             g_timerFlags++;
             // the guest runs the event at its next safepoint (and reschedules); check again soon
             sleepUs(200, false);
@@ -89,6 +95,7 @@ void eventsInit() {
     s_timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
     if (!s_timer) s_timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);  // before Windows 10 1803
     s_wakeEv = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    s_guestEv = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     std::thread(timerThread).detach();
 }
 
@@ -109,7 +116,18 @@ void unschedule(int id) {
 
 bool scheduled(int id) { return s_due[id] != 0; }
 
-void wakeGuest() { g_irqPending = 1; }
+void wakeGuest() { raisePending(); }
+
+u64 g_idleWaits = 0;  // R2_GX_LOG statistics
+
+void idleWait(Ctx& c, u32 pc) {
+    if (!g_irqPending && !g_irqLine) {
+        g_idleWaits++;
+        // The timer thread signals when an event is due; the timeout only bounds a missed wake.
+        WaitForSingleObject(s_guestEv, 4);
+    }
+    poll(c, pc);
+}
 
 void runDueEvents() {
     const u64 now = tbNow();

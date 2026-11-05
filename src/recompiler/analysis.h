@@ -28,6 +28,7 @@ struct Config {
     std::set<uint32_t> saveCtx;              // functions that return twice (OSSaveContext)
     std::set<uint32_t> extraEntries;         // entries the analysis cannot see
     std::set<uint32_t> notEntries;           // false positives to drop
+    std::set<uint32_t> idleLoops;            // spin-wait loop heads: block until an event is due
     std::vector<uint32_t> embedded;          // layout.txt "embedded <addr>": DOL images inside the DOL
     bool load(const std::string& dir);
 };

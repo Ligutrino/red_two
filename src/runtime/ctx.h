@@ -265,6 +265,9 @@ void safepoint(Ctx& c, u32 pc);   // deliver pending interrupts (loop back-edges
 inline void poll(Ctx& c, u32 pc) {
     if (g_irqPending) [[unlikely]] safepoint(c, pc);
 }
+// Back-edge of a spin-wait loop that only an interrupt can end (hooks.txt "idle"): sleep
+// until the event timer raises g_irqPending instead of burning a host core.
+void idleWait(Ctx& c, u32 pc);
 u32 mfspr(Ctx& c, u32 spr);
 void mtspr(Ctx& c, u32 spr, u32 v);
 u32 mftb(Ctx& c, u32 which);
