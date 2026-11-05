@@ -17,6 +17,7 @@
 #include <aurora/event.h>
 #include <aurora/gfx.h>
 #include <SDL3/SDL_hints.h>
+#include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_properties.h>
 #include <SDL3/SDL_video.h>
 #include <xxhash.h>
@@ -98,6 +99,14 @@ void pollEvents() {
         if (e->type == AURORA_EXIT) {
             logf("gfx", "window closed");
             quit(0);
+        }
+        // F11 or Alt+Enter: toggle fullscreen
+        if (e->type == AURORA_SDL_EVENT && e->sdl.type == SDL_EVENT_KEY_DOWN && !e->sdl.key.repeat &&
+            (e->sdl.key.key == SDLK_F11 || (e->sdl.key.key == SDLK_RETURN && (e->sdl.key.mod & SDL_KMOD_ALT)))) {
+            if (SDL_Window* w = aurora_get_window()) {
+                const bool full = (SDL_GetWindowFlags(w) & SDL_WINDOW_FULLSCREEN) != 0;
+                SDL_SetWindowFullscreen(w, !full);
+            }
         }
     }
 }
@@ -773,6 +782,8 @@ bool init(int argc, char** argv) {
     cfg.mem1Size = 0;
     cfg.mem2Size = 0;
     if (envFlag("R2_HEADLESS")) cfg.surface.type = AURORA_SURFACE_HEADLESS;
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--fullscreen")) cfg.startFullscreen = true;
     // R2_BACKGROUND: automated runs - the window opens behind everything without taking focus
     // (it still renders, and PrintWindow can capture it).
     const bool background = envFlag("R2_BACKGROUND");

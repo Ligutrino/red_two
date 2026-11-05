@@ -350,7 +350,8 @@ void siWrite(u32 off, u32 v) {
         break;
     }
     case SISR:
-        if (v & 0x80000000u) {  // WR: copy out buffers (polling commands) - nothing to do
+        if (v & 0x80000000u) {  // WR: the output buffers take effect; bits 0-1 drive the rumble motor
+            for (int n = 0; n < 4; n++) input::rumble(n, si[n * 3] & 3);
         }
         si[SISR] &= ~(v & 0x0F0F0F0Fu);  // clear error bits written as 1
         break;

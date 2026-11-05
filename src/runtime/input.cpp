@@ -96,6 +96,13 @@ void init(bool pads) {
     s_ready = true;
 }
 
+void rumble(int chan, u32 cmd) {
+    static u32 last[4] = {};
+    if (!s_pads || chan < 0 || chan > 3 || last[chan] == cmd) return;
+    last[chan] = cmd;
+    PADControlMotor(u32(chan), cmd);
+}
+
 void poll() {
     if (!s_ready) return;
     s_vblank++;

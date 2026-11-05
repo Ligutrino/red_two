@@ -30,6 +30,15 @@ build\windows\red_two.exe --disc orig\GSWE64.iso
 
 The code generated from your disc ends up in `build/` and is yours alone: never share it.
 
+### Playing
+
+- Gamepads work through SDL (with rumble). Keyboard: WASD or arrows steer, Space = A (fire),
+  Left Shift = B, E = X, Q = Y, R = Z, 1/2 = L/R, Enter = Start, IJKL = C-stick, TFGH = D-pad.
+- F11 or Alt+Enter toggles fullscreen; `--fullscreen` starts that way.
+- Saves go to `saves/GSWE64_A.raw` (a Memory Card 59 in slot A; the game formats a new one).
+  `R2_CARD_A=<path>` uses another card image, for example a Dolphin `.raw` card.
+- `R2_NO_AUDIO=1` runs without sound.
+
 ## How it works
 
 See [CLAUDE.md](CLAUDE.md) for the architecture and what we learned about the game

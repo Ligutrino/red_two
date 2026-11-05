@@ -106,6 +106,7 @@ bool viLocateCopy(u32 dest, u32 strideBytes, u32& line, u32& lines);
 namespace input {
 void init(bool pads);  // pads: Aurora PAD (after the window exists); false = R2_INPUT script only
 void poll();  // once per frame: Aurora pads/keyboard -> SI controller state
+void rumble(int chan, u32 cmd);  // SI motor bits: 0 stop, 1 rumble, 2 hard stop
 }  // namespace input
 
 }  // namespace rt
