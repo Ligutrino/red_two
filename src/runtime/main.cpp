@@ -183,15 +183,24 @@ void dumpThreads() {
 // --- frame hook -------------------------------------------------------------------------
 static u32 s_frames = 0;
 void viFrameHook() {
+    static const bool noGfx = envFlag("R2_NO_GFX"), gxLog = envFlag("R2_GX_LOG");
     s_frames++;
-    gfx::vblank();
-    if (envFlag("R2_GX_LOG") && s_frames % 60 == 0) {
+    if (noGfx) input::poll();  // otherwise the renderer polls (Aurora pads)
+    else gfx::vblank();
+    if (gxLog && s_frames % 60 == 0) {
         const GxStats& g = gxStats();
         logf("gx", "vblank %u, presented %llu: fifo %llu bytes, %llu draws, %llu verts, %llu BP, %llu XF, %llu CP, %llu DL", s_frames,
              (unsigned long long)gfx::frames(),
              (unsigned long long)g.bytes, (unsigned long long)g.draws, (unsigned long long)g.vertices,
              (unsigned long long)g.bp, (unsigned long long)g.xf, (unsigned long long)g.cp, (unsigned long long)g.dl);
         logf("gx", "%s", gfx::stats().c_str());
+        extern u64 g_viLateMaxTb, g_viLateSumTb;
+        logf("gx", "retrace lateness: avg %.2f ms, max %.2f ms", double(g_viLateSumTb) * 1000.0 / 60.0 / double(kTbClock),
+             double(g_viLateMaxTb) * 1000.0 / double(kTbClock));
+        g_viLateMaxTb = g_viLateSumTb = 0;
+        extern u64 g_safepoints, g_timerFlags;
+        logf("gx", "safepoints %llu, timer flags %llu", (unsigned long long)g_safepoints, (unsigned long long)g_timerFlags);
+        g_safepoints = g_timerFlags = 0;
     }
 }
 
@@ -270,6 +279,7 @@ int main(int argc, char** argv) {
         }).detach();
     }
     eventsInit();
+    profilerStart();
     s_t0Tb = tbNow();
     if (!memInit()) fatal("could not reserve the guest address space");
     tableInit();
@@ -280,6 +290,7 @@ int main(int argc, char** argv) {
     Ctx& c = *boot;
     const u32 entry = bootDisc();
     if (!envFlag("R2_NO_GFX")) gfx::init(argc, argv);
+    else input::init(false);  // scripted input still works without a renderer
     hwInit();
     c.msr = 0x2032;  // FP, IR, DR, RI; interrupts off until the OS enables them
     logf("boot", "%u recompiled functions; jumping to %s", g_funcCount, describeAddr(entry).c_str());

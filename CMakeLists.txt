@@ -77,6 +77,7 @@ add_executable(red_two
     src/runtime/sjlj.cpp
     src/runtime/vm.cpp
     src/runtime/interp.cpp
+    src/runtime/profiler.cpp
     src/runtime/hle_os.cpp
     src/runtime/hw/hw.cpp
     src/runtime/hw/gx_fifo.cpp
@@ -84,7 +85,7 @@ add_executable(red_two
     src/runtime/input.cpp)
 target_include_directories(red_two PRIVATE src/runtime "${GEN_DIR}" extern/aurora/lib)
 target_compile_definitions(red_two PRIVATE ${R2_DEFS})
-target_link_libraries(red_two PRIVATE r2game winmm aurora::core aurora::gx aurora::vi aurora::pad xxHash::xxhash)
+target_link_libraries(red_two PRIVATE r2game winmm aurora::core aurora::gx aurora::vi aurora::pad xxHash::xxhash dbghelp)
 if(MSVC)
     target_compile_options(red_two PRIVATE -fno-strict-aliasing)
     target_link_options(red_two PRIVATE /STACK:16777216)

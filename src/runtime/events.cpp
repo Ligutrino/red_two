@@ -1,13 +1,13 @@
 // Guest time base, decrementer and timed device events.
 //
-// Device state is only touched on the guest thread. A host timer thread sleeps until the
-// earliest scheduled event and then raises g_irqPending; the guest polls it at loop
+// Device state is only touched on the guest thread. A host timer thread sleeps (on a
+// high-resolution waitable timer) until the earliest scheduled event and then raises
+// g_irqPending; the guest polls it at loop
 // back-edges (safepoint), runs due events there and takes interrupts if enabled.
 #include <windows.h>
 #include <timeapi.h>
 
 #include <atomic>
-#include <condition_variable>
 #include <mutex>
 #include <thread>
 
@@ -16,13 +16,13 @@
 namespace rt {
 
 void (*g_eventHandlers[EV_COUNT])() = {};
+u64 g_timerFlags = 0;  // times the timer thread raised g_irqPending (R2_GX_LOG)
 volatile u32 g_irqLine = 0;
 
 namespace {
 LARGE_INTEGER s_qpcFreq, s_qpcStart;
 u64 s_due[EV_COUNT];  // 0 = not scheduled
 std::mutex s_mu;
-std::condition_variable s_cv;
 std::atomic<u64> s_earliest{~0ull};
 
 u64 s_decBaseTb = 0;
@@ -36,28 +36,40 @@ void recomputeEarliest() {
     s_earliest = e;
 }
 
+// The timer thread sleeps on a high-resolution waitable timer. Ordinary sleeps (condition
+// variables, Sleep) follow the system tick, and Windows 11 ignores timeBeginPeriod(1) for
+// processes without a visible window (headless runs, windows behind others): retraces then
+// fired a 15.6 ms tick late while the game idled waiting for them (the intro ran at ~1/3 speed).
+HANDLE s_timer = nullptr;   // high-resolution waitable timer
+HANDLE s_wakeEv = nullptr;  // schedule() changed the earliest event
+
+void sleepUs(u64 us, bool wakeable) {
+    LARGE_INTEGER due;
+    due.QuadPart = -LONGLONG(us * 10);  // relative, 100 ns units
+    SetWaitableTimer(s_timer, &due, 0, nullptr, nullptr, FALSE);
+    HANDLE hs[2] = {s_timer, s_wakeEv};
+    WaitForMultipleObjects(wakeable ? 2 : 1, hs, FALSE, INFINITE);
+}
+
 void timerThread() {
-    std::unique_lock lk(s_mu);
     for (;;) {
         const u64 e = s_earliest.load();
         const u64 now = tbNow();
         if (e <= now) {
             g_irqPending = 1;
-            // wait until the guest consumed it (it reschedules), but do not spin
-            s_cv.wait_for(lk, std::chrono::microseconds(200));
+            g_timerFlags++;
+            // the guest runs the event at its next safepoint (and reschedules); check again soon
+            sleepUs(200, false);
             continue;
         }
         if (e == ~0ull) {
-            s_cv.wait_for(lk, std::chrono::milliseconds(50));
+            sleepUs(50000, true);
             continue;
         }
         const u64 waitUs = (e - now) * 1000000 / kTbClock;
-        if (waitUs > 2000) s_cv.wait_for(lk, std::chrono::microseconds(waitUs - 1000));
-        else {
-            lk.unlock();
-            while (tbNow() < e) YieldProcessor();
-            lk.lock();
-        }
+        if (waitUs > 300) sleepUs(waitUs - 150, true);  // wake a little early, then spin
+        else
+            while (tbNow() < e && s_earliest.load() == e) YieldProcessor();
     }
 }
 }  // namespace
@@ -74,6 +86,9 @@ void eventsInit() {
     QueryPerformanceFrequency(&s_qpcFreq);
     QueryPerformanceCounter(&s_qpcStart);
     timeBeginPeriod(1);
+    s_timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (!s_timer) s_timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);  // before Windows 10 1803
+    s_wakeEv = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     std::thread(timerThread).detach();
 }
 
@@ -81,8 +96,9 @@ void schedule(int id, u64 at) {
     if (!at) at = 1;
     std::lock_guard lk(s_mu);
     s_due[id] = at;
+    const u64 before = s_earliest.load();
     recomputeEarliest();
-    s_cv.notify_all();
+    if (s_earliest.load() < before && s_wakeEv) SetEvent(s_wakeEv);
 }
 
 void unschedule(int id) {

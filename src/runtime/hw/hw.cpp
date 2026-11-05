@@ -18,6 +18,8 @@ namespace rt {
 extern void (*g_eventHandlers[EV_COUNT])();
 extern volatile u32 g_irqLine;
 
+u64 g_viLateMaxTb = 0, g_viLateSumTb = 0;  // how late retraces fire (R2_GX_LOG reports, resets)
+
 namespace {
 
 void siPollAll();
@@ -86,7 +88,12 @@ void viUpdateIrq() {
 }
 
 void onVi() {
-    s_viFrameStartTb = tbNow();
+    const u64 now = tbNow(), due = s_viFrameStartTb + kViPeriod;
+    if (now > due) {
+        g_viLateSumTb += now - due;
+        if (now - due > g_viLateMaxTb) g_viLateMaxTb = now - due;
+    }
+    s_viFrameStartTb = now;
     s_viFrames++;
     for (int n = 0; n < 2; n++) {
         u16& hi = vi[(0x30 + 4 * n) / 2];
@@ -111,12 +118,18 @@ u16 viRead(u32 off) {
 // presents only display copies into one of these: the game also clears EFB bands with
 // display copies into a scratch buffer the VI never shows.
 std::vector<u32> s_viFbs;
+u32 s_viTop[2] = {};  // the two most recent distinct top-field frame buffers (front and back)
 
 void viNoteFb(u32 hiOff) {
     const u32 v = (u32(vi[hiOff / 2]) << 16) | vi[hiOff / 2 + 1];
     const u32 addr = (v & 0x10000000) ? (v & 0x00FFFFFF) << 5 : v & 0x00FFFFFF;  // POFF: address >> 5
-    if (!addr || std::find(s_viFbs.begin(), s_viFbs.end(), addr) != s_viFbs.end()) return;
-    if (s_viFbs.size() >= 8) s_viFbs.erase(s_viFbs.begin());
+    if (!addr) return;
+    if (hiOff == 0x1C && addr != s_viTop[0]) {
+        s_viTop[1] = s_viTop[0];
+        s_viTop[0] = addr;
+    }
+    if (std::find(s_viFbs.begin(), s_viFbs.end(), addr) != s_viFbs.end()) return;
+    if (s_viFbs.size() >= 32) s_viFbs.erase(s_viFbs.begin());
     s_viFbs.push_back(addr);
     logf("vi", "frame buffer %08X", addr);
 }
@@ -125,8 +138,10 @@ void viNoteFb(u32 hiOff) {
 void viWrite(u32 off, u16 v) {
     vi[(off & 0x7F) / 2] = v;
     if (off >= 0x30 && off < 0x40) viUpdateIrq();
-    if (off == 0x1C || off == 0x1E) viNoteFb(0x1C);
-    else if (off == 0x24 || off == 0x26) viNoteFb(0x24);
+    // The 32-bit frame buffer registers arrive as two 16-bit writes (high, then low): take
+    // the address once the low half is in, so no half-updated mix is recorded.
+    if (off == 0x1E) viNoteFb(0x1C);
+    else if (off == 0x26) viNoteFb(0x24);
 }
 
 // =======================================================================================
@@ -748,6 +763,28 @@ void peWrite(u32 off, u16 v) {
 }  // namespace
 
 bool viIsFramebuffer(u32 addr) { return std::find(s_viFbs.begin(), s_viFbs.end(), addr) != s_viFbs.end(); }
+
+// Lines in the frame buffer the VI scans out: active lines per field (VTR ACV), times two
+// when interlaced (DCR NIN clear).
+u32 viXfbLines() {
+    const u32 acv = (vi[0x00 / 2] >> 4) & 0x3FF;
+    const bool nonInterlaced = vi[0x02 / 2] & 4;
+    return nonInterlaced ? acv : acv * 2;
+}
+
+bool viLocateCopy(u32 dest, u32 strideBytes, u32& line, u32& lines) {
+    lines = viXfbLines();
+    if (!strideBytes || !lines) return false;
+    for (u32 base : s_viTop) {
+        if (!base || dest < base) continue;
+        const u32 off = dest - base;
+        if (off % strideBytes == 0 && off / strideBytes < lines) {
+            line = off / strideBytes;
+            return true;
+        }
+    }
+    return false;
+}
 
 // --- events raised by the GX FIFO parser -----------------------------------------------
 void peToken(u16 token, bool irq) {

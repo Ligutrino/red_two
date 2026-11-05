@@ -250,7 +250,10 @@ void deliverException(Ctx& c, u32 exc, u32 pc) {
     delete fr;
 }
 
+u64 g_safepoints = 0, g_exceptions = 0;  // R2_GX_LOG statistics
+
 void safepoint(Ctx& c, u32 pc) {
+    g_safepoints++;
     g_irqPending = 0;
     runDueEvents();
     if (!(c.msr & kMsrEE)) return;

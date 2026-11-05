@@ -23,6 +23,7 @@
 #include <dolphin/gx/GXAurora.h>
 #include <dolphin/gx/GXCommandList.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -104,6 +105,7 @@ void pollEvents() {
 void testQuad();
 bool s_testClear = false;  // R2_GFX_TEST: clear each frame to magenta (is presentation working?)
 bool s_xfb = true;         // R2_NO_XFB: present the EFB instead of the emulated XFB
+bool s_copyLog = false;  // R2_COPY_LOG: every display copy and where it lands
 
 void ensureFrame() {
     if (s_inFrame) return;
@@ -496,6 +498,69 @@ void dumpCommand(const u8* p, u32 len) {
     }
 }
 
+// --- scissor box offset ------------------------------------------------------------------
+// GXSetScissorBoxOffset moves rendering in the EFB (EFB = screen - offset). Aurora only moves
+// its scissor, so while an offset is active the bridge re-sends the projection with the same
+// shift folded into its translation terms (the viewport itself must stay inside the target).
+u32 s_xfVp[6] = {};    // XF 0x101A..0x101F: viewport scale x/y/z, origin x/y/z
+u32 s_xfProj[7] = {};  // XF 0x1020..0x1026: projection p0..p5, type
+bool s_projKnown = false;
+s32 s_boxOffX = 0, s_boxOffY = 0;
+
+float asFloat(u32 b) {
+    float f;
+    memcpy(&f, &b, 4);
+    return f;
+}
+u32 asBits(float f) {
+    u32 b;
+    memcpy(&b, &f, 4);
+    return b;
+}
+
+bool s_boxBiasSent = false;
+
+// A BP write that is complete on its own (no pending mask from the game's stream).
+void bpFull(u32 v) {
+    fifo::write_u8(0x61);
+    fifo::write_u32(0xFEFFFFFFu);
+    fifo::write_u8(0x61);
+    fifo::write_u32(v);
+}
+
+void sendScissor() {
+    const u32 s0 = s_bp[0x20], s1 = s_bp[0x21];
+    auto adj = [](u32 r, s32 off) { return u32(std::clamp(s32(r) - off, 0, 2047)); };
+    const u32 tp = adj(s0 & 0x7FF, s_boxOffY), lf = adj((s0 >> 12) & 0x7FF, s_boxOffX);
+    const u32 bm = adj(s1 & 0x7FF, s_boxOffY), rt = adj((s1 >> 12) & 0x7FF, s_boxOffX);
+    bpFull(0x20000000u | (lf << 12) | tp);
+    bpFull(0x21000000u | (rt << 12) | bm);
+}
+
+void sendProjection() {
+    if (!s_projKnown) return;
+    u32 pr[7];
+    memcpy(pr, s_xfProj, sizeof pr);
+    if (s_boxOffX || s_boxOffY) {
+        // screen = ndc * scale + origin: moving the screen by -off moves ndc by -off / scale.
+        // Perspective: ndc = clip / w with w = -z, so the shift enters p1/p3 negated;
+        // orthographic: w = 1 and it adds directly.
+        const float sx = asFloat(s_xfVp[0]), sy = asFloat(s_xfVp[1]);
+        const float dx = sx != 0.f ? -float(s_boxOffX) / sx : 0.f;
+        const float dy = sy != 0.f ? -float(s_boxOffY) / sy : 0.f;
+        const bool ortho = pr[6] != 0;
+        pr[1] = asBits(asFloat(pr[1]) + (ortho ? dx : -dx));
+        pr[3] = asBits(asFloat(pr[3]) + (ortho ? dy : -dy));
+        if (s_copyLog)
+            logf("gfx", "box offset %d,%d: %s projection p1 %g -> %g, p3 %g -> %g (viewport scale %g %g)", s_boxOffX,
+                 s_boxOffY, ortho ? "ortho" : "persp", asFloat(s_xfProj[1]), asFloat(pr[1]), asFloat(s_xfProj[3]),
+                 asFloat(pr[3]), sx, sy);
+    }
+    fifo::write_u8(0x10);
+    fifo::write_u32((6u << 16) | 0x1020);
+    for (u32 w : pr) fifo::write_u32(w);
+}
+
 void onCommand(const u8* p, u32 len) {
     ensureFrame();
     if (s_frames >= s_dumpFrame && s_frames < s_dumpFrame + s_dumpCount) [[unlikely]] {
@@ -572,25 +637,44 @@ void onCommand(const u8* p, u32 len) {
             const u32 idx = reg & 0x1F;
             if (idx < 0x1C) s_tex[(idx & 3) + (reg >= 0xA0 ? 4 : 0)].dirty = true;
         } else if (reg == 0x59) {
-            // Scissor box offset. Hardware: field = (offset + 340) / 2 and the box is
-            // raw - 2 * field. Aurora's decoder adds 2 * sign-extended field (its own
-            // GXSetScissorBoxOffset writes (offset - 342) / 2), so send the field negated.
-            const u32 fx = (0u - (v & 0x3FF)) & 0x3FF, fy = (0u - ((v >> 10) & 0x3FF)) & 0x3FF;
-            fifo::write_u8(0x61);
-            fifo::write_u32(0xFEFFFFFFu);  // the value below is complete: no pending mask
-            fifo::write_u8(0x61);
-            fifo::write_u32(0x59000000u | (fy << 10) | fx);
+            // Scissor box offset. Hardware: field = (offset + 340) / 2, and both the scissor
+            // box and the primitives move by -offset in the EFB. Aurora only moves its scissor,
+            // by 2 * a 9-bit signed field (its GXSetScissorBoxOffset writes (offset - 342) / 2),
+            // which cannot hold this game's offsets (the bottom-half pass uses 238). So Aurora
+            // always gets the fixed bias (-340) and the bridge applies the offset itself: to the
+            // scissor box and, through the projection, to the geometry.
+            const s32 offX = s32(2 * (v & 0x3FF)) - 340, offY = s32(2 * ((v >> 10) & 0x3FF)) - 340;
+            if (offX != s_boxOffX || offY != s_boxOffY || !s_boxBiasSent) {
+                s_boxOffX = offX;
+                s_boxOffY = offY;
+                s_boxBiasSent = true;
+                const u32 f = (0u - 170u) & 0x3FF;
+                bpFull(0x59000000u | (f << 10) | f);
+                sendScissor();
+                sendProjection();
+            }
+            return;
+        } else if (reg == 0x20 || reg == 0x21) {  // scissor box: moved by the box offset
+            sendScissor();
             return;
         } else if (reg == 0x65) {  // TLUT load into TMEM: remember it, bind at draw time
             s_tlutLoads[v & 0x3FF] = {(s_bp[0x64] & 0x1FFFFF) << 5, ((v >> 10) & 0x7FF) * 16};
             return;
         } else if (reg == 0x52) {
             const bool disp = v & (1u << 14);
-            // A display copy makes a picture only if it lands in a frame buffer the VI scans
-            // out. The game also uses display copies into a scratch buffer just to clear EFB
-            // bands (e.g. 640x16 strips around its 640x226 picture): send those as texture
-            // copies, which keeps the clear without presenting a near-empty frame.
-            const bool shown = disp && viIsFramebuffer((s_bp[0x4B] & 0xFFFFFF) << 5);
+            // A display copy makes a picture only if it lands in the frame buffer the VI scans
+            // out (front or back). The game builds each 640x450 XFB from two 640x226 copies
+            // (top and bottom halves rendered in separate EFB passes), and also uses display
+            // copies into a scratch buffer just to clear EFB bands: those go to Aurora as
+            // texture copies, which keeps the clear without touching the picture.
+            const u32 dest = (s_bp[0x4B] & 0xFFFFFF) << 5, stride = (s_bp[0x4D] & 0x3FF) * 32;
+            const u32 h = ((s_bp[0x4A] >> 10) & 0x3FF) + 1;
+            u32 line = 0, lines = 0;
+            const bool shown = disp && viLocateCopy(dest, stride, line, lines);
+            const bool completes = shown && line + h >= lines;  // reaches the bottom: frame done
+            if (disp && s_copyLog)
+                logf("gfx", "display copy src y %u h %u -> %08X: %s line %u of %u", (s_bp[0x49] >> 10) & 0x3FF, h, dest,
+                     shown ? "XFB" : "not in XFB", line, lines);
             if (disp && !shown) {
                 const u32 tex = v & ~(1u << 14);
                 prepareCopy(tex);
@@ -599,17 +683,41 @@ void onCommand(const u8* p, u32 len) {
                 fifo::publish();
                 return;
             }
-            if (shown && !s_xfb) {  // present the EFB as it is before the copy clears it
+            if (completes && !s_xfb) {  // present the EFB as it is before the copy clears it
                 endFrame();
                 ensureFrame();
+            }
+            if (shown) {
+                aur(GX_AURORA_LOAD_DISP_COPY_DST);
+                fifo::write_u32(line);
+                fifo::write_u32(lines);
             }
             prepareCopy(v);
             fifo::write_data(p, len);
             fifo::publish();
-            if (shown && s_xfb) endFrame();  // the frame is in the XFB
+            if (completes && s_xfb) endFrame();  // the XFB is complete
             return;
         }
         fifo::write_data(p, len);
+        return;
+    }
+    case 0x10: {  // XF register load: shadow the viewport and projection (scissor box offset)
+        const u32 hdr = be32(p + 1);
+        const u32 addr = hdr & 0xFFFF, cnt = (len - 5) / 4;
+        bool touched = false;
+        for (u32 i = 0; i < cnt; i++) {
+            const u32 a = addr + i, w = be32(p + 5 + 4 * i);
+            if (a >= 0x101A && a <= 0x101F) {
+                s_xfVp[a - 0x101A] = w;
+                touched = true;
+            } else if (a >= 0x1020 && a <= 0x1026) {
+                s_xfProj[a - 0x1020] = w;
+                s_projKnown = true;
+                touched = true;
+            }
+        }
+        fifo::write_data(p, len);
+        if (touched && (s_boxOffX || s_boxOffY)) sendProjection();
         return;
     }
     case 0x40:  // CALL_DL: inlined by the CP model
@@ -647,6 +755,7 @@ bool init(int argc, char** argv) {
         if (end && *end == ',') s_dumpCount = strtoull(end + 1, nullptr, 10);
     }
     s_xfb = !envFlag("R2_NO_XFB");
+    s_copyLog = envFlag("R2_COPY_LOG");
     cfg.emulateXfb = s_xfb;
     cfg.windowWidth = 1280;
     cfg.windowHeight = 960;
@@ -676,7 +785,7 @@ bool init(int argc, char** argv) {
     logf("gfx", "Aurora up: %s backend, window %ux%u", backends[info.backend], info.windowSize.width, info.windowSize.height);
     s_enabled = true;
     gxSetSink(onCommand);
-    input::init();
+    input::init(true);
     return true;
 }
 

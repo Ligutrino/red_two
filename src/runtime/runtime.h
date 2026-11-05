@@ -38,6 +38,7 @@ GuestFn lookupFn(u32 addr);
 GuestFn lookupOrig(u32 addr);  // translated body of a hooked function
 void tableInit();
 void interpret(Ctx& c, u32 addr);  // interp.cpp: code with no recompiled function
+void profilerStart();  // profiler.cpp: R2_PROFILE=<seconds> (call on the guest's host thread)
 
 // --- time and events ------------------------------------------------------------------
 constexpr u64 kBusClock = 162000000, kCpuClock = 486000000, kTbClock = kBusClock / 4;
@@ -99,9 +100,11 @@ std::string discFileAt(u64 off);  // "path+0xoffset" of the disc file containing
 void hwInit();
 void viFrameHook();  // called once per guest frame (XFB handoff)
 bool viIsFramebuffer(u32 addr);  // hw.cpp: has the VI been told to scan out this XFB?
+// hw.cpp: a display copy to dest lands at this line of the VI's (front or back) frame buffer
+bool viLocateCopy(u32 dest, u32 strideBytes, u32& line, u32& lines);
 
 namespace input {
-void init();  // after the window exists
+void init(bool pads);  // pads: Aurora PAD (after the window exists); false = R2_INPUT script only
 void poll();  // once per frame: Aurora pads/keyboard -> SI controller state
 }  // namespace input
 

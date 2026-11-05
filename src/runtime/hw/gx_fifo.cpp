@@ -156,7 +156,7 @@ void execute(const u8* p, size_t len, int depth) {
         case 0x40: {
             s_stats.dl++;
             const u32 a = be32(p + 1), n = be32(p + 5);
-            if (s_log) logf("gx", "call display list %08X size %X", a, n);
+            if (s_cmdLog >= 2 && s_gpFifoSets >= 2) logf("gx", "call display list %08X size %X", a, n);
             if (depth == 0) runDisplayList(a, n, depth + 1);
             break;
         }

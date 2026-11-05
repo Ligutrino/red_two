@@ -84,9 +84,14 @@ void defaultKeyboard() {
 }
 }  // namespace
 
-void init() {
-    defaultKeyboard();
-    PADInit();
+bool s_pads = false;  // Aurora PAD available (not with R2_NO_GFX)
+
+void init(bool pads) {
+    s_pads = pads;
+    if (pads) {
+        defaultKeyboard();
+        PADInit();
+    }
     if (const char* s = getenv("R2_INPUT")) parseScript(s);
     s_ready = true;
 }
@@ -94,8 +99,10 @@ void init() {
 void poll() {
     if (!s_ready) return;
     s_vblank++;
-    PADStatus st[PAD_CHANMAX];
-    PADRead(st);
+    PADStatus st[PAD_CHANMAX] = {};
+    if (s_pads) PADRead(st);
+    else
+        for (auto& e : st) e.err = PAD_ERR_NO_CONTROLLER;
     u16 scripted = 0;
     for (auto& p : s_script)
         if (s_vblank >= p.start && s_vblank < p.start + p.frames) scripted |= p.button;
