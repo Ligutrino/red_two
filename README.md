@@ -35,6 +35,9 @@ See [CLAUDE.md](CLAUDE.md) for the architecture and what we learned about the ga
 
 ## Legal
 
+Red Two is released under the [MIT License](LICENSE). It covers this repository's own code
+only: the code the build generates from your disc stays yours alone and must not be shared.
+
 This project contains no code or assets from the game. Star Wars and Rogue Leader are
 trademarks of Lucasfilm Ltd.; GameCube is a trademark of Nintendo. This project is not
 affiliated with or endorsed by them.
