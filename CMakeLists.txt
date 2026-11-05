@@ -106,7 +106,8 @@ target_compile_definitions(red_two PRIVATE ${R2_DEFS})
 target_link_libraries(red_two PRIVATE r2game winmm aurora::core aurora::gx aurora::vi aurora::pad xxHash::xxhash zstd::libzstd dbghelp)
 if(MSVC)
     target_compile_options(red_two PRIVATE -fno-strict-aliasing)
-    target_link_options(red_two PRIVATE /STACK:16777216)
+    # GUI subsystem (no console window), still entering through main()
+    target_link_options(red_two PRIVATE /STACK:16777216 /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
 endif()
 
 # Dawn and SDL3 are DLLs on Windows: copy them next to the executable.

@@ -13,3 +13,4 @@ gen/
 __pycache__/
 *.pyc
 saves/
+red_two.log

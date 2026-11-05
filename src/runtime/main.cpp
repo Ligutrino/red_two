@@ -258,8 +258,24 @@ static u32 bootDisc() {
 
 }  // namespace rt
 
+// The program is a Windows GUI app (no console window on a double-click). Its log goes to
+// stderr when the parent captured it, to the parent's console with --console, and otherwise
+// to red_two.log in the working directory.
+static void setupLogOutput(int argc, char** argv) {
+    bool console = false;
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--console")) console = true;
+    if (console && (AttachConsole(ATTACH_PARENT_PROCESS) || AllocConsole())) {
+        freopen("CONOUT$", "w", stderr);
+        return;
+    }
+    const HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
+    if (!h || h == INVALID_HANDLE_VALUE || GetFileType(h) == FILE_TYPE_UNKNOWN) freopen("red_two.log", "w", stderr);
+}
+
 int main(int argc, char** argv) {
     using namespace rt;
+    setupLogOutput(argc, argv);
     std::string disc;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--disc") && i + 1 < argc) disc = argv[++i];

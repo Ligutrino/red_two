@@ -35,7 +35,8 @@ The code generated from your disc ends up in `build/` and is yours alone: never 
 - F11 or Alt+Enter toggles fullscreen; `--fullscreen` starts that way.
 - Saves go to `saves/GSWE64_A.raw` (a Memory Card 59 in slot A; the game formats a new one).
   `R2_CARD_A=<path>` uses another card image, for example a Dolphin `.raw` card.
-- `R2_NO_AUDIO=1` runs without sound.
+- `R2_NO_AUDIO=1` runs without sound. The log goes to `red_two.log` (or `--console` for a
+  console window).
 
 ## How it works
 
