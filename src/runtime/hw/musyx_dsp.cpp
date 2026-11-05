@@ -254,6 +254,7 @@ void processVoice(u32 pbAddr) {
         p[2 * i] = u8(v.w[i] >> 8);
         p[2 * i + 1] = u8(v.w[i]);
     }
+    watchHost(pbAddr, PB_WORDS * 2, "DSP PB write-back");
 }
 
 // --- buffers in main memory: L[160], R[160], S[160] of big-endian s32 -------------------
@@ -272,6 +273,7 @@ void writeLRS(u32 addr, s32 (*src)[kN]) {
     if (!p) return;
     for (int c = 0; c < 3; c++)
         for (int i = 0; i < kN; i++) put32(p + (c * kN + i) * 4, src[c][i]);
+    watchHost(addr, 3 * kN * 4, "DSP buffer upload");
 }
 
 void runList(u32 addr) {
@@ -360,6 +362,8 @@ void runList(u32 addr) {
                     d[i * 4 + 2] = u8(u16(r) >> 8); d[i * 4 + 3] = u8(r);
                 }
             }
+            watchHost(arg32(2), kN * 4, "DSP output");
+            watchHost(arg32(0), kN * 4, "DSP surround");
             addr += 2 * 5;
             break;
         }

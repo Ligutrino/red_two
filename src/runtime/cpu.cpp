@@ -99,6 +99,17 @@ void watchStore(u32 a, u32 v, int size) {
     logf("watch", "store%d %08X = %08X in %s (lr %08X)", size * 8, a, v, describeAddr(c.curFn).c_str(), c.lr);
 }
 
+// Host-side writes into guest memory (DMA, HLE): same R2_WATCH range, physical addresses.
+void watchHost(u32 phys, u32 len, const char* who) {
+    if (!g_watch) return;
+    const u32 lo = s_watchLo & 0x1FFFFFFF, hi = lo + (s_watchHi - s_watchLo);
+    phys &= 0x1FFFFFFF;
+    if (phys + len <= lo || phys >= hi) return;
+    const u8* p = physPtr(lo, 4);
+    logf("watch", "%s writes %08X+%X; watched word now %08X (in %s)", who, phys, len,
+         p ? u32(p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]) : 0, describeAddr(curCtx().curFn).c_str());
+}
+
 void traceEnter(Ctx& c, u32 addr) {
     c.curFn = addr;
     s_ring[s_ringPos & 63] = addr;

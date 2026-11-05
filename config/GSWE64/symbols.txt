@@ -23,3 +23,5 @@
 80008720 VMIsiPager              # passed to VMInstallIsiVector
 80008BF0 VMInit                  # SDR1, segment 7, page table, handlers
 80006A40 main
+# MusyX (identified against the MusyX decomp, MUSY_VERSION <= 2.0.0: its DSP ucode is byte-identical)
+8001D9EC salBuildCommandList   # nsDelay < 200 -> 10430 cycles; (nsDelay - 200) * busClock/400/5000 + 10430

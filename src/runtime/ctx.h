@@ -30,6 +30,7 @@ extern u8* g_base;
 extern volatile u32 g_irqPending;  // nonzero when an interrupt/event wants service
 extern bool g_watch;               // R2_WATCH: report guest stores to an address range
 void watchStore(u32 a, u32 v, int size);
+void watchHost(u32 phys, u32 len, const char* who);  // DMA/HLE writes (call after writing)
 
 inline bool isIo(u32 a) { return a - 0xC8000000u < 0x18000000u; }
 u32 ioRead(u32 a, int size);

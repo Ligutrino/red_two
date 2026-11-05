@@ -16,8 +16,13 @@ static LONG CALLBACK onAccessViolation(EXCEPTION_POINTERS* ep) {
     if (host >= b && host < b + 0x100000000ull) {
         const u32 guest = u32(host - b);
         const bool write = ep->ExceptionRecord->ExceptionInformation[0] == 1;
-        fatal("guest %s of unmapped address %08X (current fn %s)", write ? "write" : "read", guest,
-              describeAddr(curCtx().curFn).c_str());
+        const Ctx& c = curCtx();
+        char regs[600];
+        int n = 0;
+        for (int i = 0; i < 32; i++) n += snprintf(regs + n, sizeof regs - n, "%sr%d=%08X", i % 8 ? " " : "\n  ", i, c.r[i]);
+        snprintf(regs + n, sizeof regs - n, "\n  lr=%08X ctr=%08X", c.lr, c.ctr);
+        fatal("guest %s of unmapped address %08X (current fn %s)%s", write ? "write" : "read", guest,
+              describeAddr(curCtx().curFn).c_str(), regs);
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }

@@ -174,6 +174,7 @@ void onDi() {
         if (!dst) fatal("DVD read to bad address %08X len %X", s_diOp.mar, s_diOp.len);
         const u64 off = (s_diOp.cmd0 & 0xC0) == 0x40 ? 0 : u64(s_diOp.off) << 2;
         if (!discRead(off, dst, s_diOp.len)) fatal("DVD read past the disc: %llX + %X", (unsigned long long)off, s_diOp.len);
+        watchHost(s_diOp.mar, s_diOp.len, "DVD read");
         di[DIMAR] = s_diOp.mar + s_diOp.len;
     }
     s_diOp.active = false;
@@ -820,6 +821,7 @@ void aramDma() {
         if (toMram) m[i] = a;
         else a = m[i];
     }
+    if (toMram) watchHost(mm, cnt, "ARAM DMA");
     if (envFlag("R2_ARAM_LOG")) logf("aram", "%s mram %08X aram %08X len %X", toMram ? "A->M" : "M->A", mm, ar, cnt);
     dspCsr() |= CSR_DMABUSY;
     schedule(EV_ARAM, tbNow() + 100 + u64(cnt) * kTbClock / (200 * 1024 * 1024));

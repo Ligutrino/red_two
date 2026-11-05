@@ -79,6 +79,7 @@ add_executable(red_two
     src/runtime/interp.cpp
     src/runtime/profiler.cpp
     src/runtime/audio.cpp
+    src/runtime/hle_musyx.cpp
     src/runtime/hw/musyx_dsp.cpp
     src/runtime/hle_os.cpp
     src/runtime/hw/hw.cpp
