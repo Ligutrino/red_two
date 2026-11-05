@@ -838,7 +838,12 @@ void onAi() {
     const u32 rate = (ai[0] & 0x40) ? 32000 : 48000;
     // the latched block plays now: hand it to the host
     if (const u8* p = physPtr(s_aiDma.addr, u32(samples) * 4)) audio::push(p, u32(samples), rate);
-    schedule(EV_AI, tbNow() + samples * kTbClock / rate);
+    // Next block from when this one was due, not from now: a late interrupt (the guest was
+    // busy) must not slow the audio clock down. Resynchronise only after a long stall.
+    static u64 due = 0;
+    const u64 now = tbNow(), period = samples * kTbClock / rate;
+    due = (due && now - due < 4 * period) ? due + period : now + period;
+    schedule(EV_AI, due);
 }
 
 u16 dspRead(u32 off) {
