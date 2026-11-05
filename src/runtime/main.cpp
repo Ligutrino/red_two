@@ -205,6 +205,20 @@ void viFrameHook() {
              (unsigned long long)g_timerFlags, (unsigned long long)g_idleWaits);
         g_safepoints = g_timerFlags = g_idleWaits = 0;
         logf("gx", "dsp: %s", musyxDspStats().c_str());
+        static const bool memLog = envFlag("R2_MEM_LOG");
+        if (memLog) {  // large committed regions of this process
+            MEMORY_BASIC_INFORMATION mbi;
+            u64 privTotal = 0;
+            for (u8* p = nullptr; VirtualQuery(p, &mbi, sizeof mbi) == sizeof mbi; p = static_cast<u8*>(mbi.BaseAddress) + mbi.RegionSize) {
+                if (mbi.State != MEM_COMMIT) continue;
+                if (mbi.Type == MEM_PRIVATE) privTotal += mbi.RegionSize;
+                if (mbi.RegionSize >= (64u << 20))
+                    logf("mem", "  %p %6llu MiB %s %s prot %lX", mbi.BaseAddress, (unsigned long long)(mbi.RegionSize >> 20),
+                         mbi.Type == MEM_PRIVATE ? "private" : mbi.Type == MEM_MAPPED ? "mapped" : "image",
+                         mbi.AllocationBase == mbi.BaseAddress ? "(alloc base)" : "", mbi.Protect);
+            }
+            logf("mem", "committed private total %llu MiB", (unsigned long long)(privTotal >> 20));
+        }
     }
 }
 

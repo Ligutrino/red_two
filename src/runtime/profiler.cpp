@@ -52,25 +52,64 @@ bool isLeafHelper(const std::string& n) {
 }
 
 std::unordered_map<u64, std::unordered_map<u64, u32>> s_callers;  // rip -> return address -> hits
+struct Chain {
+    u64 f[4];
+};
+std::unordered_map<u64, std::vector<Chain>> s_chains;  // rip -> caller chains (helpers only)
 
 void report(const std::unordered_map<u64, u32>& hits, u64 total, int secs) {
     std::unordered_map<std::string, u32> byName;
     for (auto& [rip, n] : hits) {
         const std::string& name = resolve(rip).name;
         if (isLeafHelper(name)) {
-            if (auto it = s_callers.find(rip); it != s_callers.end()) {
-                for (auto& [ret, m] : it->second) byName[name + " <- " + resolve(ret).name] += m;
+            if (auto it = s_chains.find(rip); it != s_chains.end()) {
+                for (const Chain& ch : it->second) {
+                    std::string label = name;
+                    int shown = 0;
+                    for (u64 f : ch.f) {
+                        if (!f) break;
+                        const std::string& fn = resolve(f).name;
+                        if (isLeafHelper(fn)) continue;
+                        label += " <- " + fn;
+                        if (++shown == 3) break;
+                    }
+                    byName[label]++;
+                }
                 continue;
             }
         }
         byName[name] += n;
     }
     s_callers.clear();
+    s_chains.clear();
     std::vector<std::pair<std::string, u32>> v(byName.begin(), byName.end());
     std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });
     logf("prof", "--- %llu samples over %d s (top functions, self time) ---", (unsigned long long)total, secs);
     for (size_t i = 0; i < v.size() && i < 30; i++)
         logf("prof", "%5.1f%%  %s", 100.0 * v[i].second / double(total ? total : 1), v[i].first.c_str());
+}
+
+// Up to 6 return addresses from a stopped thread's context. A bad frame (code without unwind
+// data, a stack that does not look like one) ends the walk instead of crashing.
+__declspec(noinline) void unwind(const CONTEXT& start, u64* chain) {
+    CONTEXT uc = start;
+    __try {
+        for (int d = 0; d < 6; d++) {
+            DWORD64 imageBase = 0;
+            PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(uc.Rip, &imageBase, nullptr);
+            if (!fe) {  // leaf: the return address is on top of the stack
+                uc.Rip = *reinterpret_cast<const DWORD64*>(uc.Rsp);
+                uc.Rsp += 8;
+            } else {
+                void* handlerData = nullptr;
+                DWORD64 establisher = 0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, uc.Rip, fe, &uc, &handlerData, &establisher, nullptr);
+            }
+            if (!uc.Rip) break;
+            chain[d] = uc.Rip;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
 }
 
 }  // namespace
@@ -93,12 +132,15 @@ void profilerStart() {
             CONTEXT ctx{};
             ctx.ContextFlags = CONTEXT_CONTROL;
             const bool ok = GetThreadContext(target, &ctx);
-            u64 ret = 0;
-            if (ok && ctx.Rsp) ret = *reinterpret_cast<const u64*>(ctx.Rsp);  // the thread is stopped
+            // Caller chain while the thread is stopped: RtlVirtualUnwind needs no allocation.
+            u64 chain[6] = {};
+            if (ok) unwind(ctx, chain);
             ResumeThread(target);  // resolve only after resuming: symbol lookup allocates
             if (ok) {
                 hits[ctx.Rip]++;
-                s_callers[ctx.Rip][ret]++;
+                // the first caller outside the helper (memmove's own frames are skipped in report)
+                s_callers[ctx.Rip][chain[0]]++;
+                s_chains[ctx.Rip].push_back({chain[0], chain[1], chain[2], chain[3]});
                 total++;
             }
             if (GetTickCount64() >= next) {

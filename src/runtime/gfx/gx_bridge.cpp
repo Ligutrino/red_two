@@ -186,6 +186,8 @@ void endFrame() {
 // ---------------------------------------------------------------------------------------
 // vertex arrays
 // ---------------------------------------------------------------------------------------
+u64 s_arraySends = 0, s_arrayBytes = 0;  // statistics (stats())
+
 void sendArray(u32 n, u32 need) {
     Array& a = s_arrays[n];
     if (!a.base) return;
@@ -201,6 +203,8 @@ void sendArray(u32 n, u32 need) {
     fifo::write_u32(size);
     fifo::write_u8(0);  // big-endian data
     a.sentSize = size;
+    s_arraySends++;
+    s_arrayBytes += size;
 }
 
 u32 compSize(u32 fmt) { return fmt <= 1 ? 1 : fmt <= 3 ? 2 : fmt == 4 ? 4 : 0; }
@@ -589,11 +593,10 @@ void onCommand(const u8* p, u32 len) {
     if (op >= 0x80 && op < 0xC0) {
         prepareArrays(p);
         prepareTextures();
-        // Aurora merges consecutive draws with unchanged state; on this game's stream merged
-        // draws come out wrong (text with missing wedges, see CLAUDE.md), so every draw is
-        // made to stand alone: a TLUT load into slot 1023 (none) is always handled and only
-        // dirties the texture state. R2_ALLOW_MERGE=1 turns this off for investigation.
-        static const bool allowMerge = envFlag("R2_ALLOW_MERGE");
+        // Aurora merges consecutive draws with unchanged state. That broke on this game's
+        // empty/short strips until Aurora patch 0005; R2_NO_MERGE=1 makes every draw stand alone
+        // again (a TLUT load into slot 1023, none, is always handled and dirties the textures).
+        static const bool allowMerge = !envFlag("R2_NO_MERGE");
         if (!allowMerge && s_bpMask == 0xFFFFFF) {
             fifo::write_u8(0x61);
             fifo::write_u32(0x650003FFu);
@@ -820,9 +823,12 @@ std::string stats() {
     const AuroraStats* st = aurora_get_stats();
     if (!st) return {};
     char b[256];
-    snprintf(b, sizeof b, "aurora: %u draws (%u merged), pipelines %u queued %u created, %u KiB verts, %u KiB tex upload",
+    snprintf(b, sizeof b,
+             "aurora: %u draws (%u merged), pipelines %u queued %u created, %u KiB verts, %u KiB tex upload; "
+             "arrays sent: %llu (%llu MiB)",
              st->drawCallCount, st->mergedDrawCallCount, st->queuedPipelines, st->createdPipelines, st->lastVertSize / 1024,
-             st->lastTextureUploadSize / 1024);
+             st->lastTextureUploadSize / 1024, (unsigned long long)s_arraySends, (unsigned long long)(s_arrayBytes >> 20));
+    s_arraySends = s_arrayBytes = 0;
     return b;
 }
 
