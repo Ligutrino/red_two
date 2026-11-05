@@ -45,9 +45,27 @@ const Sym& resolve(u64 rip) {
     return byRip.emplace(rip, std::move(s)).first->second;
 }
 
+// Library leaf functions are attributed to their caller too (the return address on the stack
+// at the sample), e.g. "memmove <- rt::aramDma".
+bool isLeafHelper(const std::string& n) {
+    return n == "memmove" || n == "memcpy" || n == "memset" || n == "memcmp" || n.rfind("XXH", 0) == 0;
+}
+
+std::unordered_map<u64, std::unordered_map<u64, u32>> s_callers;  // rip -> return address -> hits
+
 void report(const std::unordered_map<u64, u32>& hits, u64 total, int secs) {
     std::unordered_map<std::string, u32> byName;
-    for (auto& [rip, n] : hits) byName[resolve(rip).name] += n;
+    for (auto& [rip, n] : hits) {
+        const std::string& name = resolve(rip).name;
+        if (isLeafHelper(name)) {
+            if (auto it = s_callers.find(rip); it != s_callers.end()) {
+                for (auto& [ret, m] : it->second) byName[name + " <- " + resolve(ret).name] += m;
+                continue;
+            }
+        }
+        byName[name] += n;
+    }
+    s_callers.clear();
     std::vector<std::pair<std::string, u32>> v(byName.begin(), byName.end());
     std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });
     logf("prof", "--- %llu samples over %d s (top functions, self time) ---", (unsigned long long)total, secs);
@@ -75,9 +93,12 @@ void profilerStart() {
             CONTEXT ctx{};
             ctx.ContextFlags = CONTEXT_CONTROL;
             const bool ok = GetThreadContext(target, &ctx);
+            u64 ret = 0;
+            if (ok && ctx.Rsp) ret = *reinterpret_cast<const u64*>(ctx.Rsp);  // the thread is stopped
             ResumeThread(target);  // resolve only after resuming: symbol lookup allocates
             if (ok) {
                 hits[ctx.Rip]++;
+                s_callers[ctx.Rip][ret]++;
                 total++;
             }
             if (GetTickCount64() >= next) {

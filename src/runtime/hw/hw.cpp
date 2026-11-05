@@ -28,14 +28,21 @@ namespace {
 void siPollAll();
 
 bool s_logIo = false;
-std::set<u32> s_seen;
+std::set<u32> s_seen;            // outside the register block (EFB etc.)
+std::vector<bool> s_seenIo(0x20000);  // 0xCC00xxxx registers: (offset, read/write) seen yet
 void noteAccess(const char* dev, u32 a, bool write, u32 v) {
     if (s_logIo) {
         logf("io", "%s %s %08X = %08X", dev, write ? "W" : "R", a, v);
         return;
     }
-    if (s_seen.insert((a & ~1u) | (write ? 1u : 0u)).second)
-        logf("io", "first %s of %s reg %08X (%08X)", write ? "write" : "read", dev, a, v);
+    if ((a >> 16) == 0xCC00) {  // the hot path: one bit per register and direction
+        const u32 k = ((a & 0xFFFE) << 1) | (write ? 1u : 0u);
+        if (s_seenIo[k]) return;
+        s_seenIo[k] = true;
+    } else if (!s_seen.insert((a & ~1u) | (write ? 1u : 0u)).second) {
+        return;
+    }
+    logf("io", "first %s of %s reg %08X (%08X)", write ? "write" : "read", dev, a, v);
 }
 
 // =======================================================================================
@@ -192,7 +199,14 @@ void diStart() {
     switch (cmd) {
     case 0xA8:
         if ((cmd0 & 0xC0) == 0x40) s_diOp.len = 0x20;  // read disc ID
-        latencyTb += u64(s_diOp.len) * kTbClock / (3 * 1024 * 1024);  // ~3 MB/s
+        {   // transfer time: R2_DVD_SPEED=<MB/s> (the drive's ~3 MB/s by default)
+            static const double mbps = [] {
+                const char* v = getenv("R2_DVD_SPEED");
+                const double x = v ? atof(v) : 0.0;
+                return x > 0 ? x : 3.0;
+            }();
+            latencyTb += u64(double(s_diOp.len) * double(kTbClock) / (mbps * 1024.0 * 1024.0));
+        }
         if (envFlag("R2_DVD_LOG")) {
             const u64 o = u64(s_diOp.off) << 2;
             logf("dvd", "read %08llX len %X -> %08X  %s", (unsigned long long)o, s_diOp.len, s_diOp.mar, discFileAt(o).c_str());
