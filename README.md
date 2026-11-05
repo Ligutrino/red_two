@@ -8,8 +8,8 @@ disc image of the USA release (`GSWE64`, revision 0).
 
 > Status: early development. The recompiled game boots, runs its menus and cutscenes, and the
 > first mission is playable at full speed with graphics (Aurora) and controls (keyboard or
-> gamepad). There is no sound yet and no memory card (saving), and only the first mission has
-> been tried.
+> gamepad). Saving works (memory card in slot A, `saves/GSWE64_A.raw`). There is no sound yet, and
+> only the first mission has been tried.
 
 ## Building (Windows)
 

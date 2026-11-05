@@ -8,6 +8,8 @@
 #include <ctime>
 #include <mutex>
 #include <set>
+#include <filesystem>
+#include <string>
 #include <vector>
 
 #include "../runtime.h"
@@ -358,7 +360,7 @@ void siWrite(u32 off, u32 v) {
 }
 
 // =======================================================================================
-// EXI: memory cards (none inserted), IPL ROM / RTC / SRAM
+// EXI: memory card in slot A, IPL ROM / RTC / SRAM
 // =======================================================================================
 struct ExiChan {
     u32 csr = 0, mar = 0, len = 0, cr = 0, data = 0;
@@ -378,8 +380,22 @@ void exiUpdateIrq() {
     piSetIrq(PI_EXI, on);
 }
 
+// OSSramEx (SRAM 0x14..0x3F): flashID[2][12] at 0x14, flashIDCheckSum[2] at 0x3A. CARD
+// mounts an unlocked card only if each checksum is the inverted byte sum of its flash ID.
+void sramSetFlashId(int slot, const u8* id) {
+    u8 sum = 0;
+    for (int i = 0; i < 12; i++) {
+        s_sram[0x14 + 12 * slot + i] = id[i];
+        sum = u8(sum + id[i]);
+    }
+    s_sram[0x3A + slot] = u8(~sum);
+}
+
 void sramInit() {
     memset(s_sram, 0, sizeof s_sram);
+    const u8 zero[12] = {};
+    sramSetFlashId(0, zero);
+    sramSetFlashId(1, zero);
     s_sram[0x13] = 0x2C;  // flags: stereo
     s_sram[0x12] = 0;     // English
     u16 sum = 0, inv = 0;
@@ -411,11 +427,191 @@ void iplWriteByte(u8 b) {
     s_ipl.pos++;
 }
 
+// --- memory card (EXI channel 0/1, device 0) ---------------------------------------------
+// A Memory Card 59 (4 Mbit, 8 KiB sectors) behind the flash command set the SDK's CARD
+// library speaks. The image is a raw dump of the card (the same layout as Dolphin's .raw).
+// It reports itself unlocked, so the SDK skips the DSP-assisted unlock handshake.
+struct MemCard {
+    bool present = false;
+    std::vector<u8> data;
+    std::string path;
+    u32 id = 0x00000004;  // size 4 Mbit; latency index 0 (4 bytes); sector size index 0 (8 KiB)
+    u8 status = 0x41;     // ready | unlocked
+    bool irqEnabled = false;
+    // the transfer since the last chip select
+    u32 pos = 0;
+    u8 cmd = 0;
+    u8 args[5] = {};
+    u32 addr = 0;
+    u32 dirtyLo = ~0u, dirtyHi = 0;
+} s_card[2];
+constexpr u32 kCardLatency = 4;  // dummy bytes between a read command and its data
+
+u32 cardAddr(const u8* a) { return (u32(a[1] & 0x7F) << 17) | (u32(a[2]) << 9) | (u32(a[3] & 3) << 7) | (a[4] & 0x7F); }
+
+void cardMarkDirty(MemCard& m, u32 lo, u32 hi) {
+    m.dirtyLo = std::min(m.dirtyLo, lo);
+    m.dirtyHi = std::max(m.dirtyHi, hi);
+}
+
+void cardFlush(MemCard& m) {
+    if (m.dirtyLo >= m.dirtyHi || m.path.empty()) return;
+    if (FILE* f = fopen(m.path.c_str(), "r+b")) {
+        fseek(f, long(m.dirtyLo), SEEK_SET);
+        fwrite(m.data.data() + m.dirtyLo, 1, m.dirtyHi - m.dirtyLo, f);
+        fclose(f);
+    } else {
+        logf("card", "cannot write %s", m.path.c_str());
+    }
+    m.dirtyLo = ~0u;
+    m.dirtyHi = 0;
+}
+
+void cardInit(int slot, const std::string& path) {
+    MemCard& m = s_card[slot];
+    m = MemCard{};
+    m.path = path;
+    const u32 size = (m.id & 0xFC) * 1024 * 1024 / 8;
+    m.data.assign(size, 0xFF);  // erased flash
+    if (FILE* f = fopen(path.c_str(), "rb")) {
+        fread(m.data.data(), 1, size, f);
+        fclose(f);
+        logf("card", "slot %c: %s", 'A' + slot, path.c_str());
+    } else if (FILE* f2 = fopen(path.c_str(), "wb")) {
+        fwrite(m.data.data(), 1, size, f2);  // a new, unformatted card
+        fclose(f2);
+        logf("card", "slot %c: new card %s (unformatted)", 'A' + slot, path.c_str());
+    } else {
+        logf("card", "slot %c: cannot create %s; no card", 'A' + slot, path.c_str());
+        return;
+    }
+    m.present = true;
+}
+
+// A formatted card's header serial is the console's flash ID scrambled by a generator seeded
+// with the format time (CARDFormat; checked by VerifyID). Recover the flash ID from it so a
+// card formatted elsewhere (another console, an emulator) mounts here.
+void cardSyncSram(int slot) {
+    const MemCard& m = s_card[slot];
+    if (!m.present || m.data.size() < 0x200) return;
+    const u8* h = m.data.data();
+    const u16 deviceId = u16(h[0x20] << 8 | h[0x21]);
+    if (deviceId != 0) return;  // not formatted
+    u64 t = 0;
+    for (int i = 0; i < 8; i++) t = (t << 8) | h[12 + i];
+    s64 rnd = s64(t);
+    u8 flash[12];
+    for (int i = 0; i < 12; i++) {
+        rnd = s64(u64(rnd) * 1103515245u + 12345u) >> 16;
+        flash[i] = u8(h[i] - u8(rnd));
+        rnd = (s64(u64(rnd) * 1103515245u + 12345u) >> 16) & 0x7FFF;
+    }
+    sramSetFlashId(slot, flash);
+}
+
+void cardRaiseIrq(int ch) {
+    if (!s_card[ch].irqEnabled) return;
+    exi[ch].csr |= 0x002;  // EXIINT: the erase/program finished
+    exiUpdateIrq();
+}
+
+void cardSelect(int ch) {
+    MemCard& m = s_card[ch];
+    m.pos = 0;
+    m.cmd = 0;
+}
+
+// Chip select released: erase and program commands take effect now.
+void cardDeselect(int ch) {
+    MemCard& m = s_card[ch];
+    if (!m.present || m.pos == 0) return;
+    static const bool log = envFlag("R2_CARD_LOG");
+    if (log)
+        logf("card", "cmd %02X args %02X %02X %02X %02X addr %06X: %u bytes, status %02X", m.cmd, m.args[1], m.args[2], m.args[3],
+             m.args[4], cardAddr(m.args), m.pos, m.status);
+    const u32 size = u32(m.data.size());
+    switch (m.cmd) {
+    case 0xF1: {  // erase sector
+        const u32 a = ((u32(m.args[1] & 0x7F) << 17) | (u32(m.args[2]) << 9)) & ~0x1FFFu & (size - 1);
+        memset(&m.data[a], 0xFF, 0x2000);
+        cardMarkDirty(m, a, a + 0x2000);
+        cardFlush(m);
+        cardRaiseIrq(ch);
+        break;
+    }
+    case 0xF2:  // page program (bytes were stored as they arrived)
+        cardFlush(m);
+        cardRaiseIrq(ch);
+        break;
+    case 0xF4:  // erase card
+        std::fill(m.data.begin(), m.data.end(), u8(0xFF));
+        cardMarkDirty(m, 0, size);
+        cardFlush(m);
+        cardRaiseIrq(ch);
+        break;
+    default: break;
+    }
+    m.pos = 0;
+}
+
+u8 cardByte(int ch, u8 in) {
+    MemCard& m = s_card[ch];
+    const u32 p = m.pos++;
+    const u32 size = u32(m.data.size());
+    if (p == 0) {
+        m.cmd = in;
+        if (in == 0x89) m.status &= ~0x18u;  // clear status: program/erase error bits
+        static bool seen[256];
+        if (!seen[in] && in != 0x00 && in != 0x52 && in != 0x83 && in != 0x89 && in != 0x81 && in != 0xF1 &&
+            in != 0xF2 && in != 0xF4) {
+            seen[in] = true;
+            logf("card", "unhandled command %02X", in);
+        }
+        return 0xFF;
+    }
+    switch (m.cmd) {
+    case 0x00:  // ID (EXIGetID: 2 command bytes, then the 32-bit id)
+        return p >= 2 && p < 6 ? u8(m.id >> (8 * (5 - p))) : 0;
+    case 0x83:  // read status
+        return p >= 2 ? m.status : 0;
+    case 0x81:  // interrupt enable
+        if (p == 1) m.irqEnabled = in & 1;
+        return 0;
+    case 0x52:  // read array: address, latency bytes, data
+        if (p <= 4) {
+            m.args[p] = in;
+            if (p == 4) m.addr = cardAddr(m.args);
+            return 0;
+        }
+        if (p < 5 + kCardLatency) return 0;
+        return m.data[(m.addr++) & (size - 1)];
+    case 0xF2:  // page program: address, then up to 128 bytes within the page
+        if (p <= 4) {
+            m.args[p] = in;
+            if (p == 4) m.addr = cardAddr(m.args);
+            return 0;
+        } else {
+            const u32 a = m.addr & (size - 1);
+            m.data[a] = in;
+            cardMarkDirty(m, a, a + 1);
+            m.addr = (m.addr & ~0x7Fu) | ((m.addr + 1) & 0x7F);
+            return 0;
+        }
+    case 0xF1:  // erase sector: 2 address bytes
+    case 0xF4:  // erase card
+        if (p < 5) m.args[p] = in;
+        return 0;
+    default:
+        return 0;
+    }
+}
+
 int exiDevice(int ch) {
     const u32 cs = (exi[ch].csr >> 7) & 7;
     if (!cs) return -1;
-    if (ch == 0 && (cs & 2)) return 1;  // IPL/RTC/SRAM
-    return 0;                           // memory card / other: absent
+    if (ch == 0 && (cs & 2)) return 1;              // IPL/RTC/SRAM
+    if (ch < 2 && (cs & 1) && s_card[ch].present) return 2;  // memory card
+    return 0;                                       // absent
 }
 
 void exiTransfer(int ch) {
@@ -446,6 +642,23 @@ void exiTransfer(int ch) {
                 c.data = v;
             }
         }
+    } else if (dev == 2) {  // memory card: one byte stream per chip select
+        if (dma) {
+            if (u8* p = physPtr(c.mar, c.len)) {
+                for (u32 i = 0; i < c.len; i++) {
+                    if (rw == 0) p[i] = cardByte(ch, 0);
+                    else cardByte(ch, p[i]);
+                }
+            }
+        } else {
+            const u32 n = ((c.cr >> 4) & 3) + 1;
+            u32 v = 0;
+            for (u32 i = 0; i < n; i++) {
+                const u8 out = cardByte(ch, rw == 0 ? 0 : u8(c.data >> (24 - 8 * i)));
+                v |= u32(out) << (24 - 8 * i);
+            }
+            if (rw != 1) c.data = v;
+        }
     } else if (!dma && rw != 1) {
         c.data = dev < 0 ? 0 : 0xFFFFFFFF;
     }
@@ -461,8 +674,8 @@ u32 exiRead(u32 off) {
     switch (off % 0x14) {
     case 0x00: {
         u32 v = c.csr;
-        if (ch == 0 || ch == 1) v &= ~0x1000u;  // EXT: no memory card
-        if (ch == 2) v &= ~0x1000u;
+        v &= ~0x1000u;
+        if (ch < 2 && s_card[ch].present) v |= 0x1000u;  // EXT: a memory card is inserted
         return v;
     }
     case 0x04: return c.mar;
@@ -483,6 +696,8 @@ void exiWrite(u32 off, u32 v) {
         c.csr &= ~ack;
         const u32 newCs = (c.csr >> 7) & 7;
         if (ch == 0 && (newCs & 2) && !(oldCs & 2)) s_ipl.haveCmd = false;  // IPL selected: new command
+        if (ch < 2 && (newCs & 1) && !(oldCs & 1)) cardSelect(ch);
+        if (ch < 2 && (oldCs & 1) && !(newCs & 1)) cardDeselect(ch);
         exiUpdateIrq();
         break;
     }
@@ -813,6 +1028,16 @@ void hwInit() {
     s_logIo = envFlag("R2_IO_LOG");
     gxInit();
     sramInit();
+    // Memory card in slot A: R2_CARD_A=<path> (default saves/GSWE64_A.raw), R2_NO_CARD=1 for none.
+    if (!envFlag("R2_NO_CARD")) {
+        const char* env = getenv("R2_CARD_A");
+        const std::string path = env && *env ? env : "saves/GSWE64_A.raw";
+        std::error_code ec;
+        const auto dir = std::filesystem::path(path).parent_path();
+        if (!dir.empty()) std::filesystem::create_directories(dir, ec);
+        cardInit(0, path);
+        cardSyncSram(0);
+    }
     di[DICVR] = 0;  // cover closed
     for (auto& p : s_pad) p = PadState{};
     s_pad[0].connected = true;

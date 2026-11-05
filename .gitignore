@@ -12,3 +12,4 @@ gen/
 .tools/
 __pycache__/
 *.pyc
+saves/
