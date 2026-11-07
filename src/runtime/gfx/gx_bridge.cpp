@@ -937,6 +937,11 @@ bool init(int argc, char** argv) {
         SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
         SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_RAISED, "0");
     }
+#ifdef R2_HAS_ICON
+    // the icon built into the exe (res/red_two.rc) for the window and taskbar too
+    SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON, "1");
+    SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON_SMALL, "1");
+#endif
     const AuroraInfo info = aurora_initialize(argc, argv, &cfg);
     if (background) {
         if (SDL_Window* w = aurora_get_window()) {

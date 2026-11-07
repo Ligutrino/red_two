@@ -15,8 +15,10 @@ u8* aramBase();  // hw.cpp: the 16 MiB of ARAM
 
 namespace audio {
 void init();  // host audio output (SDL3); R2_NO_AUDIO=1 for none, R2_AUDIO_DUMP=<file.wav>
-// One AI DMA block as it starts playing: big-endian 16-bit stereo frames.
-void push(const u8* data, u32 frames, u32 rate);
+// One AI DMA block as it starts playing: big-endian 16-bit stereo frames. speed > 1: the game
+// is fast-forwarded and its audio clock with it; every `speed` frames are averaged into one, so
+// the block takes 1/speed of its time and sounds that much faster.
+void push(const u8* data, u32 frames, u32 rate, u32 speed = 1);
 }  // namespace audio
 
 }  // namespace rt

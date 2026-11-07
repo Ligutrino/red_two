@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(red_two LANGUAGES C CXX)
+project(red_two LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -105,6 +105,12 @@ add_executable(red_two
     src/runtime/hle_game.cpp
     src/runtime/gfx/menu.cpp)
 target_include_directories(red_two PRIVATE src/runtime "${GEN_DIR}" extern/aurora/lib)
+# Program icon: your own res/icon.ico (not in the repository), built in when it exists.
+if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/res/icon.ico")
+    target_sources(red_two PRIVATE res/red_two.rc)
+    set_source_files_properties(res/red_two.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/res/icon.ico")
+    target_compile_definitions(red_two PRIVATE R2_HAS_ICON=1)
+endif()
 target_compile_definitions(red_two PRIVATE ${R2_DEFS})
 target_link_libraries(red_two PRIVATE r2game winmm aurora::core aurora::gx aurora::vi aurora::pad xxHash::xxhash zstd::libzstd dbghelp)
 if(MSVC)

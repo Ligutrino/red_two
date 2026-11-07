@@ -1,0 +1,4 @@
+// Windows resources: the program icon (res/icon.ico, your own image; not in the repository).
+// Resource id 1 is the first icon group, which Explorer shows; the window uses it too
+// (SDL_HINT_WINDOWS_INTRESOURCE_ICON, gfx/gx_bridge.cpp).
+1 ICON "icon.ico"

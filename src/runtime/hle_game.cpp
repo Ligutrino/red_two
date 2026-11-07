@@ -30,28 +30,28 @@ static void frameDelta(Ctx& c) {
     c.f[1] = c.ps1[1] = rsingle(std::clamp(dt, 0.00025, 1.0 / 29.97));
 }
 
-// Skippable cutscenes (settings): holding B in a letterboxed cinematic (the VI shows 304 lines
-// there, 450 in flight) runs it 8x fast. The game has no skip for the crawl and most cutscenes.
-static void fastForward(Ctx& c) {
-    if (!settings::get().skipCutscenes || viXfbLines() >= 400 || !(padState(0).buttons & 0x0200)) return;
-    c.f[1] = c.ps1[1] = rsingle(c.f[1] * 8.0);
-}
-
-// Skip intro logos (settings): the boot screen (mode 5, screen 22 at 0x7FDE8254/0x7FDE822C, see
-// the top-level loop 0x7FC00030) shows the legal notice, checks the memory card, then plays the
-// 3D LucasArts intro and the logos. Running it fast gets to the title in seconds and leaves its
-// logic (card checks, loads) as it is.
-static void skipLogos(Ctx& c) {
-    if (!settings::get().skipLogos || rd32(0x7FDE8254) != 5 || rd32(0x7FDE822C) != 22) return;
-    c.f[1] = c.ps1[1] = rsingle(c.f[1] * 16.0);
+// Fast-forward factor for this frame (1 = none). The game time and the audio clock (the AI
+// DMA, which drives MusyX: synthesis, sequencer, streams) both run that much faster, so music
+// and voices stay with the picture.
+//  * Skippable cutscenes (settings): holding B in a letterboxed cinematic (the VI shows 304
+//    lines there, 450 in flight): 8x. The game has no skip for the crawl and most cutscenes.
+//  * Skip intro logos (settings): the boot screen (mode 5, screen 22 at 0x7FDE8254/0x7FDE822C,
+//    see the top-level loop 0x7FC00030) shows the legal notice, checks the memory card, then
+//    plays the 3D LucasArts intro and the logos: 16x, its logic (card checks, loads) as it is.
+static u32 fastForwardFactor() {
+    const settings::Settings& s = settings::get();
+    if (s.skipLogos && rd32(0x7FDE8254) == 5 && rd32(0x7FDE822C) == 22) return 16;
+    if (s.skipCutscenes && viXfbLines() < 400 && (padState(0).buttons & 0x0200)) return 8;  // B
+    return 1;
 }
 
 static void keepHealth();
 
 void hle_GameFrameDelta(Ctx& c) {
     frameDelta(c);
-    fastForward(c);
-    skipLogos(c);
+    const u32 ff = fastForwardFactor();
+    if (ff > 1) c.f[1] = c.ps1[1] = rsingle(c.f[1] * double(ff));
+    setAudioSpeed(ff);
     keepHealth();
     // R2_DT_LOG: every 10 s, frames and the game time they advanced against the wall clock
     static const bool dtLog = envFlag("R2_DT_LOG");
