@@ -36,9 +36,22 @@ static void fastForward(Ctx& c) {
     c.f[1] = c.ps1[1] = rsingle(c.f[1] * 8.0);
 }
 
+// Skip intro logos (settings): the boot screen (mode 5, screen 22 at 0x7FDE8254/0x7FDE822C, see
+// the top-level loop 0x7FC00030) shows the legal notice, checks the memory card, then plays the
+// 3D LucasArts intro and the logos. Running it fast gets to the title in seconds and leaves its
+// logic (card checks, loads) as it is.
+static void skipLogos(Ctx& c) {
+    if (!settings::get().skipLogos || rd32(0x7FDE8254) != 5 || rd32(0x7FDE822C) != 22) return;
+    c.f[1] = c.ps1[1] = rsingle(c.f[1] * 16.0);
+}
+
+static void keepHealth();
+
 void hle_GameFrameDelta(Ctx& c) {
     frameDelta(c);
     fastForward(c);
+    skipLogos(c);
+    keepHealth();
     // R2_DT_LOG: every 10 s, frames and the game time they advanced against the wall clock
     static const bool dtLog = envFlag("R2_DT_LOG");
     if (!dtLog) return;
@@ -87,6 +100,48 @@ void setGameAspect(double aspect) {
     }
     written = bits;
     logf("wide", "game camera aspect %.4f", aspect);
+}
+
+// Infinite lives (settings): LoseLife (0x7FD7648C) decrements the lives byte at 0x800962EE
+// (3 ships at a mission start; at 1 it ends the game instead: 0x800962EF = 0x21, mode 6) and
+// returns 1. With the cheat it reports the life lost without taking it.
+void hle_LoseLife(Ctx& c) {
+    if (settings::get().infiniteLives && rd8(0x800962EF) != 0x21) {
+        c.r[3] = 1;
+        return;
+    }
+    f_7FD7648C_orig(c);
+}
+
+// Invincibility (settings): CraftDestroy (0x7FC3E528, a method every craft class shares) starts
+// a craft's explosion - whatever destroyed it, shots or a crash. The player's craft
+// (0x7FDEFE14) is spared.
+void hle_CraftDestroy(Ctx& c) {
+    if (settings::get().invincible && c.r[3] == rd32(0x7FDEFE14)) return;
+    f_7FC3E528_orig(c);
+}
+
+// ...and its health (craft +0x6F4, a float: 180 for the X-wing) is kept full, so the HUD ring
+// stays green. Only for an object whose vtable (+0x80) has CraftDestroy: 0x7FDEFE14 points
+// at other things outside missions.
+static void keepHealth() {
+    static u32 craft = 0;
+    static bool isCraft = false;
+    static float maxHealth = 0.f;
+    const u32 p = settings::get().invincible ? rd32(0x7FDEFE14) : 0;
+    if (p != craft) {
+        craft = p;
+        isCraft = false;
+        maxHealth = 0.f;
+        const u32 vt = p ? rd32(p + 0x80) : 0;
+        if (vt >= 0x7F000000 && vt < 0x81800000)
+            for (u32 o = 0; o < 0x400 && !isCraft; o += 4) isCraft = rd32(vt + o) == 0x7FC3E528;
+    }
+    if (!isCraft) return;
+    const float h = float(s2d(rd32(craft + 0x6F4)));
+    if (!(h >= 0.f && h <= 100000.f)) return;
+    if (h > maxHealth) maxHealth = h;
+    else if (h < maxHealth) wr32(craft + 0x6F4, d2s(maxHealth));
 }
 
 }  // namespace rt
