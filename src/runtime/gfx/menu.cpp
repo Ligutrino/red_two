@@ -154,6 +154,19 @@ void menuDraw() {
         }
         ImGui::End();
     }
+    if (cinematicSkip()) {
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always,
+                                ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowBgAlpha(0.f);
+        constexpr ImGuiWindowFlags overlay = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                                             ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs;
+        if (ImGui::Begin("##skip", nullptr, overlay)) {
+            ImGui::SetWindowFontScale(scale * 1.5f);
+            ImGui::TextUnformatted("Skipping...");
+        }
+        ImGui::End();
+    }
     if (!s_open) return;
 
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always,
@@ -184,7 +197,7 @@ void menuDraw() {
         if (ImGui::Checkbox("Skip intro logos", &s.skipLogos)) changed = true;
         hint("Start at the title screen (takes effect at the next start).");
         if (ImGui::Checkbox("Skippable cutscenes", &s.skipCutscenes)) changed = true;
-        hint("Hold B to skip the opening crawl and cutscenes.");
+        hint("Press B during the opening crawl or a cutscene to skip to the gameplay.");
 
         ImGui::SeparatorText("Cheats");
         if (ImGui::Checkbox("Invincibility", &s.invincible)) changed = true;

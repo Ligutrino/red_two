@@ -700,6 +700,8 @@ void onCommand(const u8* p, u32 len) {
     }
     const u8 op = p[0];
     if (op >= 0x80 && op < 0xC0) {
+        // skipping a cinematic (hle_game.cpp): the game runs flat out and nothing is drawn
+        if (cinematicSkip()) return;
         if (skipDraw(op)) [[unlikely]]
             return;
         prepareArrays(p);

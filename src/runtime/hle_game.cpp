@@ -30,35 +30,88 @@ static void frameDelta(Ctx& c) {
     c.f[1] = c.ps1[1] = rsingle(std::clamp(dt, 0.00025, 1.0 / 29.97));
 }
 
-// Fast-forward factor for this frame (1 = none). The game time and the audio clock (the AI
-// DMA, which drives MusyX: synthesis, sequencer, streams) both run that much faster, so music
-// and voices stay with the picture.
-//  * Skippable cutscenes (settings): holding B in a letterboxed cinematic (the VI shows 304
-//    lines there, 450 in flight): 8x. The game has no skip for the crawl and most cutscenes.
-//  * Skip intro logos (settings): the boot screen (mode 5, screen 22 at 0x7FDE8254/0x7FDE822C,
-//    see the top-level loop 0x7FC00030) shows the legal notice, checks the memory card, then
-//    plays the 3D LucasArts intro and the logos: 16x, its logic (card checks, loads) as it is.
-static u32 fastForwardFactor() {
-    const settings::Settings& s = settings::get();
-    if (s.skipLogos && rd32(0x7FDE8254) == 5 && rd32(0x7FDE822C) == 22) return 16;
-    if (s.skipCutscenes && viXfbLines() < 400 && (padState(0).buttons & 0x0200)) return 8;  // B
-    return 1;
+// The player's craft (0x7FDEFE14 in missions), or 0 when that pointer holds something else:
+// a craft's vtable (+0x80) has CraftDestroy (0x7FC3E528).
+static u32 playerCraft() {
+    static u32 last = 0;
+    static bool lastIsCraft = false;
+    const u32 p = rd32(0x7FDEFE14);
+    if (p != last) {
+        last = p;
+        lastIsCraft = false;
+        const u32 vt = p ? rd32(p + 0x80) : 0;
+        if (vt >= 0x7F000000 && vt < 0x81800000)
+            for (u32 o = 0; o < 0x400 && !lastIsCraft; o += 4) lastIsCraft = rd32(vt + o) == 0x7FC3E528;
+    }
+    return lastIsCraft ? p : 0;
 }
+
+// Skippable cutscenes (settings): the game has no skip for the crawl and most cutscenes, so a
+// press of B in a letterboxed cinematic (the VI shows 304 lines there, 450 in flight) runs the
+// game flat out until play resumes: retraces at kSkipHz, kSkipStep game seconds per frame
+// (8x a 60 fps frame: what cinematics were tested at), nothing drawn (gx_bridge.cpp), the
+// audio clock (AI DMA -> MusyX: sequencer, voices, streams) as fast and silent, disc reads
+// faster so streams keep up. It ends once the player's craft flies (state +0x370 = 0) in a
+// frame that is not letterboxed: between the crawl and the mission intro the game shows full
+// frames for a moment. Outside missions, after 3 s of full frames.
+constexpr double kSkipStep = 8.0 / 60.0;
+constexpr int kSkipHz = 600;
+static bool s_skip = false;
+bool cinematicSkip() { return s_skip; }
+
+// Skip intro logos (settings): the boot screen (mode 5, screen 22 at 0x7FDE8254/0x7FDE822C, see
+// the top-level loop 0x7FC00030) shows the legal notice, checks the memory card, then plays the
+// 3D LucasArts intro and the logos: 16x and silent, still drawn (the card dialogs may need an
+// answer), its logic (card checks, loads) as it is.
+static bool bootScreen() { return rd32(0x7FDE8254) == 5 && rd32(0x7FDE822C) == 22; }
 
 static void keepHealth();
 
 void hle_GameFrameDelta(Ctx& c) {
     frameDelta(c);
-    const u32 ff = fastForwardFactor();
-    if (ff > 1) c.f[1] = c.ps1[1] = rsingle(c.f[1] * double(ff));
-    setAudioSpeed(ff);
+    const settings::Settings& s = settings::get();
+    static u64 lastTb = 0;  // real time since the previous frame
+    const u64 tb = tbNow();
+    const double real = lastTb ? std::max(double(tb - lastTb) / double(kTbClock), 0.0001) : 1.0 / 60.0;
+    lastTb = tb;
+
+    const bool cinematic = viXfbLines() < 400;
+    const bool b = (padState(0).buttons & 0x0200) != 0;  // PAD_BUTTON_B
+    static bool bWas = false;
+    const bool bPressed = b && !bWas;
+    bWas = b;
+    if (!s_skip && s.skipCutscenes && cinematic && bPressed) {
+        s_skip = true;
+        logf("skip", "skipping to the next gameplay");
+        viSetRate(kSkipHz);
+        setDvdBoost(50.0);
+    }
+    static double fullFor = 0;  // real seconds of frames that are not letterboxed while skipping
+    fullFor = s_skip && !cinematic ? fullFor + real : 0;
+    const u32 craft = playerCraft();
+    static int flyingFrames = 0;  // (the craft passes through state 0 while it is set up)
+    flyingFrames = !cinematic && craft && rd32(craft + 0x370) == 0 ? flyingFrames + 1 : 0;
+    if (s_skip && (!s.skipCutscenes || flyingFrames >= 10 || fullFor > 3.0)) {
+        s_skip = false;
+        logf("skip", "back to play");
+        viSetRate(s.fps);
+        setDvdBoost(1.0);
+    }
+    if (s_skip) {
+        c.f[1] = c.ps1[1] = rsingle(kSkipStep);
+        setAudioSpeed(std::min(kSkipStep / real, 64.0), true);
+    } else if (s.skipLogos && bootScreen()) {
+        c.f[1] = c.ps1[1] = rsingle(c.f[1] * 16.0);
+        setAudioSpeed(16.0, true);
+    } else {
+        setAudioSpeed(1.0, false);
+    }
     keepHealth();
     // R2_DT_LOG: every 10 s, frames and the game time they advanced against the wall clock
     static const bool dtLog = envFlag("R2_DT_LOG");
     if (!dtLog) return;
     static u64 logTb = 0, frames = 0;
     static double simulated = 0;
-    const u64 tb = tbNow();
     if (!logTb) logTb = tb;
     frames++;
     simulated += c.f[1];
@@ -127,18 +180,13 @@ void hle_CraftDestroy(Ctx& c) {
 // at other things outside missions.
 static void keepHealth() {
     static u32 craft = 0;
-    static bool isCraft = false;
     static float maxHealth = 0.f;
-    const u32 p = settings::get().invincible ? rd32(0x7FDEFE14) : 0;
+    const u32 p = settings::get().invincible ? playerCraft() : 0;
     if (p != craft) {
         craft = p;
-        isCraft = false;
         maxHealth = 0.f;
-        const u32 vt = p ? rd32(p + 0x80) : 0;
-        if (vt >= 0x7F000000 && vt < 0x81800000)
-            for (u32 o = 0; o < 0x400 && !isCraft; o += 4) isCraft = rd32(vt + o) == 0x7FC3E528;
     }
-    if (!isCraft) return;
+    if (!craft) return;
     const float h = float(s2d(rd32(craft + 0x6F4)));
     if (!(h >= 0.f && h <= 100000.f)) return;
     if (h > maxHealth) maxHealth = h;

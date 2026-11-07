@@ -104,7 +104,9 @@ void viSetRate(int fps);   // hw.cpp: retrace rate (60 = 59.94 Hz NTSC, or 90/12
 double viRate();           // current retrace rate in Hz
 u32 viRetraceCount();      // retraces so far
 u32 viXfbLines();          // lines the VI scans out (304 for letterboxed cinematics, 450 in game)
-void setAudioSpeed(u32 speed);  // hw.cpp: the AI (audio) clock's speed-up while fast-forwarding
+void setAudioSpeed(double speed, bool mute);  // hw.cpp: AI (audio) clock speed-up, output muted
+void setDvdBoost(double boost);               // hw.cpp: disc reads that much faster
+bool cinematicSkip();                         // hle_game.cpp: a cinematic is being skipped
 void setGameAspect(double aspect);  // hle_game.cpp: the game's camera aspect (widescreen)
 // hw.cpp: a display copy to dest lands at this line of the VI's (front or back) frame buffer
 bool viLocateCopy(u32 dest, u32 strideBytes, u32& line, u32& lines);

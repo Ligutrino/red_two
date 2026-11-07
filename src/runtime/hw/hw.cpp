@@ -96,8 +96,16 @@ double s_viHz = 60000.0 / 1001.0;
 
 }  // namespace
 
-static u32 s_audioSpeed = 1;  // fast-forwarded cinematics play their audio faster (onAi)
-void setAudioSpeed(u32 speed) { s_audioSpeed = speed < 1 ? 1 : speed; }
+// Skipping a cinematic (hle_game.cpp) runs the game many times faster: the audio clock keeps
+// pace (onAi) silently, and disc reads are as much faster so streams keep up.
+static double s_audioSpeed = 1.0;
+static bool s_audioMute = false;
+static double s_dvdBoost = 1.0;
+void setAudioSpeed(double speed, bool mute) {
+    s_audioSpeed = speed < 1.0 ? 1.0 : speed;
+    s_audioMute = mute;
+}
+void setDvdBoost(double boost) { s_dvdBoost = boost < 1.0 ? 1.0 : boost; }
 
 void viSetRate(int fps) {
     s_viHz = fps == 60 ? 60000.0 / 1001.0 : double(fps);
@@ -228,6 +236,7 @@ void diStart() {
                 return x > 0 ? x : 3.0;
             }();
             latencyTb += u64(double(s_diOp.len) * double(kTbClock) / (mbps * 1024.0 * 1024.0));
+            latencyTb = u64(double(latencyTb) / s_dvdBoost);
         }
         if (envFlag("R2_DVD_LOG")) {
             const u64 o = u64(s_diOp.off) << 2;
@@ -884,13 +893,13 @@ void onAi() {
     const u64 samples = u64(s_aiDma.blocks ? s_aiDma.blocks : 1) * 32 / 4;
     const u32 rate = (ai[0] & 0x40) ? 32000 : 48000;
     // the latched block plays now: hand it to the host
-    const u32 speed = s_audioSpeed;
-    if (const u8* p = physPtr(s_aiDma.addr, u32(samples) * 4)) audio::push(p, u32(samples), rate, speed);
+    if (!s_audioMute)
+        if (const u8* p = physPtr(s_aiDma.addr, u32(samples) * 4)) audio::push(p, u32(samples), rate);
     // Next block from when this one was due, not from now: a late interrupt (the guest was
     // busy) must not slow the audio clock down. Resynchronise only after a long stall.
-    // Fast-forward shortens the blocks: MusyX (synthesis, sequencer, streams) keeps pace.
+    // Skipping shortens the blocks: MusyX (synthesis, sequencer, streams) keeps pace.
     static u64 due = 0;
-    const u64 now = tbNow(), period = samples * kTbClock / (u64(rate) * speed);
+    const u64 now = tbNow(), period = u64(double(samples) * double(kTbClock) / (double(rate) * s_audioSpeed));
     due = (due && now - due < 4 * period) ? due + period : now + period;
     schedule(EV_AI, due);
 }

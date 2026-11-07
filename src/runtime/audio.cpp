@@ -54,23 +54,10 @@ void init() {
     logf("audio", "output: 32 kHz stereo");
 }
 
-void push(const u8* data, u32 frames, u32 rate, u32 speed) {
+void push(const u8* data, u32 frames, u32 rate) {
     static std::vector<s16> buf;
-    auto sample = [data](u32 i) { return s16(data[2 * i] << 8 | data[2 * i + 1]); };
-    if (speed <= 1) {
-        buf.resize(size_t(frames) * 2);
-        for (u32 i = 0; i < frames * 2; i++) buf[i] = sample(i);
-    } else {
-        // fast-forward: average each run of `speed` frames into one
-        frames /= speed;
-        buf.resize(size_t(frames) * 2);
-        for (u32 f = 0; f < frames; f++)
-            for (u32 ch = 0; ch < 2; ch++) {
-                int sum = 0;
-                for (u32 k = 0; k < speed; k++) sum += sample((f * speed + k) * 2 + ch);
-                buf[f * 2 + ch] = s16(sum / int(speed));
-            }
-    }
+    buf.resize(size_t(frames) * 2);
+    for (u32 i = 0; i < frames * 2; i++) buf[i] = s16(data[2 * i] << 8 | data[2 * i + 1]);
     const int bytes = int(frames * 4);
     if (s_dump) {
         if (!s_dumpRate) s_dumpRate = rate;

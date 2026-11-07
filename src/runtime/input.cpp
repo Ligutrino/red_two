@@ -111,8 +111,11 @@ void poll() {
     else
         for (auto& e : st) e.err = PAD_ERR_NO_CONTROLLER;
     u16 scripted = 0;
-    // script times count 59.94 Hz retraces, whatever the retrace rate (settings fps)
-    const u64 t = u64(double(s_vblank) * (60000.0 / 1001.0) / viRate());
+    // script times count 59.94 Hz retraces, whatever the retrace rate (settings fps; it also
+    // changes while a cinematic is skipped)
+    static double scriptTime = 0;
+    scriptTime += (60000.0 / 1001.0) / viRate();
+    const u64 t = u64(scriptTime);
     for (auto& p : s_script)
         if (t >= p.start && t < p.start + p.frames) scripted |= p.button;
     if (scripted) {
