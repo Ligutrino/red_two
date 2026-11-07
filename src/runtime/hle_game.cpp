@@ -21,12 +21,13 @@ static void frameDelta(Ctx& c) {
     if (hz < 60.5) return;  // 59.94 Hz: the game's own measure
     // Real time rather than retraces: those can fire late when the host is busy, which would
     // run the game a few percent slow. Capped like the game's own measure (1/29.97 s), e.g.
-    // after a load.
+    // after a load; no real lower bound, or short frames (two updates in one, as loading
+    // screens' 0x7FC03BC4 can do) would add time and run the game fast.
     static u64 lastTb = 0;
     const u64 tb = tbNow();
     const double dt = lastTb ? double(tb - lastTb) / double(kTbClock) : 1.0 / hz;
     lastTb = tb;
-    c.f[1] = c.ps1[1] = rsingle(std::clamp(dt, 0.5 / hz, 1.0 / 29.97));
+    c.f[1] = c.ps1[1] = rsingle(std::clamp(dt, 0.00025, 1.0 / 29.97));
 }
 
 // Skippable cutscenes (settings): holding B in a letterboxed cinematic (the VI shows 304 lines
