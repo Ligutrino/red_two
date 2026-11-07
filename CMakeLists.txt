@@ -100,7 +100,10 @@ add_executable(red_two
     src/runtime/hw/hw.cpp
     src/runtime/hw/gx_fifo.cpp
     src/runtime/gfx/gx_bridge.cpp
-    src/runtime/input.cpp)
+    src/runtime/input.cpp
+    src/runtime/settings.cpp
+    src/runtime/hle_game.cpp
+    src/runtime/gfx/menu.cpp)
 target_include_directories(red_two PRIVATE src/runtime "${GEN_DIR}" extern/aurora/lib)
 target_compile_definitions(red_two PRIVATE ${R2_DEFS})
 target_link_libraries(red_two PRIVATE r2game winmm aurora::core aurora::gx aurora::vi aurora::pad xxHash::xxhash zstd::libzstd dbghelp)

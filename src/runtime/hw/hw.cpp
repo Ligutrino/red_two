@@ -88,7 +88,23 @@ void piWrite(u32 off, u32 v) {
 u16 vi[0x40] = {};
 u64 s_viFrameStartTb = 0;
 u32 s_viFrames = 0;
-constexpr u64 kViPeriod = kTbClock * 1001 / 60000;  // 59.94 Hz
+// Retrace period: 59.94 Hz (NTSC) unless the player picked a higher frame rate (settings fps):
+// the game paces its frames on the retrace, and its frame delta is then corrected
+// (hle_GameFrameDelta), so gameplay keeps its speed.
+u64 kViPeriod = kTbClock * 1001 / 60000;
+double s_viHz = 60000.0 / 1001.0;
+
+}  // namespace
+
+void viSetRate(int fps) {
+    s_viHz = fps == 60 ? 60000.0 / 1001.0 : double(fps);
+    kViPeriod = u64(double(kTbClock) / s_viHz + 0.5);
+    logf("vi", "retrace rate %.2f Hz", s_viHz);
+}
+double viRate() { return s_viHz; }
+u32 viRetraceCount() { return s_viFrames; }
+
+namespace {
 
 void viUpdateIrq() {
     bool any = false;

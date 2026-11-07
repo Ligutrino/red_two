@@ -100,8 +100,17 @@ std::string discFileAt(u64 off);  // "path+0xoffset" of the disc file containing
 void hwInit();
 void viFrameHook();  // called once per guest frame (XFB handoff)
 bool viIsFramebuffer(u32 addr);  // hw.cpp: has the VI been told to scan out this XFB?
+void viSetRate(int fps);   // hw.cpp: retrace rate (60 = 59.94 Hz NTSC, or 90/120/144)
+double viRate();           // current retrace rate in Hz
+u32 viRetraceCount();      // retraces so far
+u32 viXfbLines();          // lines the VI scans out (304 for letterboxed cinematics, 450 in game)
+void setGameAspect(double aspect);  // hle_game.cpp: the game's camera aspect (widescreen)
 // hw.cpp: a display copy to dest lands at this line of the VI's (front or back) frame buffer
 bool viLocateCopy(u32 dest, u32 strideBytes, u32& line, u32& lines);
+
+namespace gfx {
+bool menuOpen();  // gfx/menu.cpp: the settings menu has the controls (the game sees idle pads)
+}
 
 namespace input {
 void init(bool pads);  // pads: Aurora PAD (after the window exists); false = R2_INPUT script only

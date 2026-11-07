@@ -18,6 +18,7 @@
 #include "gfx/gx_bridge.h"
 #include "hw/gx_fifo.h"
 #include "runtime.h"
+#include "settings.h"
 #include "../common/disc_image.h"
 #include "hw/musyx_dsp.h"
 #include "table.h"
@@ -193,9 +194,23 @@ void viFrameHook() {
     static const char* memDump = getenv("R2_MEM_DUMP");
     for (const char* s = memDump; s && *s;) {
         char* end;
-        const u32 at = u32(strtoul(s, &end, 10)), addr = u32(strtoul(end + 1, &end, 16)) & 0x1FFFFFFF,
-                  len = u32(strtoul(end + 1, &end, 16));
-        if (at == s_frames)
+        const u32 at = u32(strtoul(s, &end, 10)), raw = u32(strtoul(end + 1, &end, 16)),
+                  addr = isVm(raw) ? raw : raw & 0x1FFFFFFF, len = u32(strtoul(end + 1, &end, 16));
+        if (at == s_frames && isVm(addr)) {
+            // VM addresses: the pages mapped right now (others read as zero)
+            std::vector<u8> buf(len & ~3u);
+            for (u32 o = 0; o < buf.size(); o += 4) {
+                const u32 w = peek32(addr + o);
+                buf[o] = u8(w >> 24), buf[o + 1] = u8(w >> 16), buf[o + 2] = u8(w >> 8), buf[o + 3] = u8(w);
+            }
+            char name[64];
+            snprintf(name, sizeof name, "build/mem_%u_%08X.bin", at, addr);
+            if (FILE* f = fopen(name, "wb")) {
+                fwrite(buf.data(), 1, buf.size(), f);
+                fclose(f);
+                logf("dump", "wrote %s", name);
+            }
+        } else if (at == s_frames)
             if (const u8* p = physPtr(addr, len)) {
                 char name[64];
                 snprintf(name, sizeof name, "build/mem_%u_%08X.bin", at, addr);
@@ -334,6 +349,15 @@ int main(int argc, char** argv) {
     if (envFlag("R2_TRACE")) g_trace = true;
     // A crash must end the process, not wait behind an error-reporting dialog.
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    // A game: no EcoQoS. Windows 11 otherwise throttles the process (efficiency cores, coarse
+    // timers) whenever its window is in the background or covered, e.g. on a second screen.
+    {
+        PROCESS_POWER_THROTTLING_STATE pt{};
+        pt.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        pt.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+        pt.StateMask = 0;
+        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof pt);
+    }
     SetUnhandledExceptionFilter(onHostCrash);
     SetConsoleCtrlHandler([](DWORD) -> BOOL { quit(0); return TRUE; }, TRUE);  // Ctrl+C / console closed
     debugInit();
@@ -349,6 +373,8 @@ int main(int argc, char** argv) {
         }).detach();
     }
     eventsInit();
+    settings::load();  // after eventsInit: logging needs the time base
+    viSetRate(settings::get().fps);
     profilerStart();
     s_t0Tb = tbNow();
     if (!memInit()) fatal("could not reserve the guest address space");

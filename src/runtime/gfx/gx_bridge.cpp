@@ -39,6 +39,7 @@
 extern "C" __declspec(dllimport) int __stdcall SetWindowPos(void*, void*, int, int, int, int, unsigned);
 #include "../hw/gx_fifo.h"
 #include "../runtime.h"
+#include "../settings.h"
 
 namespace rt::gfx {
 namespace fifo = aurora::gx::fifo;
@@ -103,12 +104,15 @@ void pollEvents() {
             logf("gfx", "window closed");
             quit(0);
         }
+        if (e->type == AURORA_SDL_EVENT) menuEvent(&e->sdl);
         // F11 or Alt+Enter: toggle fullscreen
         if (e->type == AURORA_SDL_EVENT && e->sdl.type == SDL_EVENT_KEY_DOWN && !e->sdl.key.repeat &&
             (e->sdl.key.key == SDLK_F11 || (e->sdl.key.key == SDLK_RETURN && (e->sdl.key.mod & SDL_KMOD_ALT)))) {
             if (SDL_Window* w = aurora_get_window()) {
                 const bool full = (SDL_GetWindowFlags(w) & SDL_WINDOW_FULLSCREEN) != 0;
                 SDL_SetWindowFullscreen(w, !full);
+                settings::get().fullscreen = !full;
+                settings::save();
             }
         }
     }
@@ -180,6 +184,7 @@ void testQuad() {
 
 void endFrame() {
     if (!s_inFrame) return;
+    menuDraw();
     aurora_end_frame();
     s_inFrame = false;
     s_frames++;
@@ -922,8 +927,9 @@ bool init(int argc, char** argv) {
     cfg.mem1Size = 0;
     cfg.mem2Size = 0;
     if (envFlag("R2_HEADLESS")) cfg.surface.type = AURORA_SURFACE_HEADLESS;
+    cfg.startFullscreen = settings::get().fullscreen;
     for (int i = 1; i < argc; i++)
-        if (!strcmp(argv[i], "--fullscreen")) cfg.startFullscreen = true;
+        if (!strcmp(argv[i], "--fullscreen")) cfg.startFullscreen = settings::get().fullscreen = true;
     // R2_BACKGROUND: automated runs - the window opens behind everything without taking focus
     // (it still renders, and PrintWindow can capture it).
     const bool background = envFlag("R2_BACKGROUND");
@@ -938,6 +944,7 @@ bool init(int argc, char** argv) {
                 sendToBack(hwnd);
         }
     }
+    applyDisplaySettings();
     static const char* backends[] = {"auto", "D3D11", "D3D12", "Metal", "Vulkan", "OpenGL", "OpenGL ES", "WebGPU", "null"};
     logf("gfx", "Aurora up: %s backend, window %ux%u", backends[info.backend], info.windowSize.width, info.windowSize.height);
     s_enabled = true;

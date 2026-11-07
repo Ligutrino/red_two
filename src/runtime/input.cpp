@@ -111,8 +111,10 @@ void poll() {
     else
         for (auto& e : st) e.err = PAD_ERR_NO_CONTROLLER;
     u16 scripted = 0;
+    // script times count 59.94 Hz retraces, whatever the retrace rate (settings fps)
+    const u64 t = u64(double(s_vblank) * (60000.0 / 1001.0) / viRate());
     for (auto& p : s_script)
-        if (s_vblank >= p.start && s_vblank < p.start + p.frames) scripted |= p.button;
+        if (t >= p.start && t < p.start + p.frames) scripted |= p.button;
     if (scripted) {
         st[0].err = PAD_ERR_NONE;
         st[0].button |= scripted;
@@ -126,11 +128,12 @@ void poll() {
                  st[i].triggerRight, (unsigned long long)src);
         }
     }
+    const bool menu = gfx::menuOpen();
     for (int i = 0; i < PAD_CHANMAX; i++) {
         PadState& p = padState(i);
-        if (st[i].err == PAD_ERR_NO_CONTROLLER) {
+        if (st[i].err == PAD_ERR_NO_CONTROLLER || menu) {
             // Port 1 always has a controller: the game asks for one otherwise.
-            p.connected = i == 0;
+            p.connected = i == 0 || (menu && st[i].err != PAD_ERR_NO_CONTROLLER);
             p.buttons = 0x0080;
             p.stickX = p.stickY = p.substickX = p.substickY = 0x80;
             p.triggerL = p.triggerR = 0;
