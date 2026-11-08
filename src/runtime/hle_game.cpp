@@ -174,21 +174,34 @@ void setGameAspect(double aspect) {
 }
 
 // CameraSetup (0x7FC14CEC; view r3, matrix r4, aspect f1, vertical fov f2 in degrees) derives a
-// camera's culling volume (horizontal fov +0x130, frustum vectors from +0x138) from the aspect
-// and fov its camera object holds (+0x274/+0x270), and keeps them (+0x12C, +0x134) for the
-// projection 0x7FC153C0 builds next. Not every camera takes the patched constants above: the
-// LucasArts intro's has its own 1.3333, letterboxed cinematics use 2.105 (4/3 * 480/304). Aurora
-// shows such a projection opened up to fill the screen (patch 0009, widescreen_scale): with
-// k = display aspect / (4/3) and v = 480 / the XFB's lines in a letterboxed frame (1 otherwise),
-// r = k / v opens it r times wider if r > 1, 1/r times taller if r < 1. The culling volume is
-// computed for that opened view, while the projection keeps the game's own aspect and fov:
-// stormtroopers at the intro's sides and objects at a cutscene's top and bottom are no longer
-// dropped. (Cameras already at the display aspect - flight, which Aurora leaves as they are -
-// pass unchanged.) R2_GAME_CULLING=1 keeps the game's own volumes (for comparisons).
+// camera's culling volume - a pyramid from the camera to the far plane's corners (+0x138..+0x168,
+// side planes after them; horizontal fov +0x130) - from the aspect and fov its camera object
+// holds (+0x274/+0x270), and keeps them (+0x12C, +0x134) for the projection 0x7FC153C0 builds
+// next. Not every camera takes the patched constants above: the LucasArts intro's has its own
+// 1.3333, letterboxed cinematics and the hangar use 2.105 (4/3 * 480/304) and 4/3. Aurora shows
+// such a projection opened up to fill the screen (patch 0009, widescreen_scale): with k = display
+// aspect / (4/3) and v = 480 / the XFB's lines in a letterboxed frame (1 otherwise), r = k / v
+// opens it r times wider if r > 1, 1/r times taller if r < 1.
+//
+// So the culling volume is computed for that opened view, and outside free flight (intro,
+// menus, the hangar, cinematics) kSceneMargin times wider and taller still for objects (the
+// frustum planes): objects whose bounds sit just outside the edge while part of them shows (a
+// trooper's feet below the screen) no longer drop out. The margin stays small and the
+// horizontal fov (+0x130, which e.g. the terrain grid walk 0x7FC269C4 sizes its area by) stays
+// the screen's: a 3x margin overflowed the game's per-frame buffers (heap chunk lists freed
+// with bad pointers in the logos and the menus). Flight keeps an exact volume; its camera is
+// already at the display aspect (setGameAspect) and passes unchanged, like the HUD's.
+// The projection: a full frame opened sideways gets the display's aspect with the game's fov,
+// which Aurora shows as it is (the same picture; anything else the game tests against the
+// projection sees the whole screen); otherwise (taller, letterboxed) the game's own aspect and
+// fov, which Aurora opens. R2_GAME_CULLING=1 keeps the game's own volumes, R2_CULL_MARGIN=<f>
+// sets the margin (1 = exactly the screen).
+constexpr double kSceneMargin = 1.2;
+
 void hle_CameraSetup(Ctx& c) {
     const double aspect = c.f[1], fov = c.f[2];
     const double display = s_displayAspect.load(std::memory_order_relaxed);
-    static const bool gameCulling = envFlag("R2_GAME_CULLING");  // debugging: the game's own volumes
+    static const bool gameCulling = envFlag("R2_GAME_CULLING");
     if (gameCulling || display < 4.0 / 3.0 + 0.01 || !(aspect > 0.5 && aspect < 8.0) || !(fov > 1.0 && fov < 170.0) ||
         std::abs(aspect - display) < 0.002) {
         f_7FC14CEC_orig(c);
@@ -196,13 +209,37 @@ void hle_CameraSetup(Ctx& c) {
     }
     const u32 lines = viXfbLines();
     const double k = display * 0.75, v = lines && lines < 408 ? 480.0 / lines : 1.0, r = k / v;
-    const double wider = std::max(1.0, r), taller = std::max(1.0, 1.0 / r);
+    static const double sceneMargin = [] {
+        const char* e = getenv("R2_CULL_MARGIN");
+        return e ? std::clamp(atof(e), 1.0, 20.0) : kSceneMargin;
+    }();
+    // In a letterboxed frame every camera culls for at least the letterboxed picture: the hangar
+    // (ship select) renders at 2.105 but sets the camera up once more per frame at 4:3, and that
+    // volume decides what is there (the bay's sides popped in as the camera panned).
+    const double base = v > 1.0 ? std::max(aspect, 4.0 / 3.0 * v) : aspect;
+    const u32 craft = playerCraft();
+    const bool flying = v == 1.0 && craft && rd32(craft + 0x370) == 0;
+    const double margin = flying ? 1.0 : sceneMargin;
     constexpr double kRad = 3.14159265358979323846 / 180.0;
     const u32 view = c.r[3];
-    c.f[1] = c.ps1[1] = rsingle(aspect * wider / taller);
-    c.f[2] = c.ps1[2] = rsingle(2.0 * std::atan(std::tan(fov * 0.5 * kRad) * taller) / kRad);
-    f_7FC14CEC_orig(c);
-    wr32(view + 0x12C, d2s(aspect));  // the projection: the game's own
+    const u32 matrix = c.r[4];
+    auto setup = [&](double m) {  // the volume opened for the screen, m times more
+        const double wider = std::max(1.0, r) * m, taller = std::max(1.0, 1.0 / r) * m;
+        c.r[3] = view;  // (the call keeps the non-volatile registers; arguments again)
+        c.r[4] = matrix;
+        c.f[1] = c.ps1[1] = rsingle(base * wider / taller);
+        c.f[2] = c.ps1[2] = rsingle(std::min(2.0 * std::atan(std::tan(fov * 0.5 * kRad) * taller) / kRad, 170.0));
+        f_7FC14CEC_orig(c);
+    };
+    u32 hfov = 0;
+    if (margin != 1.0) {
+        setup(1.0);
+        hfov = rd32(view + 0x130);
+    }
+    setup(margin);
+    if (hfov) wr32(view + 0x130, hfov);
+    const bool sideways = v == 1.0 && r >= 1.0;
+    wr32(view + 0x12C, d2s(sideways ? display : aspect));
     wr32(view + 0x134, d2s(fov));
 }
 
