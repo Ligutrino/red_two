@@ -14,4 +14,5 @@ std::string stats();               // Aurora's per-frame statistics
 void menuEvent(const void* sdlEvent);  // every SDL event (opens/closes the menu)
 void menuDraw();                       // inside a frame, before it ends (ImGui)
 void applyDisplaySettings();           // resolution, aspect, fullscreen, frame rate -> Aurora/VI
+void menuImGuiInit(const void* windowSize);  // Aurora's ImGui init callback: fonts and style
 }  // namespace rt::gfx

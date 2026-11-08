@@ -255,9 +255,28 @@ double frsqrte(double v);
 u32 fctiw(Ctx& c, double v, bool truncate);
 inline double ctiwBits(u32 v) { return bdbl(0xFFF8000000000000ull | v); }
 
-// Paired-single quantized load/store (GQR-driven).
-void psqLoad(Ctx& c, u32 fd, u32 addr, bool w, u32 gqr);
-void psqStore(Ctx& c, u32 fs, u32 addr, bool w, u32 gqr);
+// Paired-single quantized load/store (GQR-driven). The float case (most of the game's vector
+// code) is inline; quantized types go through cpu.cpp.
+void psqLoadQ(Ctx& c, u32 fd, u32 addr, bool w, u32 gqr);
+void psqStoreQ(Ctx& c, u32 fs, u32 addr, bool w, u32 gqr);
+[[clang::always_inline]] inline void psqLoad(Ctx& c, u32 fd, u32 addr, bool w, u32 gqr) {
+    if (((gqr >> 16) & 7) < 4) [[likely]] {
+        const double p0 = s2d(rd32(addr));
+        const double p1 = w ? 1.0 : s2d(rd32(addr + 4));
+        c.f[fd] = p0;
+        c.ps1[fd] = p1;
+        return;
+    }
+    psqLoadQ(c, fd, addr, w, gqr);
+}
+[[clang::always_inline]] inline void psqStore(Ctx& c, u32 fs, u32 addr, bool w, u32 gqr) {
+    if ((gqr & 7) < 4) [[likely]] {
+        wr32(addr, d2s(c.f[fs]));
+        if (!w) wr32(addr + 4, d2s(c.ps1[fs]));
+        return;
+    }
+    psqStoreQ(c, fs, addr, w, gqr);
+}
 
 // --- system ---------------------------------------------------------------------------
 using GuestFn = void (*)(Ctx&);

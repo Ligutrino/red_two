@@ -87,6 +87,7 @@ void piWrite(u32 off, u32 v) {
 // =======================================================================================
 u16 vi[0x40] = {};
 u64 s_viFrameStartTb = 0;
+u64 s_viDueTb = 0;  // when the timer was asked to raise the current retrace
 u32 s_viFrames = 0;
 // Retrace period: 59.94 Hz (NTSC) unless the player picked a higher frame rate (settings fps):
 // the game paces its frames on the retrace, and its frame delta is then corrected
@@ -127,8 +128,8 @@ void viUpdateIrq() {
 }
 
 void onVi() {
-    const u64 now = tbNow(), due = s_viFrameStartTb + kViPeriod;
-    if (now > due) {
+    const u64 now = tbNow(), due = s_viDueTb;
+    if (due && now > due) {
         g_viLateSumTb += now - due;
         if (now - due > g_viLateMaxTb) g_viLateMaxTb = now - due;
     }
@@ -142,7 +143,18 @@ void onVi() {
     siPollAll();
     cardFlushAll();
     viFrameHook();
-    schedule(EV_VI, s_viFrameStartTb + kViPeriod);
+    // The timer fires a little late every time (and the guest may be busy for a moment): counting
+    // the next period from the actual retrace ran 60 fps at ~59 and 144 at ~139. Schedule early by
+    // the average lateness instead, at most 1/8 of a period: retraces keep (nearly) their spacing.
+    // (Keeping a strict grid fired them back to back after a late one, which the game's frame
+    // pacing never sees on hardware: it hung switching screens.)
+    // Only timer jitter counts: a stall (the guest busy, a late safepoint) is not repeated.
+    static double lateEma = 0.0;
+    const u64 late = due && now > due ? now - due : 0;
+    if (late < kViPeriod / 4) lateEma = lateEma * 0.9 + double(late) * 0.1;
+    const u64 early = std::min(u64(lateEma), kViPeriod / 8);
+    s_viDueTb = s_viFrameStartTb + kViPeriod - early;
+    schedule(EV_VI, s_viDueTb);
 }
 
 u16 viRead(u32 off) {
@@ -858,7 +870,10 @@ void dspReset() {
     s_bootParamIdx = -1;
 }
 
+u64 s_aramDoneTb = 0;  // when the ARAM DMA in progress completes
+
 void onAram() {
+    s_aramDoneTb = 0;
     dspCsr() &= ~CSR_DMABUSY;
     dspCsr() |= CSR_ARINT;
     dspUpdateIrq();
@@ -879,8 +894,12 @@ void aramDma() {
     }
     if (toMram) watchHost(mm, cnt, "ARAM DMA");
     if (envFlag("R2_ARAM_LOG")) logf("aram", "%s mram %08X aram %08X len %X", toMram ? "A->M" : "M->A", mm, ar, cnt);
+    // The game's pager busy-waits on this flag for every 4 KiB page it brings in (the intro
+    // pages a lot): model a fast ARAM (2 GiB/s, ~3 us a page) and let a status read complete a
+    // due transfer at once (dspRead) instead of after the timer thread's wake-up and a safepoint.
     dspCsr() |= CSR_DMABUSY;
-    schedule(EV_ARAM, tbNow() + 100 + u64(cnt) * kTbClock / (200 * 1024 * 1024));
+    s_aramDoneTb = tbNow() + 50 + u64(cnt) * kTbClock / (2048ull * 1024 * 1024);
+    schedule(EV_ARAM, s_aramDoneTb);
 }
 
 void onAi() {
@@ -905,6 +924,10 @@ void onAi() {
 }
 
 u16 dspRead(u32 off) {
+    if (off == 0x0A && s_aramDoneTb && tbNow() >= s_aramDoneTb) {  // CSR: a polled ARAM DMA is done
+        unschedule(EV_ARAM);
+        onAram();
+    }
     switch (off) {
     // bit 15 of the high half is the mailbox's "full" flag, not part of the mail
     case 0x00: return u16(((s_mailToDsp >> 16) & 0x7FFF) | (s_mailToDspFull ? 0x8000 : 0));
@@ -1120,7 +1143,8 @@ void hwInit() {
     g_eventHandlers[EV_SI] = siPollAll;
     g_eventHandlers[EV_EXI2] = onAiCount;  // (slot reused for the AI sample counter interrupt)
     s_viFrameStartTb = tbNow();
-    schedule(EV_VI, s_viFrameStartTb + kViPeriod);
+    s_viDueTb = s_viFrameStartTb + kViPeriod;
+    schedule(EV_VI, s_viDueTb);
 }
 
 void siVBlankPoll() { siPollAll(); }

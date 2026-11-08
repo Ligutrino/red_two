@@ -123,6 +123,15 @@ bool s_testClear = false;  // R2_GFX_TEST: clear each frame to magenta (is prese
 bool s_xfb = true;         // R2_NO_XFB: present the EFB instead of the emulated XFB
 bool s_copyLog = false;  // R2_COPY_LOG: every display copy and where it lands
 
+// Aurora renders on its own thread (GX_PROCESSING_THREAD); gpSync waits until it has caught
+// up with every command sent. The game sees the GPU's progress only through draw done, draw
+// sync tokens and the CP's status and pointers: syncing there keeps memory the game reuses
+// afterwards (vertex arrays, textures) from being read late. R2_GX_THREAD=0 renders inline.
+bool s_gxThread = false;
+void gpSync() {
+    if (s_gxThread && s_inFrame) fifo::drain();
+}
+
 void ensureFrame() {
     if (s_inFrame) return;
     pollEvents();
@@ -182,10 +191,42 @@ void testQuad() {
     fifo::finish_draw();
 }
 
+// R2_FRAME_LOG: every 10 s, presented frame intervals against the retrace period (how many
+// overran it) and the time Aurora's end of frame (submit, present) took.
+void frameLog(u64 endStart, u64 endDone) {
+    // R2_FRAME_LOG=1: every 10 s; =<n> (2 or more): every n seconds
+    static const int secs = getenv("R2_FRAME_LOG") ? std::max(1, atoi(getenv("R2_FRAME_LOG"))) : 0;
+    if (!secs) return;
+    static u64 last = 0, windowStart = 0, frames = 0, over = 0, maxInterval = 0, endSum = 0, endMax = 0, drawsSum = 0;
+    const u64 period = u64(double(kTbClock) / viRate());
+    if (last) {
+        const u64 interval = endDone - last;
+        if (interval > period + period / 2) over++;
+        maxInterval = std::max(maxInterval, interval);
+    }
+    last = endDone;
+    if (!windowStart) windowStart = endDone;
+    frames++;
+    endSum += endDone - endStart;
+    endMax = std::max(endMax, endDone - endStart);
+    drawsSum += s_frameDraws;
+    if (endDone - windowStart >= u64(secs == 1 ? 10 : secs) * kTbClock) {
+        auto ms = [](u64 tb) { return double(tb) * 1000.0 / double(kTbClock); };
+        logf("frame", "%llu frames (%.1f fps), %llu over 1.5 periods, longest %.2f ms; end of frame avg %.2f max %.2f ms; "
+             "%llu draws/frame", (unsigned long long)frames, double(frames) * double(kTbClock) / double(endDone - windowStart),
+             (unsigned long long)over, ms(maxInterval), ms(endSum) / double(frames), ms(endMax),
+             (unsigned long long)(drawsSum / frames));
+        windowStart = endDone;
+        frames = over = maxInterval = endSum = endMax = drawsSum = 0;
+    }
+}
+
 void endFrame() {
     if (!s_inFrame) return;
     menuDraw();
+    const u64 endStart = tbNow();
     aurora_end_frame();
+    frameLog(endStart, tbNow());
     s_inFrame = false;
     s_frames++;
     s_frameDraws = 0;
@@ -249,21 +290,33 @@ void prepareArrays(const u8* p) {
     const u32 texCnt[8] = {(A >> 21) & 1, B & 1, (B >> 9) & 1, (B >> 18) & 1, (B >> 27) & 1, (C >> 5) & 1, (C >> 14) & 1, (C >> 23) & 1};
     const u32 texFmt[8] = {(A >> 22) & 7, (B >> 1) & 7, (B >> 10) & 7, (B >> 19) & 7, (B >> 28) & 7, (C >> 6) & 7, (C >> 15) & 7, (C >> 24) & 7};
     for (u32 t = 0; t < 8; t++) attr((hi >> (2 * t)) & 3, 4 + t, compSize(texFmt[t]) * (texCnt[t] ? 2 : 1), 1);
-    if (!nrefs) return;
-    const u32 vsize = off;
-    u32 maxIdx[12] = {};
-    const u8* v = p + 3;
-    for (u32 i = 0; i < count; i++, v += vsize)
-        for (u32 r = 0; r < nrefs; r++)
-            for (u32 k = 0; k < refs[r].count; k++) {
-                const u8* q = v + refs[r].offset + k * refs[r].bytes;
-                const u32 idx = refs[r].bytes == 1 ? q[0] : be16(q);
-                if (idx > maxIdx[r]) maxIdx[r] = idx;
-            }
+    // 8-bit indices (the common case) cannot pass 255: size those arrays for 256 entries at
+    // once instead of scanning every draw's indices. 16-bit ones are scanned unless the array
+    // already went up big enough for any index.
+    u32 n = 0;
     for (u32 r = 0; r < nrefs; r++) {
         const Array& a = s_arrays[refs[r].array];
         const u32 stride = a.stride ? a.stride : 16;
-        sendArray(refs[r].array, (maxIdx[r] + 1) * stride + 16);
+        if (a.sentSize && a.sentSize >= (refs[r].bytes == 1 ? 256u : 65536u) * stride + 16) continue;
+        refs[n++] = refs[r];
+    }
+    nrefs = n;
+    if (!nrefs) return;
+    // one tight loop per index (attribute outer, vertices inner: no per-vertex branching)
+    const u32 vsize = off;
+    for (u32 r = 0; r < nrefs; r++) {
+        u32 maxIdx = 0;
+        for (u32 k = 0; k < refs[r].count; k++) {
+            const u8* q = p + 3 + refs[r].offset + k * refs[r].bytes;
+            if (refs[r].bytes == 1) {
+                for (u32 i = 0; i < count; i++, q += vsize) maxIdx = std::max<u32>(maxIdx, q[0]);
+            } else {
+                for (u32 i = 0; i < count; i++, q += vsize) maxIdx = std::max<u32>(maxIdx, u32(q[0]) << 8 | q[1]);
+            }
+        }
+        const Array& a = s_arrays[refs[r].array];
+        const u32 stride = a.stride ? a.stride : 16;
+        sendArray(refs[r].array, (maxIdx + 1) * stride + 16);
     }
 }
 
@@ -314,6 +367,7 @@ u32 bindTlut(u32 tlutReg) {
 struct TexInfo {
     u32 id = 0, version = 0;
     u64 hash = 0, frame = ~0ull;
+    u64 hashTb = 0;  // when the contents were last hashed
 };
 std::unordered_map<u64, TexInfo> s_texInfo;
 u32 s_nextTexId = 1;
@@ -345,7 +399,10 @@ void textureIdentity(u32 addr, u32 image0, bool mips, u32 levels, const u8* host
     const u64 key = (u64(addr) << 32) ^ (u64(image0) << 1) ^ (mips ? 1 : 0) ^ (u64(levels) << 56);
     TexInfo& t = s_texInfo[key];
     if (!t.id) t.id = s_nextTexId++;
-    if (t.frame != s_frames) {
+    // Rehashed once a frame, but no more than 60 times a second: at 144 fps hashing every frame
+    // was ~9% of the time, and the game changes texture memory at its own pace (movies 30 fps).
+    if (t.frame != s_frames && (!t.hashTb || tbNow() - t.hashTb >= kTbClock / 60)) {
+        t.hashTb = tbNow();
         const u64 hsh = XXH3_64bits(host, bytes);
         if (hsh != t.hash) {
             t.hash = hsh;
@@ -842,6 +899,9 @@ void onCommand(const u8* p, u32 len) {
             return;
         }
         fifo::write_data(p, len);
+        // Draw done / draw sync tokens: the game may reuse the memory behind earlier draws once
+        // it sees them (Aurora's worker reads arrays and textures when it gets to a draw)
+        if ((reg == 0x45 && (v & 2)) || reg == 0x47 || reg == 0x48) gpSync();
         return;
     }
     case 0x10: {  // XF register load: shadow the viewport and projection (scissor box offset)
@@ -900,6 +960,7 @@ bool init(int argc, char** argv) {
         std::error_code ec;
         std::filesystem::create_directories(cacheDir, ec);
         cfg.cachePath = cacheDir.c_str();
+        cfg.userPath = cacheDir.c_str();  // controller/keyboard bindings (input.json) too
     }
     cfg.desiredBackend = BACKEND_AUTO;
     cfg.vsync = false;  // the game paces itself on the emulated retrace
@@ -917,6 +978,7 @@ bool init(int argc, char** argv) {
     cfg.windowPosX = -1;
     cfg.windowPosY = -1;
     cfg.logCallback = logCallback;
+    cfg.imGuiInitCallback = [](const AuroraWindowSize* size) { menuImGuiInit(size); };
     // Controllers keep working when the window is not focused (SDL drops their events
     // otherwise, and a window started from another program often opens unfocused). Not for
     // automated runs: someone's controller must not steer a scripted test (R2_BG_PADS=0/1
@@ -925,7 +987,11 @@ bool init(int argc, char** argv) {
     cfg.allowJoystickBackgroundEvents = bgPads ? *bgPads == '1'
                                                : !envFlag("R2_BACKGROUND") && !envFlag("R2_HEADLESS") && !getenv("R2_INPUT");
     cfg.logLevel = envFlag("R2_AURORA_DEBUG") ? LOG_DEBUG : LOG_INFO;
-    cfg.gxProcessingMode = GX_PROCESSING_INLINE;  // draws read guest memory when they are issued
+    {
+        const char* t = getenv("R2_GX_THREAD");
+        s_gxThread = !t || *t != '0';
+    }
+    cfg.gxProcessingMode = s_gxThread ? GX_PROCESSING_THREAD : GX_PROCESSING_INLINE;
     cfg.mem1Size = 0;
     cfg.mem2Size = 0;
     if (envFlag("R2_HEADLESS")) cfg.surface.type = AURORA_SURFACE_HEADLESS;
@@ -956,6 +1022,7 @@ bool init(int argc, char** argv) {
     logf("gfx", "Aurora up: %s backend, window %ux%u", backends[info.backend], info.windowSize.width, info.windowSize.height);
     s_enabled = true;
     gxSetSink(onCommand);
+    gxSetSyncHook(gpSync);
     input::init(true);
     return true;
 }

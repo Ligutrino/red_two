@@ -20,6 +20,7 @@ namespace {
 
 GxStats s_stats;
 GxSink s_sink = nullptr;
+void (*s_syncHook)() = nullptr;  // the renderer catches up (the CPU looks at the GP's progress)
 bool s_log = false;
 
 // --- PI (CPU side) FIFO ---
@@ -280,6 +281,7 @@ u32 regPair(u32 lo, u32 hi) { return (u32(s_cpReg[hi / 2] & 0x3FF) << 16) | s_cp
 
 GxStats& gxStats() { return s_stats; }
 void gxSetSink(GxSink sink) { s_sink = sink; }
+void gxSetSyncHook(void (*hook)()) { s_syncHook = hook; }
 void gxInit() {
     s_log = envFlag("R2_GX_LOG");
     if (const char* v = getenv("R2_FIFO_LOG")) s_cmdLog = atoi(v);
@@ -318,11 +320,21 @@ void burst() {
 
 void gxFifoWrite(u32 v, int size) {
     s_stats.bytes += u32(size);
-    for (int i = 0; i < size; i++) s_gp[s_gpLen++] = u8(v >> (8 * (size - 1 - i)));
+    u8* d = s_gp + s_gpLen;  // big-endian into the pipe (s_gp has room past 32 bytes)
+    if (size == 4) {
+        const u32 b = __builtin_bswap32(v);
+        memcpy(d, &b, 4);
+    } else if (size == 2) {
+        const u16 b = __builtin_bswap16(u16(v));
+        memcpy(d, &b, 2);
+    } else {
+        *d = u8(v);
+    }
+    s_gpLen += u32(size);
     if (s_gpLen >= 32) {
         burst();
         s_gpLen -= 32;
-        memmove(s_gp, s_gp + 32, s_gpLen);
+        if (s_gpLen) memcpy(s_gp, s_gp + 32, s_gpLen);
     }
 }
 
@@ -372,6 +384,7 @@ void gxPiWrite(u32 off, u32 v) {
 // --- CP registers (0xCC000000) ------------------------------------------------------------
 u16 gxCpRead(u32 off) {
     off &= 0x7E;
+    if (s_syncHook) s_syncHook();
     switch (off) {
     case 0x00: {  // status: overflow, underflow, read idle, command idle, breakpoint
         // A GP halted at a breakpoint with commands still behind it is not idle: before moving

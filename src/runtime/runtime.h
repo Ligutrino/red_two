@@ -113,6 +113,7 @@ bool viLocateCopy(u32 dest, u32 strideBytes, u32& line, u32& lines);
 
 namespace gfx {
 bool menuOpen();  // gfx/menu.cpp: the settings menu has the controls (the game sees idle pads)
+void setHudAnchoring(bool on);  // gfx/menu.cpp: widescreen HUD pieces at the screen edges (in flight)
 }
 
 namespace input {

@@ -107,6 +107,8 @@ void hle_GameFrameDelta(Ctx& c) {
         setAudioSpeed(1.0, false);
     }
     keepHealth();
+    // widescreen: the flight HUD goes to the screen edges (not the menus: their layout is 4:3)
+    gfx::setHudAnchoring(s.hudEdges && s.aspect != settings::Aspect::R4_3 && playerCraft() && !cinematic);
     // R2_DT_LOG: every 10 s, frames and the game time they advanced against the wall clock
     static const bool dtLog = envFlag("R2_DT_LOG");
     if (!dtLog) return;
@@ -178,19 +180,32 @@ void hle_CraftDestroy(Ctx& c) {
 // ...and its health (craft +0x6F4, a float: 180 for the X-wing) is kept full, so the HUD ring
 // stays green. Only for an object whose vtable (+0x80) has CraftDestroy: 0x7FDEFE14 points
 // at other things outside missions.
+// The full value is what the craft has when it starts flying (state +0x370 = 0: the game fills it
+// at a spawn and a respawn); while the craft is being set up the field holds other things, and
+// keeping one of those (more than full) made the HUD's health ring vanish.
 static void keepHealth() {
     static u32 craft = 0;
-    static float maxHealth = 0.f;
+    static float full = 0.f;
+    static bool flyingBefore = false;
     const u32 p = settings::get().invincible ? playerCraft() : 0;
     if (p != craft) {
         craft = p;
-        maxHealth = 0.f;
+        full = 0.f;
+        flyingBefore = false;
     }
     if (!craft) return;
+    const bool flying = rd32(craft + 0x370) == 0;
     const float h = float(s2d(rd32(craft + 0x6F4)));
-    if (!(h >= 0.f && h <= 100000.f)) return;
-    if (h > maxHealth) maxHealth = h;
-    else if (h < maxHealth) wr32(craft + 0x6F4, d2s(maxHealth));
+    if (!flying) {
+        flyingBefore = false;
+        return;
+    }
+    if (!flyingBefore || full <= 0.f) {
+        flyingBefore = true;
+        full = h > 0.f && h <= 100000.f ? h : 0.f;
+        return;
+    }
+    if (h < full) wr32(craft + 0x6F4, d2s(full));
 }
 
 }  // namespace rt

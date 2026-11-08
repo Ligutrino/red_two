@@ -299,10 +299,23 @@ u32 fctiw(Ctx& c, double v, bool truncate) {
 
 static inline s32 sext6(u32 v) { return (v & 0x20) ? s32(v | ~0x3Fu) : s32(v); }
 
-void psqLoad(Ctx& c, u32 fd, u32 a, bool w, u32 gqr) {
+// GQR scale fields (6-bit signed exponents) -> 2^-e for loads, 2^e for stores. A table: ldexp
+// was a hot spot (psq_l runs for most float loads in the game's vector code).
+struct QuantScales {
+    float load[64], store[64];
+    QuantScales() {
+        for (u32 i = 0; i < 64; i++) {
+            load[i] = std::ldexp(1.0f, -sext6(i));
+            store[i] = std::ldexp(1.0f, sext6(i));
+        }
+    }
+};
+static const QuantScales s_quant;
+
+void psqLoadQ(Ctx& c, u32 fd, u32 a, bool w, u32 gqr) {
     const u32 type = (gqr >> 16) & 7;
-    const float scale = std::ldexp(1.0f, -sext6((gqr >> 24) & 0x3F));
     double p0, p1 = 1.0;
+    const float scale = s_quant.load[(gqr >> 24) & 0x3F];
     switch (type) {
     case 4:
         p0 = float(rd8(a)) * scale;
@@ -338,9 +351,9 @@ static T quantize(double v, float scale) {
     return T(f);
 }
 
-void psqStore(Ctx& c, u32 fs, u32 a, bool w, u32 gqr) {
+void psqStoreQ(Ctx& c, u32 fs, u32 a, bool w, u32 gqr) {
     const u32 type = gqr & 7;
-    const float scale = std::ldexp(1.0f, sext6((gqr >> 8) & 0x3F));
+    const float scale = s_quant.store[(gqr >> 8) & 0x3F];
     const double p0 = c.f[fs], p1 = c.ps1[fs];
     switch (type) {
     case 4:

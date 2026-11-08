@@ -26,6 +26,7 @@ void set(const std::string& key, const std::string& value) {
     else if (key == "aspect") { if (n >= 0 && n < int(Aspect::Count)) s.aspect = Aspect(n); }
     else if (key == "fps") { for (int f : kFpsChoices) if (f == n) s.fps = n; }
     else if (key == "show_fps") s.showFps = parseBool(value);
+    else if (key == "hud_edges") s.hudEdges = parseBool(value);
     else if (key == "skip_logos") s.skipLogos = parseBool(value);
     else if (key == "skip_cutscenes") s.skipCutscenes = parseBool(value);
     else if (key == "invincible") s.invincible = parseBool(value);
@@ -97,6 +98,7 @@ void save() {
     fprintf(f, "aspect=%d\n", int(s.aspect));
     fprintf(f, "fps=%d\n", s.fps);
     fprintf(f, "show_fps=%d\n", s.showFps);
+    fprintf(f, "hud_edges=%d\n", s.hudEdges);
     fprintf(f, "skip_logos=%d\n", s.skipLogos);
     fprintf(f, "skip_cutscenes=%d\n", s.skipCutscenes);
     fprintf(f, "invincible=%d\n", s.invincible);

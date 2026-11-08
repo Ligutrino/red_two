@@ -19,6 +19,7 @@ GxStats& gxStats();
 // Receives every complete GX command (raw bytes, big-endian), e.g. for a renderer.
 using GxSink = void (*)(const u8* cmd, u32 len);
 void gxSetSink(GxSink sink);
+void gxSetSyncHook(void (*hook)());  // called when the CPU reads the GP's status or pointers
 
 // FIFO registers: CP (0xCC000000) and the PI's CPU FIFO (0xCC00300C-0x14)
 void gxInit();

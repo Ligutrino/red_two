@@ -48,7 +48,11 @@ const Sym& resolve(u64 rip) {
 // Library leaf functions are attributed to their caller too (the return address on the stack
 // at the sample), e.g. "memmove <- rt::aramDma".
 bool isLeafHelper(const std::string& n) {
-    return n == "memmove" || n == "memcpy" || n == "memset" || n == "memcmp" || n.rfind("XXH", 0) == 0;
+    return n == "memmove" || n == "memcpy" || n == "memset" || n == "memcmp" || n.rfind("XXH", 0) == 0 ||
+           n.rfind("NtWait", 0) == 0 || n.rfind("ZwWait", 0) == 0 || n.rfind("WaitFor", 0) == 0 ||
+           n.rfind("SleepConditionVariable", 0) == 0 || n.rfind("RtlSleepConditionVariable", 0) == 0 ||
+           n.find("SRWLock") != std::string::npos || n.rfind("_NLG", 0) == 0 || n.rfind("std::_Atomic", 0) == 0 ||
+           n == "strchr" || n == "RtlRaiseStatus" || n.rfind("NtAlert", 0) == 0;
 }
 
 std::unordered_map<u64, std::unordered_map<u64, u32>> s_callers;  // rip -> return address -> hits
@@ -82,10 +86,30 @@ void report(const std::unordered_map<u64, u32>& hits, u64 total, int secs) {
     }
     s_callers.clear();
     s_chains.clear();
+    // where the time goes, roughly: guest code, guest memory/FP helpers, graphics, waiting
+    {
+        u32 cat[6] = {};  // game, memory, graphics (bridge), wait, other, graphics (Aurora)
+        for (auto& [name, n] : byName) {
+            const auto has = [&name](const char* p) { return name.find(p) != std::string::npos; };
+            int c = 4;
+            if (name.rfind("NtWait", 0) == 0 || name.rfind("ZwWait", 0) == 0 || name.rfind("WaitFor", 0) == 0 || has("idleWait")) c = 3;
+            else if (name.rfind("rt::f_", 0) == 0) c = 0;
+            else if (has("aurora::") || has("dawn") || has("wgpu")) c = 5;
+            else if (has("gfx::") || has("gxFifo") || has("rt::gx") || name.rfind("XXH", 0) == 0 || has("cmdLength") || has("cpRun"))
+                c = 2;
+            else if (name.rfind("rt::rd", 0) == 0 || name.rfind("rt::wr", 0) == 0 || name.rfind("rt::psq", 0) == 0 || has("noteAccess") ||
+                     has("tlb") || has("Tlb") || has("vm"))
+                c = 1;
+            cat[c] += n;
+        }
+        const double t = double(total ? total : 1) / 100.0;
+        logf("prof", "game code %.1f%%, memory/psq %.1f%%, graphics bridge %.1f%% + Aurora %.1f%%, waiting %.1f%%, other %.1f%%",
+             cat[0] / t, cat[1] / t, cat[2] / t, cat[5] / t, cat[3] / t, cat[4] / t);
+    }
     std::vector<std::pair<std::string, u32>> v(byName.begin(), byName.end());
     std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });
     logf("prof", "--- %llu samples over %d s (top functions, self time) ---", (unsigned long long)total, secs);
-    for (size_t i = 0; i < v.size() && i < 30; i++)
+    for (size_t i = 0; i < v.size() && i < 40; i++)
         logf("prof", "%5.1f%%  %s", 100.0 * v[i].second / double(total ? total : 1), v[i].first.c_str());
 }
 
