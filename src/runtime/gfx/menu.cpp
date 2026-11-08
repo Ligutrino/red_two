@@ -454,6 +454,9 @@ void pageDisplay(settings::Settings& s) {
         s_changed = s_display = true;
     label("HUD at screen edges");
     if (toggle("hudedges", s.hudEdges, "Widescreen: the flight HUD sits at the edges of the screen.")) s_changed = true;
+    label("Fill menu backgrounds");
+    if (toggle("tilemenus", s.tileMenus, "Widescreen: the menus' panel backgrounds repeat into the sides of the screen."))
+        s_changed = true;
     heading("PERFORMANCE");
     label("Frame rate");
     if (fpsCombo(s.fps, "Above 60 the game runs more frames per second at its normal speed.")) s_changed = s_display = true;
@@ -476,6 +479,8 @@ void pageCheats(settings::Settings& s) {
     if (toggle("inv", s.invincible, "Your ship cannot be destroyed.")) s_changed = true;
     label("Infinite lives");
     if (toggle("lives", s.infiniteLives, "Losing a ship costs no life.")) s_changed = true;
+    label("Infinite bombs");
+    if (toggle("ammo", s.infiniteAmmo, "Torpedoes, bombs and missiles never run out.")) s_changed = true;
 }
 
 void pageControls() {

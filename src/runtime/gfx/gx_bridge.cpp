@@ -221,12 +221,15 @@ void frameLog(u64 endStart, u64 endDone) {
     }
 }
 
+void tileFrameEnd();
+
 void endFrame() {
     if (!s_inFrame) return;
     menuDraw();
     const u64 endStart = tbNow();
     aurora_end_frame();
     frameLog(endStart, tbNow());
+    tileFrameEnd();
     s_inFrame = false;
     s_frames++;
     s_frameDraws = 0;
@@ -546,6 +549,8 @@ void prepareCopy(u32 cp) {
 FILE* s_dump = nullptr;
 u64 s_dumpFrame = ~0ull;
 u64 s_dumpCount = 1;  // R2_GX_DUMP=<first>[,<count>]
+u64 s_dumpAtTb = 0;   // R2_GX_DUMP=t<seconds>[;t<seconds>...][,<count>]: frames after those times
+std::vector<u64> s_dumpTimes;
 u64 s_dumpLast = ~0ull;
 // indexed XF loads seen in the dump: their memory is printed again when the dump closes, to
 // compare what the GP read with what the CPU had written by the end of the frame
@@ -645,10 +650,11 @@ void sendScissor() {
     bpFull(0x21000000u | (rt << 12) | bm);
 }
 
-void sendProjection() {
+void sendProjection(float shiftX = 0.f) {
     if (!s_projKnown) return;
     u32 pr[7];
     memcpy(pr, s_xfProj, sizeof pr);
+    if (shiftX != 0.f && pr[6] != 0) pr[1] = asBits(asFloat(pr[1]) + shiftX);  // orthographic: NDC
     if (s_boxOffX || s_boxOffY) {
         // screen = ndc * scale + origin: moving the screen by -off moves ndc by -off / scale.
         // Perspective: ndc = clip / w with w = -z, so the shift enters p1/p3 negated;
@@ -724,8 +730,115 @@ bool skipDraw(u8 op) {
     return false;
 }
 
+// ---------------------------------------------------------------------------------------
+// widescreen menu backgrounds
+// ---------------------------------------------------------------------------------------
+// The menu screens (title, SELECT GAME, Options...) lay a mosaic of panel tiles over the 4:3
+// screen: dozens of orthographic CMPR quads, each with its own texture, the textures allocated
+// one after another and drawn in that order. In widescreen those quads keep their shape inside
+// the 4:3 area (bars at the sides). Tiling fills the sides: each tile is drawn again one 4:3
+// width to the left and to the right (the projection's x translation +-2 in NDC; Aurora then
+// squeezes it like the original), so the right side continues with the background's left
+// edge and the left side with its right edge.
+// A run of at least kTileRun such draws with ascending texture addresses marks those textures
+// as background tiles; draws using them are tiled from then on (the run's first frame is not).
+// Off in missions (setMenuTiling): HUD pieces must never be repeated.
+constexpr u32 kTileRun = 8;
+bool s_menuTiling = false;
+struct TileTex {
+    u64 lastFrame;
+};
+std::unordered_map<u64, TileTex> s_tileTex;  // texture (address | format/size << 32)
+std::vector<u64> s_tileRun;                   // current run of ascending candidate textures
+u32 s_tileRunLast = 0;
+
+// how many copies each side needs to reach the screen's edge (0: not wider than 4:3)
+int tileCopies() {
+    const settings::Settings& st = settings::get();
+    float a = settings::aspectValue(st.aspect);
+    if (a <= 0.f) {
+        u32 w = 0, h = 0;
+        AuroraGetRenderSize(&w, &h);
+        a = h ? float(w) / float(h) : 4.f / 3.f;
+    }
+    const float k = a / (4.f / 3.f);
+    if (k < 1.01f) return 0;
+    return int((k - 1.f) / 2.f) + 1;  // copy n covers up to 2n + 1 widths
+}
+
+// a candidate: orthographic, textured from map 0 with a CMPR texture of tile size
+bool tileCandidate(u64& key) {
+    if (!s_projKnown || s_xfProj[6] == 0) return false;
+    if ((s_vcdHi & 3) == 0 || (s_bp[0x00] & 0xF) == 0) return false;  // no texture coordinates / texgens
+    const u32 img = s_bp[0x88];
+    if (((img >> 20) & 0xF) != 0xE) return false;  // CMPR
+    const u32 w = (img & 0x3FF) + 1, h = ((img >> 10) & 0x3FF) + 1;
+    if (w < 16 || h < 16 || w > 512 || h > 512) return false;
+    const u32 addr = (s_bp[0x94] & 0xFFFFFF) << 5;
+    key = u64(addr) | (u64(img & 0xFFFFFF) << 32);
+    return true;
+}
+
+// the draw at p (already sent once): its copies at the sides
+void tileDraw(const u8* p, u32 len) {
+    if (!s_menuTiling) return;
+    u64 key;
+    if (!tileCandidate(key)) return;
+    const u32 addr = u32(key);
+    // run detection: ascending addresses, a few KiB apart
+    if (!s_tileRun.empty() && addr > s_tileRunLast && addr - s_tileRunLast <= 0x10000) {
+        s_tileRun.push_back(key);
+    } else if (s_tileRun.empty() || addr != s_tileRunLast) {
+        s_tileRun.assign(1, key);
+    }
+    s_tileRunLast = addr;
+    if (s_tileRun.size() >= kTileRun) {
+        for (u64 k : s_tileRun) s_tileTex[k] = {s_frames};
+        s_tileRun.erase(s_tileRun.begin(), s_tileRun.end() - 1);  // the rest of the run joins one by one
+    }
+    auto it = s_tileTex.find(key);
+    if (it == s_tileTex.end()) return;
+    it->second.lastFrame = s_frames;
+    const int n = tileCopies();
+    if (!n) return;
+    for (int i = 1; i <= n; i++)
+        for (const float side : {2.f, -2.f}) {
+            sendProjection(side * float(i));
+            fifo::write_data(p, len);
+            fifo::finish_draw();
+        }
+    sendProjection();
+}
+
+void tileFrameEnd() {
+    s_tileRun.clear();
+    s_tileRunLast = 0;
+    // a screen's tiles stop being drawn: forget them (the memory may hold other textures later)
+    if (s_frames % 64 == 0)
+        for (auto it = s_tileTex.begin(); it != s_tileTex.end();)
+            it = s_frames - it->second.lastFrame > 120 ? s_tileTex.erase(it) : std::next(it);
+}
+}  // namespace
+
+void setMenuTiling(bool on) {
+    if (on == s_menuTiling) return;
+    s_menuTiling = on;
+    s_tileTex.clear();
+    s_tileRun.clear();
+}
+
+namespace {
+
 void onCommand(const u8* p, u32 len) {
     ensureFrame();
+    if (s_dumpAtTb && tbNow() >= s_dumpAtTb && !s_dump) [[unlikely]] {
+        s_dumpAtTb = 0;
+        if (!s_dumpTimes.empty()) {
+            s_dumpAtTb = s_dumpTimes.front();
+            s_dumpTimes.erase(s_dumpTimes.begin());
+        }
+        s_dumpFrame = s_frames + 1;
+    }
     if (s_frames >= s_dumpFrame && s_frames < s_dumpFrame + s_dumpCount) [[unlikely]] {
         if (!s_dump) {
             char name[64];
@@ -773,6 +886,7 @@ void onCommand(const u8* p, u32 len) {
         }
         fifo::write_data(p, len);
         fifo::finish_draw();
+        tileDraw(p, len);
         return;
     }
     switch (op) {
@@ -967,7 +1081,17 @@ bool init(int argc, char** argv) {
     s_testClear = envFlag("R2_GFX_TEST");
     if (const char* d = getenv("R2_GX_DUMP")) {
         char* end = nullptr;
-        s_dumpFrame = strtoull(d, &end, 10);
+        if (*d == 't') {
+            end = const_cast<char*>(d);
+            while (*end == 't') {
+                s_dumpTimes.push_back(u64(strtod(end + 1, &end) * double(kTbClock)));
+                if (*end == ';' || *end == '+') end++;
+            }
+            s_dumpAtTb = s_dumpTimes.front();
+            s_dumpTimes.erase(s_dumpTimes.begin());
+        } else {
+            s_dumpFrame = strtoull(d, &end, 10);
+        }
         if (end && *end == ',') s_dumpCount = strtoull(end + 1, nullptr, 10);
     }
     s_xfb = !envFlag("R2_NO_XFB");

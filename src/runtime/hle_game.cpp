@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <unordered_map>
+#include <vector>
 
 namespace rt {
 
@@ -66,6 +68,8 @@ bool cinematicSkip() { return s_skip; }
 static bool bootScreen() { return rd32(0x7FDE8254) == 5 && rd32(0x7FDE822C) == 22; }
 
 static void keepHealth();
+static void keepAmmo();
+static void craftDiffProbe();
 
 void hle_GameFrameDelta(Ctx& c) {
     frameDelta(c);
@@ -107,8 +111,12 @@ void hle_GameFrameDelta(Ctx& c) {
         setAudioSpeed(1.0, false);
     }
     keepHealth();
+    keepAmmo();
+    craftDiffProbe();
     // widescreen: the flight HUD goes to the screen edges (not the menus: their layout is 4:3)
     gfx::setHudAnchoring(s.hudEdges && s.aspect != settings::Aspect::R4_3 && playerCraft() && !cinematic);
+    // menu screens only (no player craft): the background's panels repeat into the sides
+    gfx::setMenuTiling(s.tileMenus && !playerCraft());
     // R2_DT_LOG: every 10 s, frames and the game time they advanced against the wall clock
     static const bool dtLog = envFlag("R2_DT_LOG");
     if (!dtLog) return;
@@ -177,6 +185,41 @@ void hle_CraftDestroy(Ctx& c) {
     f_7FC3E528_orig(c);
 }
 
+// Infinite bombs: WeaponInit (0x7FC396D4) sets up each weapon of a craft - count (+0) and
+// maximum (+4) from the craft's data, the weapon slot at +0x520. Weapon objects sit at a
+// different place in each craft class (inside it or behind a pointer), so they are recorded
+// here as the game initializes them; every frame the player's craft gets its secondary
+// weapons refilled (unlimited weapons have a maximum of 0 and are left alone).
+struct WeaponRec {
+    u32 craft, weapon, slot, max;
+};
+static std::vector<WeaponRec> s_weapons;
+
+void hle_WeaponInit(Ctx& c) {
+    const u32 weapon = c.r[3], craft = c.r[4], slot = c.r[5];
+    f_7FC396D4_orig(c);
+    const u32 max = rd32(weapon + 4);
+    for (WeaponRec& w : s_weapons)
+        if (w.weapon == weapon) {  // re-initialized (respawn), or memory reused by another craft
+            w = {craft, weapon, slot, max};
+            return;
+        }
+    if (s_weapons.size() >= 1024) s_weapons.erase(s_weapons.begin(), s_weapons.begin() + 512);
+    s_weapons.push_back({craft, weapon, slot, max});
+}
+
+static void keepAmmo() {
+    if (!settings::get().infiniteAmmo) return;
+    const u32 craft = playerCraft();
+    if (!craft || rd32(craft + 0x370) != 0) return;  // flying only
+    for (const WeaponRec& w : s_weapons) {
+        if (w.craft != craft || w.max == 0 || w.max > 999) continue;
+        // still the weapon it was (same slot and maximum)?
+        if (rd32(w.weapon + 0x520) != w.slot || rd32(w.weapon + 4) != w.max) continue;
+        if (s32(rd32(w.weapon)) < s32(w.max)) wr32(w.weapon, w.max);
+    }
+}
+
 // ...and its health (craft +0x6F4, a float: 180 for the X-wing) is kept full, so the HUD ring
 // stays green. Only for an object whose vtable (+0x80) has CraftDestroy: 0x7FDEFE14 points
 // at other things outside missions.
@@ -206,6 +249,61 @@ static void keepHealth() {
         return;
     }
     if (h < full) wr32(craft + 0x6F4, d2s(full));
+}
+
+// Debugging: R2_CRAFT_DIFF=<len hex>[,<deref offset hex>...]: every frame, compare the player
+// craft object's first <len> bytes (or those of objects it points to at the given offsets)
+// with the previous frame and log bytes/halfwords/words that drop by exactly 1 from a small
+// value (ammo counters); fields that keep changing are muted after 8 reports.
+static void craftDiffProbe() {
+    static const char* spec = getenv("R2_CRAFT_DIFF");
+    if (!spec) return;
+    static u32 len = 0;
+    static std::vector<s32> derefs;
+    if (!len) {
+        char* end;
+        len = u32(strtoul(spec, &end, 16)) & ~3u;
+        while (*end == ',') derefs.push_back(s32(strtol(end + 1, &end, 16)));
+        if (derefs.empty()) derefs.push_back(-1);
+    }
+    const u32 craft = playerCraft();
+    static std::vector<std::vector<u8>> prev;
+    static std::vector<u32> prevBase;
+    static std::unordered_map<u64, int> reports;
+    prev.resize(derefs.size());
+    prevBase.resize(derefs.size());
+    for (size_t d = 0; d < derefs.size(); d++) {
+        u32 base = craft;
+        if (craft && derefs[d] >= 0) {
+            base = rd32(craft + u32(derefs[d]));
+            if ((base >> 24) != 0x80 && (base >> 24) != 0x81 && (base >> 24) != 0x7F) base = 0;
+        }
+        std::vector<u8> cur;
+        if (base) {
+            cur.resize(len);
+            for (u32 o = 0; o < len; o += 4) {
+                const u32 w = rd32(base + o);
+                cur[o] = u8(w >> 24), cur[o + 1] = u8(w >> 16), cur[o + 2] = u8(w >> 8), cur[o + 3] = u8(w);
+            }
+        }
+        if (base && base == prevBase[d] && prev[d].size() == len) {
+            for (u32 o = 0; o < len; o++) {
+                for (u32 size : {1u, 2u, 4u}) {
+                    if (o % size) continue;
+                    u32 a = 0, b = 0;
+                    for (u32 i = 0; i < size; i++) a = a << 8 | prev[d][o + i], b = b << 8 | cur[o + i];
+                    if (a >= 1 && a <= 255 && b == a - 1) {
+                        const u64 key = (u64(d) << 40) | (u64(o) << 8) | size;
+                        if (reports[key]++ < 8)
+                            logf("diff", "craft %08X (%s+%X) +%03X size %u: %u -> %u", base, derefs[d] < 0 ? "obj" : "ptr",
+                                 derefs[d] < 0 ? 0 : derefs[d], o, size, a, b);
+                    }
+                }
+            }
+        }
+        prev[d] = std::move(cur);
+        prevBase[d] = base;
+    }
 }
 
 }  // namespace rt

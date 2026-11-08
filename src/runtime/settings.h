@@ -16,6 +16,7 @@ struct Settings {
     Resolution resolution = Resolution::Window;
     Aspect aspect = Aspect::R4_3;
     bool hudEdges = true;  // widescreen: the flight HUD at the screen edges
+    bool tileMenus = true;  // widescreen: menu backgrounds continue into the sides
     int fps = 60;  // 60, 90, 120 or 144: the emulated retrace rate
     bool showFps = false;
     // game
@@ -24,6 +25,7 @@ struct Settings {
     // cheats
     bool invincible = false;
     bool infiniteLives = false;
+    bool infiniteAmmo = false;  // secondary weapons: torpedoes, bombs, missiles
 };
 
 Settings& get();

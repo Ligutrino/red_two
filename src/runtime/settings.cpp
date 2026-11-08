@@ -27,10 +27,12 @@ void set(const std::string& key, const std::string& value) {
     else if (key == "fps") { for (int f : kFpsChoices) if (f == n) s.fps = n; }
     else if (key == "show_fps") s.showFps = parseBool(value);
     else if (key == "hud_edges") s.hudEdges = parseBool(value);
+    else if (key == "tile_menus") s.tileMenus = parseBool(value);
     else if (key == "skip_logos") s.skipLogos = parseBool(value);
     else if (key == "skip_cutscenes") s.skipCutscenes = parseBool(value);
     else if (key == "invincible") s.invincible = parseBool(value);
     else if (key == "infinite_lives") s.infiniteLives = parseBool(value);
+    else if (key == "infinite_ammo") s.infiniteAmmo = parseBool(value);
     else logf("config", "unknown setting '%s'", key.c_str());
 }
 
@@ -99,10 +101,12 @@ void save() {
     fprintf(f, "fps=%d\n", s.fps);
     fprintf(f, "show_fps=%d\n", s.showFps);
     fprintf(f, "hud_edges=%d\n", s.hudEdges);
+    fprintf(f, "tile_menus=%d\n", s.tileMenus);
     fprintf(f, "skip_logos=%d\n", s.skipLogos);
     fprintf(f, "skip_cutscenes=%d\n", s.skipCutscenes);
     fprintf(f, "invincible=%d\n", s.invincible);
     fprintf(f, "infinite_lives=%d\n", s.infiniteLives);
+    fprintf(f, "infinite_ammo=%d\n", s.infiniteAmmo);
     fclose(f);
 }
 

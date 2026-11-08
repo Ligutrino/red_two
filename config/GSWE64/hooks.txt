@@ -30,3 +30,4 @@ hle     GameFrameDelta
 # Cheats (settings): infinite lives, invincibility (the player's craft is never destroyed)
 hle     LoseLife
 hle     CraftDestroy
+hle     WeaponInit
