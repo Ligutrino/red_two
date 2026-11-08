@@ -16,6 +16,7 @@
 #include <aurora/aurora.h>
 #include <aurora/event.h>
 #include <aurora/gfx.h>
+#include <aurora/gfx.hpp>
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_properties.h>
@@ -57,6 +58,8 @@ u32 s_frameDraws = 0;  // draws so far in this presented frame (R2_GX_SKIP i<fro
 u32 s_bpMask = 0xFFFFFF;
 u32 s_bp[256] = {};
 u32 s_vcdLo = 0, s_vcdHi = 0, s_vatA[8] = {}, s_vatB[8] = {}, s_vatC[8] = {};
+u32 s_cpMtxA = 0;         // CP 0x30: position matrix index (draws without per-vertex indices)
+float s_xfMtx[256] = {};  // XF 0x000-0x0FF: position/texture matrices (where sprites are, drawExtentX)
 
 struct Array {
     u32 base = 0;       // physical
@@ -650,11 +653,17 @@ void sendScissor() {
     bpFull(0x21000000u | (rt << 12) | bm);
 }
 
-void sendProjection(float shiftX = 0.f) {
+// shiftX: orthographic draws moved by that much (NDC); mirror: orthographic draws reflected
+// about x = axis (NDC): x' = 2 axis - x.
+void sendProjection(float shiftX = 0.f, bool mirror = false, float axis = 0.f) {
     if (!s_projKnown) return;
     u32 pr[7];
     memcpy(pr, s_xfProj, sizeof pr);
     if (shiftX != 0.f && pr[6] != 0) pr[1] = asBits(asFloat(pr[1]) + shiftX);  // orthographic: NDC
+    if (mirror && pr[6] != 0) {
+        pr[0] = asBits(-asFloat(pr[0]));
+        pr[1] = asBits(2.f * axis - asFloat(pr[1]));
+    }
     if (s_boxOffX || s_boxOffY) {
         // screen = ndc * scale + origin: moving the screen by -off moves ndc by -off / scale.
         // Perspective: ndc = clip / w with w = -z, so the shift enters p1/p3 negated;
@@ -743,6 +752,11 @@ bool skipDraw(u8 op) {
 // A run of at least kTileRun such draws with ascending texture addresses marks those textures
 // as background tiles; draws using them are tiled from then on (the run's first frame is not).
 // Off in missions (setMenuTiling): HUD pieces must never be repeated.
+// The mosaic was not made to repeat, so where a copy meets the original the panels break off
+// in a hard vertical line. Once the run is drawn (seamBlend, before the next draw that is not
+// a tile), a band just outside each seam starts as the mirror image of the original's edge,
+// which continues it seamlessly, and fades into the copy (a custom Aurora draw sampling a
+// snapshot of the EFB).
 constexpr u32 kTileRun = 8;
 bool s_menuTiling = false;
 struct TileTex {
@@ -751,6 +765,8 @@ struct TileTex {
 std::unordered_map<u64, TileTex> s_tileTex;  // texture (address | format/size << 32)
 std::vector<u64> s_tileRun;                   // current run of ascending candidate textures
 u32 s_tileRunLast = 0;
+bool s_tileRunOk = false;    // the current run reached kTileRun: its later tiles join at once
+bool s_seamPending = false;  // tiles were copied since the last seam blend
 
 // how many copies each side needs to reach the screen's edge (0: not wider than 4:3)
 int tileCopies() {
@@ -785,17 +801,24 @@ void tileDraw(const u8* p, u32 len) {
     u64 key;
     if (!tileCandidate(key)) return;
     const u32 addr = u32(key);
-    // run detection: ascending addresses, a few KiB apart
-    if (!s_tileRun.empty() && addr > s_tileRunLast && addr - s_tileRunLast <= 0x10000) {
-        s_tileRun.push_back(key);
-    } else if (s_tileRun.empty() || addr != s_tileRunLast) {
-        s_tileRun.assign(1, key);
+    // run detection: ascending addresses, a few KiB apart (the same texture again continues it)
+    if (s_tileRun.empty() || addr != s_tileRunLast) {
+        const bool continues = !s_tileRun.empty() && addr > s_tileRunLast && addr - s_tileRunLast <= 0x10000;
+        if (!continues) {
+            s_tileRun.clear();
+            s_tileRunOk = false;
+        }
+        if (s_tileRunOk) {
+            s_tileTex[key] = {s_frames};
+        } else {
+            s_tileRun.push_back(key);
+            if (s_tileRun.size() >= kTileRun) {
+                for (u64 k : s_tileRun) s_tileTex[k] = {s_frames};
+                s_tileRunOk = true;
+            }
+        }
     }
     s_tileRunLast = addr;
-    if (s_tileRun.size() >= kTileRun) {
-        for (u64 k : s_tileRun) s_tileTex[k] = {s_frames};
-        s_tileRun.erase(s_tileRun.begin(), s_tileRun.end() - 1);  // the rest of the run joins one by one
-    }
     auto it = s_tileTex.find(key);
     if (it == s_tileTex.end()) return;
     it->second.lastFrame = s_frames;
@@ -808,11 +831,272 @@ void tileDraw(const u8* p, u32 len) {
             fifo::finish_draw();
         }
     sendProjection();
+    s_seamPending = true;
+}
+
+// is the draw about to be sent one of the known background tiles?
+bool isTileDraw() {
+    u64 key;
+    return s_menuTiling && tileCandidate(key) && s_tileTex.count(key);
+}
+
+// --- seam blend ---------------------------------------------------------------------------
+// Runs on Aurora's render worker inside the EFB pass: two bands, one outside each seam, as
+// wide as kSeamBand of the target's height. The seams are where the 4:3 picture ends: the
+// logical frame (640x480) maps to the target's full height, so they sit 2/3 of the height
+// either side of the center. Each pixel mixes the mirror image across the seam (continues the
+// original) into what is there (the copy) along a smoothstep. Shaders run per pixel even with
+// MSAA; the snapshot is resolved.
+constexpr float kSeamBand = 0.08f;
+aurora::gfx::DrawTypeId s_seamType = aurora::gfx::InvalidDrawType;
+
+struct SeamPayload {
+    WGPUTextureView snapshot;  // a reference of its own, released by the draw
+    float band;
+};
+
+const char* const kSeamShader = R"(
+@group(0) @binding(0) var snap: texture_2d<f32>;
+struct Band { band: f32 };
+@group(0) @binding(1) var<uniform> u: Band;
+
+struct VOut { @builtin(position) pos: vec4<f32> };
+
+// the mirror axes: the seams moved in by two logical pixels (the picture's outermost texels
+// carry the tiles' edge filtering, a bright line the mirror would double)
+fn seams(dim: vec2<f32>) -> vec2<f32> {
+    let half = dim.y * (2.0 / 3.0) - dim.y / 240.0;
+    return vec2<f32>(dim.x * 0.5 - half, dim.x * 0.5 + half);
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> VOut {
+    let dim = vec2<f32>(textureDimensions(snap));
+    let s = seams(dim);
+    let band = dim.y * u.band;
+    let right = vi >= 6u;
+    let x0 = select(s.x, s.y, right);
+    let x1 = select(s.x - band, s.y + band, right);
+    let c = vi % 6u;
+    let fu = select(0.0, 1.0, c == 1u || c == 4u || c == 5u);
+    let fv = select(0.0, 1.0, c == 2u || c == 3u || c == 5u);
+    let px = mix(x0, x1, fu);
+    var o: VOut;
+    o.pos = vec4<f32>(px / dim.x * 2.0 - 1.0, 1.0 - fv * 2.0, 0.0, 1.0);
+    return o;
+}
+
+@fragment
+fn fs_main(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
+    let dimi = vec2<i32>(textureDimensions(snap));
+    let dim = vec2<f32>(dimi);
+    let s = seams(dim);
+    let seam = select(s.x, s.y, p.x > dim.x * 0.5);
+    let t = smoothstep(0.0, 1.0, abs(p.x - seam) / (dim.y * u.band));
+    let y = clamp(i32(p.y), 0, dimi.y - 1);
+    let mx = clamp(i32(2.0 * seam - p.x), 0, dimi.x - 1);
+    let a = textureLoad(snap, vec2<i32>(mx, y), 0);
+    let b = textureLoad(snap, vec2<i32>(clamp(i32(p.x), 0, dimi.x - 1), y), 0);
+    return mix(a, b, t);
+}
+)";
+
+void seamDraw(const aurora::gfx::DrawContext& ctx, const wgpu::RenderPassEncoder& pass, const void* payload,
+              size_t size, void*) {
+    if (size != sizeof(SeamPayload)) return;
+    SeamPayload sp;
+    memcpy(&sp, payload, sizeof sp);
+    const wgpu::TextureView snapshot = wgpu::TextureView::Acquire(sp.snapshot);
+    const auto& layout = ctx.layout;
+    if (!layout.colorAttachmentCount || !snapshot) return;
+    // one pipeline per render target layout (render worker thread only)
+    struct Pipe {
+        wgpu::RenderPipeline pipeline;
+        wgpu::BindGroupLayout bgl;
+        wgpu::Buffer uniform;
+        float band = -1.f;
+    };
+    static std::unordered_map<u64, Pipe> pipes;
+    Pipe& pp = pipes[layout.key];
+    if (!pp.pipeline) {
+        wgpu::ShaderSourceWGSL wgsl{};
+        wgsl.code = kSeamShader;
+        const wgpu::ShaderModuleDescriptor md{.nextInChain = &wgsl, .label = "menu seams"};
+        const wgpu::ShaderModule module = ctx.device.CreateShaderModule(&md);
+        const wgpu::BindGroupLayoutEntry entries[2] = {
+            {.binding = 0,
+             .visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment,
+             .texture = {.sampleType = wgpu::TextureSampleType::UnfilterableFloat,
+                         .viewDimension = wgpu::TextureViewDimension::e2D}},
+            {.binding = 1,
+             .visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment,
+             .buffer = {.type = wgpu::BufferBindingType::Uniform, .minBindingSize = 16}},
+        };
+        const wgpu::BindGroupLayoutDescriptor bd{.label = "menu seams", .entryCount = 2, .entries = entries};
+        pp.bgl = ctx.device.CreateBindGroupLayout(&bd);
+        const wgpu::PipelineLayoutDescriptor pld{.label = "menu seams", .bindGroupLayoutCount = 1,
+                                                 .bindGroupLayouts = &pp.bgl};
+        const wgpu::PipelineLayout pl = ctx.device.CreatePipelineLayout(&pld);
+        std::array<wgpu::ColorTargetState, aurora::gfx::MaxColorAttachments> targets{};
+        for (u32 i = 0; i < layout.colorAttachmentCount; i++)
+            targets[i] = {.format = layout.colorAttachments[i].format,
+                          .writeMask = i == aurora::gfx::SceneColorAttachmentIndex ? wgpu::ColorWriteMask::All
+                                                                                   : wgpu::ColorWriteMask::None};
+        const wgpu::FragmentState fs{
+            .module = module, .entryPoint = "fs_main", .targetCount = layout.colorAttachmentCount, .targets = targets.data()};
+        const wgpu::DepthStencilState ds{.format = layout.depthStencilFormat,
+                                         .depthWriteEnabled = false,
+                                         .depthCompare = wgpu::CompareFunction::Always};
+        const wgpu::RenderPipelineDescriptor rd{
+            .label = "menu seams",
+            .layout = pl,
+            .vertex = {.module = module, .entryPoint = "vs_main"},
+            .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList},
+            .depthStencil = layout.depthStencilFormat != wgpu::TextureFormat::Undefined ? &ds : nullptr,
+            .multisample = {.count = layout.sampleCount},
+            .fragment = &fs,
+        };
+        pp.pipeline = ctx.device.CreateRenderPipeline(&rd);
+        const wgpu::BufferDescriptor ubd{.label = "menu seams",
+                                         .usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst,
+                                         .size = 16};
+        pp.uniform = ctx.device.CreateBuffer(&ubd);
+    }
+    if (pp.band != sp.band) {
+        const float u[4] = {sp.band, 0.f, 0.f, 0.f};
+        ctx.queue.WriteBuffer(pp.uniform, 0, u, sizeof u);
+        pp.band = sp.band;
+    }
+    const wgpu::BindGroupEntry bge[2] = {{.binding = 0, .textureView = snapshot},
+                                         {.binding = 1, .buffer = pp.uniform, .size = 16}};
+    const wgpu::BindGroupDescriptor bgd{.label = "menu seams", .layout = pp.bgl, .entryCount = 2, .entries = bge};
+    const wgpu::BindGroup bg = ctx.device.CreateBindGroup(&bgd);
+    const u32 w = layout.colorAttachments[0].width, h = layout.colorAttachments[0].height;
+    pass.SetPipeline(pp.pipeline);
+    pass.SetBindGroup(0, bg);
+    pass.SetViewport(0.f, 0.f, float(w), float(h), 0.f, 1.f);
+    pass.SetScissorRect(0, 0, w, h);
+    pass.Draw(12);
+}
+
+// After a run of tiles (and their copies): blend the seams on what is in the EFB now.
+void seamBlend() {
+    s_seamPending = false;
+    if (aurora::gfx::is_offscreen()) return;
+    if (s_seamType == aurora::gfx::InvalidDrawType)
+        s_seamType = aurora::gfx::register_draw_type({.label = "menu seams", .draw = seamDraw});
+    static const float band = [] {
+        const char* e = getenv("R2_SEAM_BAND");  // tuning: fraction of the height (0 = off)
+        return e ? float(atof(e)) : kSeamBand;
+    }();
+    if (band <= 0.f) return;
+    aurora::gfx::ResolvedTargets out;
+    if (!aurora::gfx::resolve_pass({.color = true}, out) || !out.color) return;
+    SeamPayload sp{out.color.Get(), band};
+    wgpuTextureViewAddRef(sp.snapshot);
+    if (!aurora::gfx::push_custom_draw(s_seamType, &sp, sizeof sp)) wgpuTextureViewRelease(sp.snapshot);
+}
+
+// --- SELECT GAME's X-wing -----------------------------------------------------------------
+// SELECT GAME shows an X-wing from behind (or below) as three orthographic CMPR sprites: the
+// upper and the lower wing (560x160, rotated by their position matrices) and then the fuselage
+// (224x256), right of the menu with both wings reaching left. In widescreen the picture goes
+// on right of the fuselage, where the other two wings belong: each wing is drawn again,
+// mirrored about the fuselage's center line (projection x scale negated, culling swapped for
+// the flipped winding), so it moves and turns with the original. The fuselage comes after
+// the wings, so the axis is the wing's center plus the offset to the fuselage measured before
+// (the sprites move together).
+bool s_wingSeen = false;  // this frame
+float s_wingCenter = 0.f;
+bool s_wingOffsetKnown = false;
+float s_wingOffset = 0.f;  // fuselage center - wing center (NDC)
+
+// The draw's horizontal extent in (4:3) NDC: its positions through the current position
+// matrix and projection. Plain formats only: no per-vertex matrix index.
+bool drawExtentX(const u8* p, u32 len, float& minX, float& maxX) {
+    const u32 fmt = p[0] & 7, count = be16(p + 1);
+    if (!count || !s_projKnown || (s_vcdLo & 1)) return false;
+    const u32 vs = (len - 3) / count;
+    const u32 A = s_vatA[fmt];
+    const u32 posType = (s_vcdLo >> 9) & 3, compType = (A >> 1) & 7, comps = (A & 1) ? 3 : 2;
+    const u32 cs = compSize(compType);
+    if (!posType || !cs) return false;
+    const float scale = 1.f / float(1u << ((A >> 4) & 0x1F));
+    const u32 off = u32(__builtin_popcount((s_vcdLo >> 1) & 0xFF));  // texture matrix indices
+    const float* m = &s_xfMtx[(s_cpMtxA & 0x3F) * 4];
+    const float p0 = asFloat(s_xfProj[0]), p1 = asFloat(s_xfProj[1]);
+    minX = 1e30f;
+    maxX = -1e30f;
+    for (u32 i = 0; i < count; i++) {
+        const u8* d = p + 3 + i * vs + off;
+        if (posType >= 2) {
+            const u32 idx = posType == 2 ? d[0] : be16(d);
+            d = physPtr(s_arrays[0].base + idx * s_arrays[0].stride, comps * cs);
+            if (!d) return false;
+        }
+        float v[3] = {0.f, 0.f, 0.f};
+        for (u32 c = 0; c < comps; c++) {
+            const u8* q = d + c * cs;
+            switch (compType) {
+            case 0: v[c] = float(q[0]) * scale; break;
+            case 1: v[c] = float(s8(q[0])) * scale; break;
+            case 2: v[c] = float(be16(q)) * scale; break;
+            case 3: v[c] = float(s16(be16(q))) * scale; break;
+            default: v[c] = asFloat(be32(q)); break;
+            }
+        }
+        const float ex = m[0] * v[0] + m[1] * v[1] + m[2] * v[2] + m[3];
+        float x;
+        if (s_xfProj[6]) {
+            x = p0 * ex + p1;
+        } else {
+            const float ez = m[8] * v[0] + m[9] * v[1] + m[10] * v[2] + m[11];
+            if (ez >= 0.f) return false;
+            x = (p0 * ex + p1 * ez) / -ez;
+        }
+        minX = std::min(minX, x);
+        maxX = std::max(maxX, x);
+    }
+    return true;
+}
+
+// the draw at p (already sent once): a wing gets its mirror image
+void xwingDraw(const u8* p, u32 len) {
+    if (!s_menuTiling || !s_projKnown || s_xfProj[6] == 0) return;
+    const u32 img = s_bp[0x88];
+    if (((img >> 20) & 0xF) != 0xE) return;  // CMPR
+    const u32 w = (img & 0x3FF) + 1, h = ((img >> 10) & 0x3FF) + 1;
+    const bool wing = w == 560 && h == 160, body = w == 224 && h == 256;
+    if (!wing && !body) return;
+    float x0, x1;
+    if (!drawExtentX(p, len, x0, x1)) return;
+    const float c = (x0 + x1) * 0.5f;
+    if (body) {
+        if (s_wingSeen) {
+            s_wingOffset = c - s_wingCenter;
+            s_wingOffsetKnown = true;
+        }
+        return;
+    }
+    s_wingSeen = true;
+    s_wingCenter = c;
+    if (!s_wingOffsetKnown || !tileCopies()) return;
+    const u32 gen = s_bp[0x00] & 0xFFFFFF, cull = (gen >> 14) & 3;
+    const bool swap = cull == 1 || cull == 2;
+    if (swap) bpFull((gen & ~(3u << 14)) | ((3 - cull) << 14));
+    sendProjection(0.f, true, c + s_wingOffset);
+    fifo::write_data(p, len);
+    fifo::finish_draw();
+    sendProjection();
+    if (swap) bpFull(gen);
 }
 
 void tileFrameEnd() {
     s_tileRun.clear();
     s_tileRunLast = 0;
+    s_tileRunOk = false;
+    s_seamPending = false;
+    s_wingSeen = false;
     // a screen's tiles stop being drawn: forget them (the memory may hold other textures later)
     if (s_frames % 64 == 0)
         for (auto it = s_tileTex.begin(); it != s_tileTex.end();)
@@ -825,6 +1109,9 @@ void setMenuTiling(bool on) {
     s_menuTiling = on;
     s_tileTex.clear();
     s_tileRun.clear();
+    s_tileRunOk = false;
+    s_seamPending = false;
+    s_wingOffsetKnown = false;
 }
 
 namespace {
@@ -874,6 +1161,7 @@ void onCommand(const u8* p, u32 len) {
         if (cinematicSkip()) return;
         if (skipDraw(op)) [[unlikely]]
             return;
+        if (s_seamPending && !isTileDraw()) seamBlend();  // the background is complete
         prepareArrays(p);
         prepareTextures();
         // Aurora merges consecutive draws with unchanged state. That broke on this game's
@@ -887,6 +1175,7 @@ void onCommand(const u8* p, u32 len) {
         fifo::write_data(p, len);
         fifo::finish_draw();
         tileDraw(p, len);
+        xwingDraw(p, len);
         return;
     }
     switch (op) {
@@ -907,6 +1196,7 @@ void onCommand(const u8* p, u32 len) {
         else if ((reg & 0xF8) == 0x70) s_vatA[reg & 7] = v;
         else if ((reg & 0xF8) == 0x80) s_vatB[reg & 7] = v;
         else if ((reg & 0xF8) == 0x90) s_vatC[reg & 7] = v;
+        else if (reg == 0x30) s_cpMtxA = v;
         fifo::write_data(p, len);
         return;
     }
@@ -914,6 +1204,14 @@ void onCommand(const u8* p, u32 len) {
         const u32 n = 12 + (op - 0x20) / 8;
         const u32 idx = be16(p + 1), cnt = (be16(p + 3) >> 12) + 1;
         const u32 stride = s_arrays[n].stride ? s_arrays[n].stride : 4;
+        if (n == 12) {  // position matrices: shadowed
+            const u32 dst = be16(p + 3) & 0xFFF;
+            if (const u8* d = physPtr(s_arrays[n].base + idx * stride, cnt * 4))
+                for (u32 i = 0; i < cnt && dst + i < 256; i++) {
+                    const u32 w = be32(d + 4 * i);
+                    memcpy(&s_xfMtx[dst + i], &w, 4);
+                }
+        }
         sendArray(n, idx * stride + cnt * 4);
         fifo::write_data(p, len);
         return;
@@ -957,6 +1255,7 @@ void onCommand(const u8* p, u32 len) {
             s_tlutLoads[v & 0x3FF] = {(s_bp[0x64] & 0x1FFFFF) << 5, ((v >> 10) & 0x7FF) * 16};
             return;
         } else if (reg == 0x52) {
+            if (s_seamPending) seamBlend();  // before the copy takes the background
             const bool disp = v & (1u << 14);
             // A display copy makes a picture only if it lands in the frame buffer the VI scans
             // out (front or back). The game builds each 640x450 XFB from two 640x226 copies
@@ -1024,7 +1323,9 @@ void onCommand(const u8* p, u32 len) {
         bool touched = false;
         for (u32 i = 0; i < cnt; i++) {
             const u32 a = addr + i, w = be32(p + 5 + 4 * i);
-            if (a >= 0x101A && a <= 0x101F) {
+            if (a < 0x100) {
+                memcpy(&s_xfMtx[a], &w, 4);
+            } else if (a >= 0x101A && a <= 0x101F) {
                 s_xfVp[a - 0x101A] = w;
                 touched = true;
             } else if (a >= 0x1020 && a <= 0x1026) {
@@ -1099,6 +1400,13 @@ bool init(int argc, char** argv) {
     cfg.emulateXfb = s_xfb;
     cfg.windowWidth = 1280;
     cfg.windowHeight = 960;
+    if (const char* ws = getenv("R2_WINDOW")) {  // R2_WINDOW=<w>x<h> (screenshots)
+        unsigned w = 0, h = 0;
+        if (sscanf(ws, "%ux%u", &w, &h) == 2 && w >= 320 && h >= 240) {
+            cfg.windowWidth = w;
+            cfg.windowHeight = h;
+        }
+    }
     cfg.windowPosX = -1;
     cfg.windowPosY = -1;
     cfg.logCallback = logCallback;
