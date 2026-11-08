@@ -132,11 +132,17 @@ void poll() {
         }
     }
     const bool menu = gfx::menuOpen();
+    // After the menu closes, a controller stays idle until its buttons are let go: B (which
+    // closes the menu) or A must not reach the game as a press.
+    static bool heldFromMenu[PAD_CHANMAX] = {};
     for (int i = 0; i < PAD_CHANMAX; i++) {
         PadState& p = padState(i);
-        if (st[i].err == PAD_ERR_NO_CONTROLLER || menu) {
+        if (menu) heldFromMenu[i] = true;
+        else if (heldFromMenu[i] && (st[i].err != PAD_ERR_NONE || (st[i].button & 0x1F7F) == 0)) heldFromMenu[i] = false;
+        const bool idle = menu || heldFromMenu[i];
+        if (st[i].err == PAD_ERR_NO_CONTROLLER || idle) {
             // Port 1 always has a controller: the game asks for one otherwise.
-            p.connected = i == 0 || (menu && st[i].err != PAD_ERR_NO_CONTROLLER);
+            p.connected = i == 0 || (idle && st[i].err != PAD_ERR_NO_CONTROLLER);
             p.buttons = 0x0080;
             p.stickX = p.stickY = p.substickX = p.substickY = 0x80;
             p.triggerL = p.triggerR = 0;

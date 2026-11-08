@@ -31,3 +31,5 @@ hle     GameFrameDelta
 hle     LoseLife
 hle     CraftDestroy
 hle     WeaponInit
+hle     WeaponUpdate
+hle     CameraSetup

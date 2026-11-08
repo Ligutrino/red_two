@@ -117,8 +117,9 @@ void traceEnter(Ctx& c, u32 addr) {
     if (!s_logFns.empty()) [[unlikely]] {
         for (u32 f : s_logFns)
             if (f == addr) {
-                logf("call", "%s(r3=%08X r4=%08X r5=%08X r6=%08X r7=%08X) lr=%08X r1=%08X r2=%08X r13=%08X", describeAddr(addr).c_str(),
-                     c.r[3], c.r[4], c.r[5], c.r[6], c.r[7], c.lr, c.r[1], c.r[2], c.r[13]);
+                logf("call", "%s(r3=%08X r4=%08X r5=%08X r6=%08X r7=%08X f1=%g f2=%g f3=%g) lr=%08X r1=%08X r2=%08X r13=%08X",
+                     describeAddr(addr).c_str(), c.r[3], c.r[4], c.r[5], c.r[6], c.r[7], c.f[1], c.f[2], c.f[3], c.lr, c.r[1],
+                     c.r[2], c.r[13]);
                 break;
             }
     }

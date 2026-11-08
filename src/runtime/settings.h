@@ -19,6 +19,9 @@ struct Settings {
     bool tileMenus = true;  // widescreen: menu backgrounds continue into the sides
     int fps = 60;  // 60, 90, 120 or 144: the emulated retrace rate
     bool showFps = false;
+    // audio
+    int volume = 100;            // master volume, 0..100 (output gain (volume/100)^2)
+    bool backgroundAudio = true;  // keep playing while the window is in the background
     // game
     bool skipLogos = false;      // boot straight past the legal screen, intro and logos
     bool skipCutscenes = false;  // B (or Start) skips the opening crawl and in-game cutscenes

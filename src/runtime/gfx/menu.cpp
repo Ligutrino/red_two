@@ -1,8 +1,11 @@
 // In-game settings menu: Dear ImGui (through Aurora), drawn over the game's frame. F1 or the
 // controller's Back/Select button (the GameCube pad has none, so the game never sees it) opens
-// and closes it; Escape closes it. While it is open the game sees idle controllers
-// (input.cpp), and the menu is driven by mouse, keyboard or controller (d-pad + A, LB/RB switch
-// sections).
+// and closes it; Escape or the controller's B closes it. While it is open the game sees idle
+// controllers (input.cpp, which also keeps buttons held when it closes from the game).
+//
+// Tabs run along the top: LB / RB (Q / E, Tab) switch them. The d-pad or the left stick (arrow
+// keys) moves through a page's rows and left / right changes the selected value; A (Enter)
+// toggles or picks, X (Delete) clears a binding. The mouse works everywhere too.
 //
 // The look: a holo-display over a starfield - a chamfered navy panel with glowing gold edges,
 // corner brackets and scanlines, Star Wars crawl gold for titles, the radar's amber for
@@ -11,6 +14,7 @@
 
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gamepad.h>
+#include <SDL3/SDL_joystick.h>
 #include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_video.h>
 #include <aurora/aurora.h>
@@ -23,10 +27,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 
+#include "../hw/musyx_dsp.h"
 #include "../runtime.h"
 #include "../settings.h"
 
@@ -43,6 +49,7 @@ constexpr ImU32 kText = IM_COL32(226, 233, 245, 255);
 constexpr ImU32 kDim = IM_COL32(128, 146, 176, 255);
 constexpr ImU32 kPanelTop = IM_COL32(10, 20, 40, 238);
 constexpr ImU32 kPanelBottom = IM_COL32(2, 5, 13, 246);
+constexpr ImU32 kFrame = IM_COL32(13, 28, 54, 235);
 
 ImU32 alpha(ImU32 c, int a) { return (c & ~IM_COL32_A_MASK) | (ImU32(std::clamp(a, 0, 255)) << IM_COL32_A_SHIFT); }
 ImVec4 vec(ImU32 c, float a = -1.f) {
@@ -169,20 +176,111 @@ void starfield(ImDrawList* dl, ImVec2 size, float t) {
 // state
 // ---------------------------------------------------------------------------------------
 bool s_open = false;
-bool s_focus = false;  // just opened: focus the window and its first item
-int s_section = 0;
+bool s_focus = false;  // just opened: focus the window
 u64 s_fpsFrames = 0, s_fpsTb = 0;
 float s_fps = 0.f;
+// automated runs: nobody's controller drives the menu (or opens it over a scripted test)
+bool automatedRun() {
+    static const bool automated = envFlag("R2_BACKGROUND") || envFlag("R2_HEADLESS") || getenv("R2_INPUT");
+    return automated;
+}
+// R2_MENU_PAD_TEST=1 (automated runs): a virtual gamepad drives the menu (padSelfTest)
+bool padTest() {
+    static const bool on = envFlag("R2_MENU_PAD_TEST") && automatedRun();
+    return on;
+}
 
-enum Section { Display, Gameplay, Controls, Cheats, SectionCount };
-const char* const kSectionNames[SectionCount] = {"DISPLAY", "GAMEPLAY", "CONTROLS", "CHEATS"};
+enum Section { Display, Gameplay, Audio, Controls, Cheats, SectionCount };
+const char* const kSectionNames[SectionCount] = {"DISPLAY", "GAMEPLAY", "AUDIO", "CONTROLS", "CHEATS"};
+int s_section = 0;
+int s_rowSel[SectionCount] = {};    // each page's selected row
+int s_rowCount[SectionCount] = {};  // the rows each page had when it was last drawn
 
-void setNav(bool on) {
-    if (ImGuiContext* ctx = ImGui::GetCurrentContext()) {
-        constexpr ImGuiConfigFlags nav = ImGuiConfigFlags_NavEnableGamepad | ImGuiConfigFlags_NavEnableKeyboard;
-        if (on) ctx->IO.ConfigFlags |= nav;
-        else ctx->IO.ConfigFlags &= ~nav;
+// --- navigation: controllers and keyboard ------------------------------------------------
+// The menu reads controllers itself: every gamepad SDL has open (Aurora opens each one as it
+// connects). ImGui's SDL backend lists gamepads once and refreshes the list only on connection
+// events, which Aurora's input router keeps from it, so a controller that showed up after
+// startup (Steam Input's virtual pad, a wireless pad waking up) never reached the menu.
+enum Nav { NavUp, NavDown, NavLeft, NavRight, NavAccept, NavBack, NavClear, NavPrevTab, NavNextTab, NavCount };
+struct NavKey {
+    bool held = false;
+    double next = 0.0;  // directions: when the held press repeats
+};
+NavKey s_navKey[NavCount];
+bool s_nav[NavCount];    // this frame: pressed (or repeated, for directions)
+bool s_navFresh = true;  // just opened: buttons already held are not presses
+bool s_usingPad = false; // the last input came from a controller (button hints)
+
+void readPads(bool held[NavCount]) {
+    int n = 0;
+    SDL_JoystickID* ids = SDL_GetGamepads(&n);
+    if (!ids) return;
+    for (int i = 0; i < n; i++) {
+        SDL_Gamepad* g = SDL_GetGamepadFromID(ids[i]);
+        if (!g) continue;
+        auto btn = [g](SDL_GamepadButton b) { return SDL_GetGamepadButton(g, b); };
+        const int lx = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX);
+        const int ly = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY);
+        constexpr int kDead = 16000;
+        const bool vertical = std::abs(ly) >= std::abs(lx);  // only the stick's main direction
+        held[NavUp] |= btn(SDL_GAMEPAD_BUTTON_DPAD_UP) || (vertical && ly < -kDead);
+        held[NavDown] |= btn(SDL_GAMEPAD_BUTTON_DPAD_DOWN) || (vertical && ly > kDead);
+        held[NavLeft] |= btn(SDL_GAMEPAD_BUTTON_DPAD_LEFT) || (!vertical && lx < -kDead);
+        held[NavRight] |= btn(SDL_GAMEPAD_BUTTON_DPAD_RIGHT) || (!vertical && lx > kDead);
+        held[NavAccept] |= btn(SDL_GAMEPAD_BUTTON_SOUTH);
+        held[NavBack] |= btn(SDL_GAMEPAD_BUTTON_EAST);
+        held[NavClear] |= btn(SDL_GAMEPAD_BUTTON_WEST);
+        held[NavPrevTab] |= btn(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+        held[NavNextTab] |= btn(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
     }
+    SDL_free(ids);
+}
+
+// this frame's presses; `enabled` false (a rebind in progress) still tracks what is held
+void pollNav(bool enabled) {
+    bool held[NavCount] = {};
+    if (!automatedRun() || padTest()) readPads(held);
+    const double now = double(SDL_GetTicksNS()) * 1e-9;
+    for (int k = 0; k < NavCount; k++) {
+        NavKey& st = s_navKey[k];
+        const bool repeats = k <= NavRight;
+        bool fire = false;
+        if (held[k] && !st.held) {
+            fire = !s_navFresh;
+            st.next = now + 0.40;
+        } else if (held[k] && repeats && now >= st.next) {
+            fire = !s_navFresh;
+            st.next = now + 0.09;
+        }
+        st.held = held[k];
+        s_nav[k] = fire && enabled;
+        if (s_nav[k]) s_usingPad = true;
+    }
+    s_navFresh = false;
+    if (!enabled) return;
+    // keyboard (ImGui does the key repeat)
+    const bool shift = ImGui::GetIO().KeyShift;
+    bool kb[NavCount] = {};
+    kb[NavUp] = ImGui::IsKeyPressed(ImGuiKey_UpArrow, true);
+    kb[NavDown] = ImGui::IsKeyPressed(ImGuiKey_DownArrow, true);
+    kb[NavLeft] = ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true);
+    kb[NavRight] = ImGui::IsKeyPressed(ImGuiKey_RightArrow, true);
+    kb[NavAccept] = ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
+                    ImGui::IsKeyPressed(ImGuiKey_Space, false);
+    kb[NavClear] = ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false);
+    kb[NavPrevTab] = ImGui::IsKeyPressed(ImGuiKey_Q, false) || (shift && ImGui::IsKeyPressed(ImGuiKey_Tab, false));
+    kb[NavNextTab] = ImGui::IsKeyPressed(ImGuiKey_E, false) || (!shift && ImGui::IsKeyPressed(ImGuiKey_Tab, false));
+    for (int k = 0; k < NavCount; k++)
+        if (kb[k]) {
+            s_nav[k] = true;
+            s_usingPad = false;
+        }
+}
+
+// A / Enter / Space still down (a rebind starts once it is released, or it would bind it)
+bool acceptHeld() {
+    return s_navKey[NavAccept].held || ImGui::IsKeyDown(ImGuiKey_Enter) || ImGui::IsKeyDown(ImGuiKey_KeypadEnter) ||
+           ImGui::IsKeyDown(ImGuiKey_Space);
 }
 
 // --- control remapping ---------------------------------------------------------------------
@@ -297,6 +395,7 @@ void clearRow(const ControlRow& row) {
 
 // capture in progress: the row, and the input once it arrives (from the event loop)
 int s_captureRow = -1;
+int s_pendingCapture = -1;  // chosen with A / Enter: starts once that is released
 bool s_captured = false, s_captureCancel = false, s_captureRearm = false;
 aurora::binding::PhysicalInput s_capturedInput;
 u64 s_navBackTb = 0;  // keyboard/controller navigation resumes after a capture (not on its press)
@@ -304,7 +403,6 @@ u64 s_navBackTb = 0;  // keyboard/controller navigation resumes after a capture 
 void startCapture(int row) {
     s_captureRow = row;
     s_captured = s_captureCancel = false;
-    setNav(false);
     aurora::binding::capture_next([](const aurora::binding::PhysicalInput& in) {
         using namespace aurora::binding;
         if (const auto* k = in.control.get_if<PhysicalInput::Key>()) {
@@ -347,78 +445,207 @@ void finishCapture(const std::vector<ControlRow>& rows) {
     s_navBackTb = tbNow() + kTbClock / 4;
 }
 
+void cancelCapture() {
+    if (s_captureRow >= 0) aurora::binding::cancel_capture();
+    s_captureRow = s_pendingCapture = -1;
+}
+
 // ---------------------------------------------------------------------------------------
-// widgets
+// rows
 // ---------------------------------------------------------------------------------------
+// A page is a list of rows: a label on the left, its value from s_valueX. One row is selected
+// (the controller's and keyboard's cursor; hovering with a moving mouse selects too) and gets
+// this frame's left/right, accept and clear presses.
 float s_ui = 1.f;      // size of the UI: the display's height / 1080
 float s_valueX = 0.f;  // where values start in a row
+struct RowInput {
+    int dx = 0;  // left -1 / right +1
+    bool accept = false, clear = false;
+} s_in;
+int s_row = 0;               // rows drawn so far on this page
+bool s_scrollToSel = false;  // the selection moved: bring it into view
+const char* s_help = nullptr;  // the selected row's description
 
 void bodyFont(float px) { ImGui::SetWindowFontScale(px / kFontPx); }
 
-// a row: label on the left; the caller draws the value after it
-void label(const char* text, const char* help = nullptr) {
+bool rowBegin(const char* text, const char* help) {
+    const int idx = s_row++;
+    int& selRow = s_rowSel[s_section];
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float h = ImGui::GetFrameHeight(), padY = ImGui::GetStyle().ItemSpacing.y * 0.5f;
+    const ImVec2 a(p.x, p.y - padY), b(p.x + ImGui::GetContentRegionAvail().x, p.y + h + padY);
+    const ImGuiIO& io = ImGui::GetIO();
+    if ((io.MouseDelta.x != 0.f || io.MouseDelta.y != 0.f) && ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(a, b))
+        selRow = idx;
+    const bool sel = idx == selRow;
+    if (sel) {
+        dl->AddRectFilledMultiColor(a, b, alpha(kHolo, 50), alpha(kHolo, 4), alpha(kHolo, 4), alpha(kHolo, 50));
+        dl->AddRectFilled(a, ImVec2(a.x + 4.f * s_ui, b.y), kAmber);
+        s_help = help;
+        if (s_scrollToSel) {
+            s_scrollToSel = false;
+            if (idx == 0) ImGui::SetScrollY(0.f);  // the page's first heading too
+            else ImGui::ScrollToRect(ImGui::GetCurrentWindow(), ImRect(a, b), ImGuiScrollFlags_KeepVisibleEdgeY);
+        }
+    }
+    ImGui::SetCursorScreenPos(ImVec2(p.x + 20.f * s_ui, p.y));
     ImGui::AlignTextToFramePadding();
+    ImGui::PushStyleColor(ImGuiCol_Text, sel ? vec(kGold) : vec(kText));
     ImGui::TextUnformatted(text);
-    if (help && ImGui::IsItemHovered()) ImGui::SetItemTooltip("%s", help);
+    ImGui::PopStyleColor();
     ImGui::SameLine(s_valueX);
+    return sel;
 }
 
-void tip(const char* help) {
-    if (help && (ImGui::IsItemHovered() || ImGui::IsItemFocused())) ImGui::SetItemTooltip("%s", help);
+// a framed box for a value
+void valueFrame(ImDrawList* dl, ImVec2 a, ImVec2 b, bool sel, bool hot) {
+    dl->AddRectFilled(a, b, hot ? IM_COL32(24, 52, 92, 240) : kFrame, 2.f);
+    dl->AddRect(a, b, sel ? alpha(kAmber, 220) : alpha(kGold, hot ? 140 : 70), 2.f, 0, 1.f);
 }
 
 // ON / OFF switch
-bool toggle(const char* id, bool& v, const char* help = nullptr) {
+bool onOff(const char* id, bool& v, bool sel) {
+    const float w = 150.f * s_ui, h = ImGui::GetFrameHeight();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::PushID(id);
-    ImGui::PushStyleColor(ImGuiCol_Button, v ? vec(kAmber, 0.55f) : ImVec4(0.06f, 0.13f, 0.25f, 0.92f));
-    ImGui::PushStyleColor(ImGuiCol_Text, v ? vec(IM_COL32(255, 245, 220, 255)) : vec(kDim));
-    const bool pressed = ImGui::Button(v ? "ON" : "OFF", ImVec2(150.f * s_ui, 0.f));
-    ImGui::PopStyleColor(2);
-    tip(help);
+    const bool clicked = ImGui::InvisibleButton("##onoff", ImVec2(w, h));
+    const bool hot = ImGui::IsItemHovered();
     ImGui::PopID();
-    if (pressed) v = !v;
-    return pressed;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 b(p.x + w, p.y + h);
+    if (v) {
+        dl->AddRectFilledMultiColor(p, b, alpha(kAmber, 170), alpha(kAmber, 120), alpha(kAmber, 90), alpha(kAmber, 140));
+        dl->AddRect(p, b, sel ? kGold : alpha(kAmber, 220), 2.f, 0, 1.f);
+    } else {
+        valueFrame(dl, p, b, sel, hot);
+    }
+    const char* text = v ? "ON" : "OFF";
+    const ImVec2 ts = ImGui::CalcTextSize(text);
+    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(p.x + (w - ts.x) * 0.5f, p.y + (h - ts.y) * 0.5f),
+                v ? IM_COL32(255, 245, 220, 255) : kDim, text);
+    if (clicked) v = !v;
+    return clicked;
+}
+
+bool toggleRow(const char* text, bool& v, const char* help = nullptr) {
+    const bool sel = rowBegin(text, help);
+    bool changed = onOff(text, v, sel);
+    if (sel && (s_in.accept || s_in.dx != 0)) {
+        v = !v;
+        changed = true;
+    }
+    return changed;
+}
+
+// a value with arrows either side: the mouse clicks one half, the controller presses left/right.
+// Returns the step clicked (-1 / +1, 0 none).
+int selector(const char* id, const char* text, bool canPrev, bool canNext, bool sel) {
+    const float w = 380.f * s_ui, h = ImGui::GetFrameHeight();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::PushID(id);
+    const bool clicked = ImGui::InvisibleButton("##selector", ImVec2(w, h));
+    const bool hot = ImGui::IsItemHovered();
+    ImGui::PopID();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    valueFrame(dl, p, ImVec2(p.x + w, p.y + h), sel, hot);
+    const float ah = h * 0.2f, cy = p.y + h * 0.5f, inset = 18.f * s_ui;
+    auto arrow = [&](float x, float dir, bool on) {
+        const ImU32 c = on ? (sel ? kGold : kText) : alpha(kDim, 70);
+        dl->AddTriangleFilled(ImVec2(x + dir * ah, cy), ImVec2(x - dir * ah, cy - ah * 1.3f), ImVec2(x - dir * ah, cy + ah * 1.3f), c);
+    };
+    arrow(p.x + inset, -1.f, canPrev);
+    arrow(p.x + w - inset, +1.f, canNext);
+    const ImVec2 ts = ImGui::CalcTextSize(text);
+    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(p.x + (w - ts.x) * 0.5f, p.y + (h - ts.y) * 0.5f),
+                sel ? kGold : kText, text);
+    if (!clicked) return 0;
+    return ImGui::GetIO().MousePos.x < p.x + w * 0.5f ? -1 : +1;
+}
+
+// one of `n` choices: left/right step (stopping at the ends), A goes round
+int choiceStep(int cur, int n, int clickStep, bool sel) {
+    int next = std::clamp(cur + clickStep + (sel ? s_in.dx : 0), 0, n - 1);
+    if (sel && s_in.accept) next = (cur + 1) % n;
+    return next;
 }
 
 template <typename E>
-bool enumCombo(const char* id, E& value, const char* (*name)(E), const char* help = nullptr) {
-    bool changed = false;
-    ImGui::SetNextItemWidth(360.f * s_ui);
-    if (ImGui::BeginCombo(id, name(value))) {
-        for (int i = 0; i < int(E::Count); i++) {
-            const bool selected = int(value) == i;
-            if (ImGui::Selectable(name(E(i)), selected) && !selected) {
-                value = E(i);
-                changed = true;
-            }
-            if (selected) ImGui::SetItemDefaultFocus();
-        }
-        ImGui::EndCombo();
-    }
-    tip(help);
-    return changed;
+bool enumRow(const char* text, E& value, const char* (*name)(E), const char* help = nullptr) {
+    const bool sel = rowBegin(text, help);
+    const int n = int(E::Count), cur = int(value);
+    const int next = choiceStep(cur, n, selector(text, name(value), cur > 0, cur < n - 1, sel), sel);
+    if (next == cur) return false;
+    value = E(next);
+    return true;
 }
 
-bool fpsCombo(int& fps, const char* help) {
-    bool changed = false;
-    char cur[16];
-    snprintf(cur, sizeof cur, "%d FPS", fps);
-    ImGui::SetNextItemWidth(360.f * s_ui);
-    if (ImGui::BeginCombo("##fps", cur)) {
-        for (int f : settings::kFpsChoices) {
-            char item[16];
-            snprintf(item, sizeof item, "%d FPS", f);
-            const bool selected = fps == f;
-            if (ImGui::Selectable(item, selected) && !selected) {
-                fps = f;
-                changed = true;
-            }
-            if (selected) ImGui::SetItemDefaultFocus();
-        }
-        ImGui::EndCombo();
+bool fpsRow(const char* text, int& fps, const char* help) {
+    const bool sel = rowBegin(text, help);
+    constexpr int n = int(std::size(settings::kFpsChoices));
+    int cur = 0;
+    for (int i = 0; i < n; i++)
+        if (settings::kFpsChoices[i] == fps) cur = i;
+    char buf[16];
+    snprintf(buf, sizeof buf, "%d FPS", fps);
+    const int next = choiceStep(cur, n, selector(text, buf, cur > 0, cur < n - 1, sel), sel);
+    if (settings::kFpsChoices[next] == fps) return false;
+    fps = settings::kFpsChoices[next];
+    return true;
+}
+
+// 0..100: a bar the mouse drags, left/right step 5
+bool percentRow(const char* text, int& v, const char* help) {
+    const bool sel = rowBegin(text, help);
+    const float w = 380.f * s_ui, h = ImGui::GetFrameHeight();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::PushID(text);
+    ImGui::InvisibleButton("##bar", ImVec2(w, h));
+    const bool active = ImGui::IsItemActive(), hot = ImGui::IsItemHovered();
+    ImGui::PopID();
+    const float x0 = p.x + 14.f * s_ui, x1 = p.x + w - 14.f * s_ui, cy = p.y + h * 0.5f;
+    int nv = v;
+    if (active) nv = int(std::lround(std::clamp((ImGui::GetIO().MousePos.x - x0) / (x1 - x0), 0.f, 1.f) * 100.f));
+    if (sel && s_in.dx > 0) nv = std::min(100, (v / 5 + 1) * 5);
+    if (sel && s_in.dx < 0) nv = std::max(0, ((v + 4) / 5 - 1) * 5);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    valueFrame(dl, p, ImVec2(p.x + w, p.y + h), sel, hot || active);
+    const float th = 6.f * s_ui, fx = x0 + (x1 - x0) * float(nv) / 100.f;
+    dl->AddRectFilled(ImVec2(x0, cy - th * 0.5f), ImVec2(x1, cy + th * 0.5f), IM_COL32(30, 52, 86, 255), th * 0.5f);
+    for (int i = 1; i < 10; i++) {
+        const float x = x0 + (x1 - x0) * float(i) / 10.f;
+        dl->AddLine(ImVec2(x, cy - th * 1.4f), ImVec2(x, cy + th * 1.4f), alpha(kDim, 60), 1.f);
     }
-    tip(help);
-    return changed;
+    if (nv > 0)
+        dl->AddRectFilledMultiColor(ImVec2(x0, cy - th * 0.5f), ImVec2(fx, cy + th * 0.5f), alpha(kAmber, 200), kGold, kGold,
+                                    alpha(kAmber, 200));
+    dl->AddCircleFilled(ImVec2(fx, cy), th * 1.5f, sel || active ? kGold : kText, 16);
+    dl->AddCircle(ImVec2(fx, cy), th * 2.4f, alpha(kAmber, sel ? 160 : 60), 20, 1.f);
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushStyleColor(ImGuiCol_Text, sel ? vec(kGold) : vec(kText));
+    ImGui::Text("%d%%", nv);
+    ImGui::PopStyleColor();
+    if (nv == v) return false;
+    v = nv;
+    return true;
+}
+
+// a button with a caption; true when pressed (click or A)
+bool buttonRow(const char* text, const char* caption, const char* help, ImU32 captionCol = kText) {
+    const bool sel = rowBegin(text, help);
+    const float w = 380.f * s_ui, h = ImGui::GetFrameHeight();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::PushID(text);
+    const bool clicked = ImGui::InvisibleButton("##button", ImVec2(w, h));
+    const bool hot = ImGui::IsItemHovered();
+    ImGui::PopID();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    valueFrame(dl, p, ImVec2(p.x + w, p.y + h), sel, hot);
+    const ImVec2 ts = ImGui::CalcTextSize(caption);
+    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(p.x + (w - ts.x) * 0.5f, p.y + (h - ts.y) * 0.5f),
+                sel ? kGold : captionCol, caption);
+    return clicked || (sel && s_in.accept);
 }
 
 // a gold heading with a rule after it
@@ -441,89 +668,95 @@ bool s_changed = false, s_display = false;
 
 void pageDisplay(settings::Settings& s) {
     heading("SCREEN");
-    label("Fullscreen");
-    if (toggle("full", s.fullscreen, "Also F11 or Alt+Enter.")) s_changed = s_display = true;
-    label("Internal resolution");
-    if (enumCombo("##res", s.resolution, settings::resolutionName,
-                  "What the game renders at. Window size follows the window; 4K renders 2160 lines "
-                  "whatever the window size."))
+    if (toggleRow("Fullscreen", s.fullscreen, "Also F11 or Alt+Enter.")) s_changed = s_display = true;
+    if (enumRow("Internal resolution", s.resolution, settings::resolutionName,
+                "What the game renders at. Window size follows the window; 4K renders 2160 lines whatever the window size."))
         s_changed = s_display = true;
-    label("Aspect ratio");
-    if (enumCombo("##aspect", s.aspect, settings::aspectName,
-                  "Widescreen widens the 3D view and fills the screen in cutscenes."))
+    if (enumRow("Aspect ratio", s.aspect, settings::aspectName,
+                "Widescreen widens the 3D view and fills the screen in cutscenes."))
         s_changed = s_display = true;
-    label("HUD at screen edges");
-    if (toggle("hudedges", s.hudEdges, "Widescreen: the flight HUD sits at the edges of the screen.")) s_changed = true;
-    label("Fill menu backgrounds");
-    if (toggle("tilemenus", s.tileMenus, "Widescreen: the menus' panel backgrounds repeat into the sides of the screen."))
+    if (toggleRow("HUD at screen edges", s.hudEdges, "Widescreen: the flight HUD sits at the edges of the screen."))
+        s_changed = true;
+    if (toggleRow("Fill menu backgrounds", s.tileMenus,
+                  "Widescreen: the menus' panel backgrounds repeat into the sides of the screen."))
         s_changed = true;
     heading("PERFORMANCE");
-    label("Frame rate");
-    if (fpsCombo(s.fps, "Above 60 the game runs more frames per second at its normal speed.")) s_changed = s_display = true;
-    label("Show frame rate");
-    if (toggle("showfps", s.showFps)) s_changed = true;
+    if (fpsRow("Frame rate", s.fps, "Above 60 the game runs more frames per second at its normal speed."))
+        s_changed = s_display = true;
+    if (toggleRow("Show frame rate", s.showFps, "Frames per second in the top-left corner.")) s_changed = true;
 }
 
 void pageGameplay(settings::Settings& s) {
     heading("CINEMATICS");
-    label("Skip intro logos");
-    if (toggle("logos", s.skipLogos, "Reach the title screen in seconds.")) s_changed = true;
-    label("Skippable cutscenes");
-    if (toggle("cutscenes", s.skipCutscenes, "Press B during the opening crawl or a cutscene to skip to the gameplay."))
+    if (toggleRow("Skip intro logos", s.skipLogos, "Reach the title screen in seconds.")) s_changed = true;
+    if (toggleRow("Skippable cutscenes", s.skipCutscenes,
+                  "Press B during the opening crawl or a cutscene to skip to the gameplay."))
+        s_changed = true;
+}
+
+void pageAudio(settings::Settings& s) {
+    heading("VOLUME");
+    if (percentRow("Master volume", s.volume,
+                   "Everything the game plays. Music, effects and speech have their own levels in the game's pause "
+                   "menu (Sound Settings)."))
+        s_changed = true;
+    heading("OUTPUT");
+    if (toggleRow("Sound in background", s.backgroundAudio,
+                  "Keep playing sound while another window has the focus. Off: silent until you come back."))
         s_changed = true;
 }
 
 void pageCheats(settings::Settings& s) {
     heading("REBEL ALLIANCE CLEARANCE");
-    label("Invincibility");
-    if (toggle("inv", s.invincible, "Your ship cannot be destroyed.")) s_changed = true;
-    label("Infinite lives");
-    if (toggle("lives", s.infiniteLives, "Losing a ship costs no life.")) s_changed = true;
-    label("Infinite bombs");
-    if (toggle("ammo", s.infiniteAmmo, "Torpedoes, bombs and missiles never run out.")) s_changed = true;
+    if (toggleRow("Invincibility", s.invincible, "Your ship cannot be destroyed.")) s_changed = true;
+    if (toggleRow("Infinite lives", s.infiniteLives, "Losing a ship costs no life.")) s_changed = true;
+    if (toggleRow("Infinite bombs", s.infiniteAmmo, "Torpedoes, bombs and missiles never run out.")) s_changed = true;
 }
 
 void pageControls() {
     const auto rows = controlRows();
     finishCapture(rows);
-    auto deviceButton = [](const char* text, bool pad) {
-        const bool on = s_padDevice == pad;
-        ImGui::PushStyleColor(ImGuiCol_Button, on ? vec(kAmber, 0.55f) : ImVec4(0.06f, 0.13f, 0.25f, 0.92f));
-        if (ImGui::Button(text, ImVec2(220.f * s_ui, 0.f))) s_padDevice = pad;
-        ImGui::PopStyleColor();
-    };
-    deviceButton("KEYBOARD", false);
-    ImGui::SameLine();
-    deviceButton("CONTROLLER", true);
-    ImGui::SameLine();
-    if (ImGui::Button("RESET TO DEFAULTS") && (!s_padDevice || aurora::pad::port_controller(0))) {
+    if (s_pendingCapture >= 0 && !acceptHeld()) {
+        startCapture(s_pendingCapture);
+        s_pendingCapture = -1;
+    }
+    heading("INPUT DEVICE");
+    {
+        const bool sel = rowBegin("Remap", "Which device's bindings this page shows and changes.");
+        const int step = selector("device", s_padDevice ? "CONTROLLER" : "KEYBOARD", s_padDevice, !s_padDevice, sel);
+        if (step || (sel && (s_in.dx || s_in.accept)) ) {
+            const bool want = step ? step > 0 : (s_in.dx ? s_in.dx > 0 : !s_padDevice);
+            s_padDevice = want;
+        }
+    }
+    const bool noPad = s_padDevice && !aurora::pad::port_controller(0);
+    if (buttonRow("Reset to defaults", "RESET", "Puts back the original bindings of the device shown.") && !noPad) {
         aurora::pad::reset_to_defaults(profileTarget());
         aurora::pad::save_profiles();
+    }
+    if (noPad) {
+        ImGui::TextDisabled("No controller connected.");
+        return;
     }
     if (s_padDevice) {
         SDL_Gamepad* pad = targetGamepad();
         const char* name = pad ? SDL_GetGamepadName(pad) : nullptr;
-        if (!aurora::pad::port_controller(0)) {
-            ImGui::TextDisabled("No controller connected.");
-            return;
-        }
         ImGui::TextDisabled("%s", name ? name : "Controller");
     }
-    ImGui::TextDisabled("Select a control, then press its new key or button (Esc cancels). Right-click or X clears.");
     heading("GAMECUBE CONTROLLER");
     for (int i = 0; i < int(rows.size()); i++) {
         const ControlRow& row = rows[size_t(i)];
         ImGui::PushID(i);
-        label(row.name);
-        const bool capturing = s_captureRow == i;
+        const bool capturing = s_captureRow == i || s_pendingCapture == i;
         const std::string text = capturing ? std::string("PRESS A KEY OR BUTTON...") : bindingText(row);
-        ImGui::PushStyleColor(ImGuiCol_Text, capturing ? vec(kGold) : vec(kText));
-        ImGui::PushStyleColor(ImGuiCol_Button, capturing ? vec(kAmber, 0.35f) : ImVec4(0.06f, 0.13f, 0.25f, 0.92f));
-        if (ImGui::Button(text.c_str(), ImVec2(440.f * s_ui, 0.f)) && s_captureRow < 0) startCapture(i);
-        ImGui::PopStyleColor(2);
-        if (s_captureRow < 0 && (ImGui::IsItemClicked(ImGuiMouseButton_Right) ||
-                                 (ImGui::IsItemFocused() && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceLeft, false))))
-            clearRow(row);
+        const bool idle = s_captureRow < 0 && s_pendingCapture < 0;
+        const bool pressed = buttonRow(row.name, text.c_str(),
+                                       "Press A / Enter (or click), then the new key or button. X / Delete or a right-click "
+                                       "clears it. Back / Esc cancels.",
+                                       capturing ? kGold : kText);
+        const bool sel = s_rowSel[s_section] == s_row - 1;
+        if (pressed && idle) s_pendingCapture = i;  // listens once the click / A / Enter is released
+        if (idle && (ImGui::IsItemClicked(ImGuiMouseButton_Right) || (sel && s_in.clear))) clearRow(row);
         ImGui::PopID();
     }
 }
@@ -531,7 +764,80 @@ void pageControls() {
 // ---------------------------------------------------------------------------------------
 // the window
 // ---------------------------------------------------------------------------------------
-void drawMenu(settings::Settings& s, float t) {
+void switchSection(int i) {
+    if (i == s_section) return;
+    s_section = i;
+    s_scrollToSel = true;
+    s_pendingCapture = -1;
+}
+
+// a small key cap: the button that does something here
+void keyCap(ImDrawList* dl, ImVec2 c, const char* text, bool lit) {
+    const float px = 17.f * s_ui;
+    const float tw = textWidth(s_font, px, text, 1.f * s_ui);
+    const ImVec2 half(std::max(tw * 0.5f + 10.f * s_ui, 20.f * s_ui), 15.f * s_ui);
+    const ImVec2 a(c.x - half.x, c.y - half.y), b(c.x + half.x, c.y + half.y);
+    dl->AddRectFilled(a, b, lit ? alpha(kAmber, 200) : IM_COL32(10, 22, 44, 220), 6.f * s_ui);
+    dl->AddRect(a, b, lit ? kGold : alpha(kGold, 140), 6.f * s_ui, 0, 1.5f * s_ui);
+    drawText(dl, s_font, px, ImVec2(c.x - tw * 0.5f, c.y - px * 0.55f), lit ? IM_COL32(20, 12, 0, 255) : kGold, text, 1.f * s_ui);
+}
+
+// the tabs: across the top, LB / RB (Q / E) caps at the ends
+void tabBar() {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float h = 54.f * s_ui, capW = 64.f * s_ui, gap = 10.f * s_ui;
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float tabsX = p.x + capW + gap, tabsW = avail - 2.f * (capW + gap);
+    const float tw = (tabsW - gap * float(SectionCount - 1)) / float(SectionCount);
+    for (int i = 0; i < SectionCount; i++) {
+        const ImVec2 a(tabsX + float(i) * (tw + gap), p.y), b(a.x + tw, p.y + h);
+        ImGui::SetCursorScreenPos(a);
+        ImGui::PushID(i);
+        if (ImGui::InvisibleButton("##tab", ImVec2(tw, h)) && s_captureRow < 0) switchSection(i);
+        const bool hot = ImGui::IsItemHovered();
+        ImGui::PopID();
+        const bool on = s_section == i;
+        panel(dl, a, b, 12.f * s_ui, on ? IM_COL32(74, 48, 10, 235) : IM_COL32(10, 22, 44, hot ? 230 : 170),
+              on ? IM_COL32(30, 18, 4, 235) : IM_COL32(4, 10, 22, 200),
+              on ? kAmber : (hot ? alpha(kHolo, 200) : alpha(kGold, 60)), 1.f * s_ui);
+        if (on) dl->AddRectFilled(ImVec2(a.x + 14.f * s_ui, b.y - 4.f * s_ui), ImVec2(b.x - 14.f * s_ui, b.y), kAmber);
+        const float px = 22.f * s_ui, tr = 4.f * s_ui;
+        const float w = textWidth(s_font, px, kSectionNames[i], tr);
+        drawText(dl, s_font, px, ImVec2(a.x + (tw - w) * 0.5f, a.y + h * 0.5f - px * 0.55f),
+                 on ? kGold : (hot ? kText : kDim), kSectionNames[i], tr, on ? alpha(kAmber, 40) : 0);
+    }
+    const float cy = p.y + h * 0.5f;
+    keyCap(dl, ImVec2(p.x + capW * 0.5f, cy), s_usingPad ? "LB" : "Q",
+           s_navKey[NavPrevTab].held || ImGui::IsKeyDown(ImGuiKey_Q));
+    keyCap(dl, ImVec2(p.x + avail - capW * 0.5f, cy), s_usingPad ? "RB" : "E",
+           s_navKey[NavNextTab].held || ImGui::IsKeyDown(ImGuiKey_E));
+    const float ruleY = p.y + h + 12.f * s_ui;
+    dl->AddLine(ImVec2(p.x, ruleY), ImVec2(p.x + avail, ruleY), alpha(kGold, 60), 1.f);
+    ImGui::SetCursorScreenPos(ImVec2(p.x, ruleY + 14.f * s_ui));
+}
+
+// returns false when the menu closed
+bool drawMenu(settings::Settings& s, float t) {
+    // input first: B closes, LB / RB switch tabs, up / down move the selection
+    const bool rebinding = s_captureRow >= 0 || s_pendingCapture >= 0 || (s_navBackTb && tbNow() < s_navBackTb);
+    pollNav(!rebinding);
+    if (s_nav[NavBack]) return false;
+    if (s_nav[NavPrevTab]) switchSection((s_section + SectionCount - 1) % SectionCount);
+    if (s_nav[NavNextTab]) switchSection((s_section + 1) % SectionCount);
+    {
+        const int count = s_rowCount[s_section];
+        int& sel = s_rowSel[s_section];
+        if (count > 0 && (s_nav[NavUp] || s_nav[NavDown])) {
+            sel = (sel + (s_nav[NavUp] ? count - 1 : 1)) % count;
+            s_scrollToSel = true;
+        }
+    }
+    s_in = {};
+    s_in.dx = (s_nav[NavRight] ? 1 : 0) - (s_nav[NavLeft] ? 1 : 0);
+    s_in.accept = s_nav[NavAccept];
+    s_in.clear = s_nav[NavClear];
+
     const ImGuiIO& io = ImGui::GetIO();
     const ImVec2 disp = io.DisplaySize;
     s_ui = std::clamp(disp.y / 1080.f, 0.6f, 3.f);
@@ -541,7 +847,7 @@ void drawMenu(settings::Settings& s, float t) {
     bg->AddRectFilled(ImVec2(0, 0), disp, IM_COL32(0, 3, 10, 205));
     starfield(bg, disp, t);
 
-    const float w = std::min(disp.x * 0.86f, disp.y * 1.45f), h = disp.y * 0.84f;
+    const float w = std::min(disp.x * 0.86f, disp.y * 1.45f), h = disp.y * 0.86f;
     const ImVec2 a((disp.x - w) * 0.5f, (disp.y - h) * 0.5f), b(a.x + w, a.y + h);
     panel(bg, a, b, 34.f * s_ui, kPanelTop, kPanelBottom, alpha(kGold, 200), 1.5f * s_ui);
     brackets(bg, a, b, 46.f * s_ui, kAmber, 2.f * s_ui);
@@ -554,10 +860,10 @@ void drawMenu(settings::Settings& s, float t) {
 
     // header
     const float pad = 44.f * s_ui;
-    const float titlePx = 58.f * s_ui;
-    const float titleY = a.y + pad * 0.6f;
+    const float titlePx = 50.f * s_ui;
+    const float titleY = a.y + pad * 0.55f;
     drawText(bg, s_fontBig, titlePx, ImVec2(a.x + pad, titleY), kGold, "RED TWO", 10.f * s_ui, alpha(kAmber, 50));
-    drawText(bg, s_font, 19.f * s_ui, ImVec2(a.x + pad + 2.f, titleY + titlePx * 1.02f), kHolo,
+    drawText(bg, s_font, 18.f * s_ui, ImVec2(a.x + pad + 2.f, titleY + titlePx * 1.02f), kHolo,
              "ROGUE SQUADRON II  //  FLIGHT SYSTEMS CONFIGURATION", 3.f * s_ui);
     const float blink = 0.5f + 0.5f * std::sin(t * 3.f);
     const ImVec2 lamp(b.x - pad - 8.f * s_ui, titleY + titlePx * 0.45f);
@@ -567,70 +873,50 @@ void drawMenu(settings::Settings& s, float t) {
     const float statusPx = 17.f * s_ui;
     drawText(bg, s_font, statusPx, ImVec2(lamp.x - 22.f * s_ui - textWidth(s_font, statusPx, status, 2.f * s_ui), lamp.y - 9.f * s_ui),
              kDim, status, 2.f * s_ui);
-    const float headerBottom = titleY + titlePx * 1.02f + 34.f * s_ui;
-    bg->AddLine(ImVec2(a.x + pad, headerBottom), ImVec2(b.x - pad, headerBottom), alpha(kGold, 90), 1.f);
+    const float headerBottom = titleY + titlePx * 1.02f + 30.f * s_ui;
 
-    // footer
-    const char* hint = "F1 / BACK  CLOSE      LB / RB  SECTION      A  SELECT      B  BACK";
-    drawText(bg, s_font, 16.f * s_ui, ImVec2(a.x + pad, b.y - pad * 0.75f), kDim, hint, 2.f * s_ui);
+    // footer: the selected row's description, then the buttons
+    const float footY = b.y - pad * 0.8f;
+    const float helpY = footY - 40.f * s_ui;
+    bg->AddLine(ImVec2(a.x + pad, helpY - 12.f * s_ui), ImVec2(b.x - pad, helpY - 12.f * s_ui), alpha(kGold, 50), 1.f);
+    std::string hint = s_usingPad ? "LB / RB  TABS      D-PAD / STICK  MOVE, CHANGE      A  SELECT"
+                                  : "Q / E  TABS      ARROWS  MOVE, CHANGE      ENTER  SELECT";
+    if (s_section == Controls) hint += s_usingPad ? "      X  CLEAR" : "      DEL  CLEAR";
+    hint += s_usingPad ? "      B / BACK  CLOSE" : "      ESC / F1  CLOSE";
+    drawText(bg, s_font, 16.f * s_ui, ImVec2(a.x + pad, footY), kDim, hint.c_str(), 2.f * s_ui);
 
     // the interactive part: an invisible window over the panel body
-    const float top = headerBottom + 18.f * s_ui;
+    const float top = headerBottom;
     ImGui::SetNextWindowPos(ImVec2(a.x + pad, top), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(w - 2.f * pad, b.y - pad * 1.2f - top), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(w - 2.f * pad, helpY - 24.f * s_ui - top), ImGuiCond_Always);
     if (s_focus) ImGui::SetNextWindowFocus();
-    constexpr ImGuiWindowFlags flags =
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoMove;
+    constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+                                       ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoMove |
+                                       ImGuiWindowFlags_NoScrollWithMouse;
+    s_help = nullptr;
     if (ImGui::Begin("##redtwo_menu", nullptr, flags)) {
+        // (a child's font scale multiplies its parent's: this window keeps 1, the page sets it)
         if (s_font) ImGui::PushFont(s_font);
-        bodyFont(24.f * s_ui);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.f * s_ui, 7.f * s_ui));
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12.f * s_ui, 10.f * s_ui));
 
-        // section switching: LB / RB (or Q / E)
-        if (s_captureRow < 0) {
-            if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false))
-                s_section = (s_section + SectionCount - 1) % SectionCount;
-            if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false))
-                s_section = (s_section + 1) % SectionCount;
-        }
+        tabBar();
 
-        // left: sections
-        const float navW = 250.f * s_ui;
-        ImGui::BeginChild("##nav", ImVec2(navW, 0.f), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
-        bodyFont(24.f * s_ui);
-        for (int i = 0; i < SectionCount; i++) {
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            const ImVec2 p = ImGui::GetCursorScreenPos();
-            const ImVec2 sz(navW - 12.f * s_ui, 54.f * s_ui);
-            const bool on = s_section == i;
-            if (s_focus && on) ImGui::SetKeyboardFocusHere();
-            ImGui::PushID(i);
-            if (ImGui::InvisibleButton("##sec", sz)) s_section = i;
-            const bool hot = ImGui::IsItemHovered() || ImGui::IsItemFocused();
-            ImGui::PopID();
-            panel(dl, p, ImVec2(p.x + sz.x, p.y + sz.y), 12.f * s_ui, on ? IM_COL32(60, 40, 10, 220) : IM_COL32(10, 22, 44, hot ? 230 : 170),
-                  on ? IM_COL32(30, 18, 4, 220) : IM_COL32(4, 10, 22, 200),
-                  on ? kAmber : (hot ? alpha(kHolo, 200) : alpha(kGold, 60)), 1.f * s_ui);
-            if (on) dl->AddRectFilled(p, ImVec2(p.x + 5.f * s_ui, p.y + sz.y), kAmber);
-            drawText(dl, s_font, 22.f * s_ui, ImVec2(p.x + 22.f * s_ui, p.y + sz.y * 0.5f - 12.f * s_ui),
-                     on ? kGold : (hot ? kText : kDim), kSectionNames[i], 4.f * s_ui);
-            ImGui::Dummy(ImVec2(0, 4.f * s_ui));
-        }
-        ImGui::EndChild();
-        ImGui::SameLine(0.f, 28.f * s_ui);
-
-        // right: the section's settings
         ImGui::BeginChild("##page", ImVec2(0.f, 0.f), ImGuiChildFlags_None);
-        bodyFont(24.f * s_ui);
-        s_valueX = std::min(360.f * s_ui, ImGui::GetContentRegionAvail().x * 0.42f);
+        bodyFont(23.f * s_ui);
+        s_valueX = std::min(380.f * s_ui, ImGui::GetContentRegionAvail().x * 0.42f);
         s_changed = s_display = false;
+        s_row = 0;
         switch (s_section) {
         case Display: pageDisplay(s); break;
         case Gameplay: pageGameplay(s); break;
+        case Audio: pageAudio(s); break;
         case Controls: pageControls(); break;
         case Cheats: pageCheats(s); break;
         }
+        ImGui::Dummy(ImVec2(0, 8.f * s_ui));
+        s_rowCount[s_section] = s_row;
+        if (s_row > 0) s_rowSel[s_section] = std::clamp(s_rowSel[s_section], 0, s_row - 1);
         ImGui::EndChild();
 
         ImGui::PopStyleVar(2);
@@ -639,15 +925,13 @@ void drawMenu(settings::Settings& s, float t) {
         if (s_display) applyDisplaySettings();
     }
     ImGui::End();
+    if (s_help) drawText(bg, s_font, 19.f * s_ui, ImVec2(a.x + pad, helpY), alpha(kHolo, 220), s_help, 0.5f * s_ui);
     s_focus = false;
-    // keyboard/controller navigation comes back a moment after a capture
-    if (s_captureRow < 0 && s_navBackTb && tbNow() >= s_navBackTb) {
-        s_navBackTb = 0;
-        setNav(true);
-    }
+    if (s_captureRow < 0 && s_navBackTb && tbNow() >= s_navBackTb) s_navBackTb = 0;
+    return true;
 }
 
-// R2_MENU_BIND_TEST=1 (with R2_MENU=1 R2_MENU_SECTION=2, automated runs only: their bindings
+// R2_MENU_BIND_TEST=1 (with R2_MENU=1 R2_MENU_SECTION=3, automated runs only: their bindings
 // live in build/test_cache): rebinds A and STICK UP on the keyboard through synthetic key
 // presses, logs the results, then resets the keyboard profile.
 void pushKey(SDL_Scancode sc) {
@@ -688,14 +972,73 @@ void bindSelfTest() {
     }
 }
 
-void setOpen(bool open) {
-    if (!open && s_captureRow >= 0) {
-        aurora::binding::cancel_capture();
-        s_captureRow = -1;
+// R2_MENU_PAD_TEST=1 (with R2_MENU=1, automated runs): an SDL virtual gamepad - the same path
+// as a real controller - switches tabs, moves, changes the volume, toggles, then closes the
+// menu with B; the log shows where each step got to.
+void padSelfTest() {
+    if (!padTest()) return;
+    static SDL_Joystick* joy = nullptr;
+    static int k = 0;
+    if (!joy) {
+        SDL_VirtualJoystickDesc desc;
+        SDL_INIT_INTERFACE(&desc);
+        desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+        desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
+        desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+        desc.name = "Red Two test pad";
+        const SDL_JoystickID id = SDL_AttachVirtualJoystick(&desc);
+        joy = id ? SDL_OpenJoystick(id) : nullptr;
+        logf("menu", "pad test: virtual gamepad %u %s", unsigned(id), joy ? "attached" : SDL_GetError());
+        if (!joy) return;
     }
+    const settings::Settings& s = settings::get();
+    auto show = [&](const char* step) {
+        logf("menu", "pad test %-22s: open %d tab %s row %d volume %d background %d", step, s_open, kSectionNames[s_section],
+             s_rowSel[s_section], s.volume, s.backgroundAudio);
+    };
+    auto press = [&](int at, SDL_GamepadButton b) {
+        if (k == at) SDL_SetJoystickVirtualButton(joy, b, true);
+        if (k == at + 4) SDL_SetJoystickVirtualButton(joy, b, false);
+    };
+    auto stick = [&](int at, SDL_GamepadAxis a, Sint16 v) {
+        if (k == at) SDL_SetJoystickVirtualAxis(joy, a, v);
+        if (k == at + 4) SDL_SetJoystickVirtualAxis(joy, a, 0);
+    };
+    k++;
+    press(40, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);   // Display -> Gameplay
+    press(60, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);   // -> Audio
+    press(80, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);    // -> Gameplay
+    press(100, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);  // -> Audio
+    stick(120, SDL_GAMEPAD_AXIS_LEFTY, 32767);      // stick down: row 1
+    press(140, SDL_GAMEPAD_BUTTON_DPAD_UP);         // row 0, master volume
+    press(160, SDL_GAMEPAD_BUTTON_DPAD_LEFT);       // 95
+    stick(180, SDL_GAMEPAD_AXIS_LEFTX, -32768);     // 90
+    press(200, SDL_GAMEPAD_BUTTON_DPAD_DOWN);       // row 1
+    press(220, SDL_GAMEPAD_BUTTON_SOUTH);           // A: sound in background off
+    press(260, SDL_GAMEPAD_BUTTON_EAST);            // B: close
+    switch (k) {
+    case 30: show("start"); break;
+    case 55: show("RB"); break;
+    case 75: show("RB"); break;
+    case 95: show("LB"); break;
+    case 115: show("RB"); break;
+    case 135: show("stick down"); break;
+    case 155: show("d-pad up"); break;
+    case 175: show("d-pad left"); break;
+    case 195: show("stick left"); break;
+    case 215: show("d-pad down"); break;
+    case 235: show("A"); break;
+    case 275: show("B"); break;
+    default: break;
+    }
+}
+
+void setOpen(bool open) {
+    if (!open) cancelCapture();
     s_open = open;
     s_focus = open;
-    setNav(open);
+    s_navFresh = true;
+    s_scrollToSel = open;
 }
 
 }  // namespace
@@ -712,6 +1055,8 @@ void setHudAnchoring(bool on) {
 
 void menuImGuiInit(const void*) {
     ImGuiIO& io = ImGui::GetIO();
+    // the menu does its own navigation (above); ImGui's would move a second cursor
+    io.ConfigFlags &= ~(ImGuiConfigFlags_NavEnableGamepad | ImGuiConfigFlags_NavEnableKeyboard);
     const char* path = "C:\\Windows\\Fonts\\bahnschrift.ttf";
     if (FILE* f = fopen(path, "rb")) {
         fclose(f);
@@ -726,19 +1071,19 @@ void menuImGuiInit(const void*) {
 
 void menuEvent(const void* p) {
     const SDL_Event& e = *static_cast<const SDL_Event*>(p);
-    // automated runs: someone's controller must not open the menu over a scripted test
-    static const bool automated = envFlag("R2_BACKGROUND") || envFlag("R2_HEADLESS") || getenv("R2_INPUT");
-    if (s_captureRow >= 0 || (s_navBackTb && tbNow() < s_navBackTb)) return;  // rebinding takes these keys
+    if (s_captureRow >= 0 || s_pendingCapture >= 0 || (s_navBackTb && tbNow() < s_navBackTb)) return;  // rebinding takes these
     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
         if (e.key.key == SDLK_F1) {
             logf("menu", "F1: %s", s_open ? "close" : "open");
+            s_usingPad = false;
             setOpen(!s_open);
         } else if (e.key.key == SDLK_ESCAPE && s_open) {
             logf("menu", "Esc: close");
             setOpen(false);
         }
-    } else if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK && !automated) {
+    } else if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK && !automatedRun()) {
         logf("menu", "controller Back: %s", s_open ? "close" : "open");
+        s_usingPad = true;
         setOpen(!s_open);
     }
 }
@@ -766,14 +1111,23 @@ void menuDraw() {
         if (a > 0.f) setGameAspect(a);
         else if (w && h) setGameAspect(double(w) / double(h));
     }
+    settings::Settings& s = settings::get();
+    // volume: (volume / 100)^2 roughly follows loudness; silent in the background if asked
+    {
+        SDL_Window* win = aurora_get_window();
+        const bool focused = !win || (SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS) != 0;
+        const float v = float(std::clamp(s.volume, 0, 100)) / 100.f;
+        audio::setGain(!s.backgroundAudio && !focused ? 0.f : v * v);
+    }
     ImGuiContext* ctx = ImGui::GetCurrentContext();
     if (!ctx || !ctx->WithinFrameScope) return;
-    settings::Settings& s = settings::get();
     static bool testOpen = envFlag("R2_MENU");  // screenshots of the menu in automated runs
     if (testOpen) {
         testOpen = false;
         setOpen(true);
         if (const char* sec = getenv("R2_MENU_SECTION")) s_section = std::clamp(atoi(sec), 0, int(SectionCount) - 1);
+        if (const char* row = getenv("R2_MENU_ROW")) s_rowSel[s_section] = std::max(0, atoi(row));
+        s_usingPad = envFlag("R2_MENU_PAD");
     }
 
     // presented frames per second (half-second window)
@@ -811,8 +1165,12 @@ void menuDraw() {
         const float x = c.x - bw * 0.5f + std::fmod(t * 0.8f, 1.f) * bw * 0.8f;
         fg->AddRectFilled(ImVec2(x, y), ImVec2(x + bw * 0.2f, y + 2.f * ui), kAmber);
     }
-    if (s_open) drawMenu(s, t);
+    if (s_open && !drawMenu(s, t)) {
+        logf("menu", "controller B: close");
+        setOpen(false);
+    }
     if (s_open) bindSelfTest();
+    padSelfTest();
 }
 
 }  // namespace rt::gfx

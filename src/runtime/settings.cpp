@@ -28,6 +28,8 @@ void set(const std::string& key, const std::string& value) {
     else if (key == "show_fps") s.showFps = parseBool(value);
     else if (key == "hud_edges") s.hudEdges = parseBool(value);
     else if (key == "tile_menus") s.tileMenus = parseBool(value);
+    else if (key == "volume") s.volume = n < 0 ? 0 : n > 100 ? 100 : n;
+    else if (key == "background_audio") s.backgroundAudio = parseBool(value);
     else if (key == "skip_logos") s.skipLogos = parseBool(value);
     else if (key == "skip_cutscenes") s.skipCutscenes = parseBool(value);
     else if (key == "invincible") s.invincible = parseBool(value);
@@ -102,6 +104,9 @@ void save() {
     fprintf(f, "show_fps=%d\n", s.showFps);
     fprintf(f, "hud_edges=%d\n", s.hudEdges);
     fprintf(f, "tile_menus=%d\n", s.tileMenus);
+    fprintf(f, "# master volume 0..100\n");
+    fprintf(f, "volume=%d\n", s.volume);
+    fprintf(f, "background_audio=%d\n", s.backgroundAudio);
     fprintf(f, "skip_logos=%d\n", s.skipLogos);
     fprintf(f, "skip_cutscenes=%d\n", s.skipCutscenes);
     fprintf(f, "invincible=%d\n", s.invincible);

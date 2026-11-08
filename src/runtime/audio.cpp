@@ -15,6 +15,7 @@ namespace rt::audio {
 namespace {
 SDL_AudioStream* s_stream = nullptr;
 u32 s_rate = 0;
+float s_gain = 1.f;
 FILE* s_dump = nullptr;
 u32 s_dumpBytes = 0, s_dumpRate = 0;
 u64 s_dropped = 0;
@@ -50,8 +51,15 @@ void init() {
         return;
     }
     s_rate = 32000;
+    SDL_SetAudioStreamGain(s_stream, s_gain);
     SDL_ResumeAudioStreamDevice(s_stream);
     logf("audio", "output: 32 kHz stereo");
+}
+
+void setGain(float gain) {
+    if (gain == s_gain) return;
+    s_gain = gain;
+    if (s_stream) SDL_SetAudioStreamGain(s_stream, gain);
 }
 
 void push(const u8* data, u32 frames, u32 rate) {

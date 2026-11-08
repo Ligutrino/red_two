@@ -5,6 +5,8 @@
 #include "hw/gx_fifo.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <cstring>
 #include <unordered_map>
 #include <vector>
@@ -115,8 +117,10 @@ void hle_GameFrameDelta(Ctx& c) {
     craftDiffProbe();
     // widescreen: the flight HUD goes to the screen edges (not the menus: their layout is 4:3)
     gfx::setHudAnchoring(s.hudEdges && s.aspect != settings::Aspect::R4_3 && playerCraft() && !cinematic);
-    // menu screens only (no player craft): the background's panels repeat into the sides
-    gfx::setMenuTiling(s.tileMenus && !playerCraft());
+    // menu screens only (no player craft; not the boot screen's intro and logos, whose 2D draws
+    // also look like a run of panels, nor letterboxed cinematics): the background's panels
+    // repeat into the sides
+    gfx::setMenuTiling(s.tileMenus && !playerCraft() && !bootScreen() && !cinematic);
     // R2_DT_LOG: every 10 s, frames and the game time they advanced against the wall clock
     static const bool dtLog = envFlag("R2_DT_LOG");
     if (!dtLog) return;
@@ -141,7 +145,10 @@ void hle_GameFrameDelta(Ctx& c) {
 // (0x7FD43668 -> MTXPerspective). Each camera function has its own copy of the constant; the
 // ones below take the display aspect, so the game renders and culls for it. Aurora leaves
 // projections that are already wide alone (Aurora patch 0009).
+static std::atomic<float> s_displayAspect{4.f / 3.f};
+
 void setGameAspect(double aspect) {
+    s_displayAspect.store(float(aspect), std::memory_order_relaxed);
     // (The flight camera culls with the camera-object default. HUD cameras built from it, such
     // as the radar globe's, aim off-center; Aurora keeps that offset in the 4:3 HUD layout.
     // 0x8009935C, the HUD's own MTXPerspective calls, stays 4:3.)
@@ -166,6 +173,39 @@ void setGameAspect(double aspect) {
     logf("wide", "game camera aspect %.4f", aspect);
 }
 
+// CameraSetup (0x7FC14CEC; view r3, matrix r4, aspect f1, vertical fov f2 in degrees) derives a
+// camera's culling volume (horizontal fov +0x130, frustum vectors from +0x138) from the aspect
+// and fov its camera object holds (+0x274/+0x270), and keeps them (+0x12C, +0x134) for the
+// projection 0x7FC153C0 builds next. Not every camera takes the patched constants above: the
+// LucasArts intro's has its own 1.3333, letterboxed cinematics use 2.105 (4/3 * 480/304). Aurora
+// shows such a projection opened up to fill the screen (patch 0009, widescreen_scale): with
+// k = display aspect / (4/3) and v = 480 / the XFB's lines in a letterboxed frame (1 otherwise),
+// r = k / v opens it r times wider if r > 1, 1/r times taller if r < 1. The culling volume is
+// computed for that opened view, while the projection keeps the game's own aspect and fov:
+// stormtroopers at the intro's sides and objects at a cutscene's top and bottom are no longer
+// dropped. (Cameras already at the display aspect - flight, which Aurora leaves as they are -
+// pass unchanged.) R2_GAME_CULLING=1 keeps the game's own volumes (for comparisons).
+void hle_CameraSetup(Ctx& c) {
+    const double aspect = c.f[1], fov = c.f[2];
+    const double display = s_displayAspect.load(std::memory_order_relaxed);
+    static const bool gameCulling = envFlag("R2_GAME_CULLING");  // debugging: the game's own volumes
+    if (gameCulling || display < 4.0 / 3.0 + 0.01 || !(aspect > 0.5 && aspect < 8.0) || !(fov > 1.0 && fov < 170.0) ||
+        std::abs(aspect - display) < 0.002) {
+        f_7FC14CEC_orig(c);
+        return;
+    }
+    const u32 lines = viXfbLines();
+    const double k = display * 0.75, v = lines && lines < 408 ? 480.0 / lines : 1.0, r = k / v;
+    const double wider = std::max(1.0, r), taller = std::max(1.0, 1.0 / r);
+    constexpr double kRad = 3.14159265358979323846 / 180.0;
+    const u32 view = c.r[3];
+    c.f[1] = c.ps1[1] = rsingle(aspect * wider / taller);
+    c.f[2] = c.ps1[2] = rsingle(2.0 * std::atan(std::tan(fov * 0.5 * kRad) * taller) / kRad);
+    f_7FC14CEC_orig(c);
+    wr32(view + 0x12C, d2s(aspect));  // the projection: the game's own
+    wr32(view + 0x134, d2s(fov));
+}
+
 // Infinite lives (settings): LoseLife (0x7FD7648C) decrements the lives byte at 0x800962EE
 // (3 ships at a mission start; at 1 it ends the game instead: 0x800962EF = 0x21, mode 6) and
 // returns 1. With the cheat it reports the life lost without taking it.
@@ -188,8 +228,13 @@ void hle_CraftDestroy(Ctx& c) {
 // Infinite bombs: WeaponInit (0x7FC396D4) sets up each weapon of a craft - count (+0) and
 // maximum (+4) from the craft's data, the weapon slot at +0x520. Weapon objects sit at a
 // different place in each craft class (inside it or behind a pointer), so they are recorded
-// here as the game initializes them; every frame the player's craft gets its secondary
-// weapons refilled (unlimited weapons have a maximum of 0 and are left alone).
+// here as the game initializes them. The player's secondary weapons are given back what they
+// fire right away (WeaponUpdate, below) and topped up every frame (missions can also restore a
+// count from a checkpoint); unlimited weapons have a maximum of 0 and are left alone.
+//
+// Death Star Attack fails ("You have no proton torpedoes left to fire at the exhaust port")
+// from its mission script once the torpedo count runs out; the count has to stay up in every
+// state the craft flies in, the trench run included, not only in free flight (+0x370 = 0).
 struct WeaponRec {
     u32 craft, weapon, slot, max;
 };
@@ -208,16 +253,36 @@ void hle_WeaponInit(Ctx& c) {
     s_weapons.push_back({craft, weapon, slot, max});
 }
 
+// fill one of the player craft's recorded weapons (a mission may have set a new maximum)
+static void refill(WeaponRec& w) {
+    if (w.max == 0 || rd32(w.weapon + 0x520) != w.slot) return;  // unlimited, or no longer this weapon
+    const u32 max = rd32(w.weapon + 4);
+    if (max == 0 || max > 999) return;
+    w.max = max;
+    const s32 count = s32(rd32(w.weapon));
+    if (count >= 0 && count < s32(max)) wr32(w.weapon, max);  // (-1: unlimited already)
+}
+
 static void keepAmmo() {
     if (!settings::get().infiniteAmmo) return;
     const u32 craft = playerCraft();
-    if (!craft || rd32(craft + 0x370) != 0) return;  // flying only
-    for (const WeaponRec& w : s_weapons) {
-        if (w.craft != craft || w.max == 0 || w.max > 999) continue;
-        // still the weapon it was (same slot and maximum)?
-        if (rd32(w.weapon + 0x520) != w.slot || rd32(w.weapon + 4) != w.max) continue;
-        if (s32(rd32(w.weapon)) < s32(w.max)) wr32(w.weapon, w.max);
-    }
+    if (!craft) return;
+    for (WeaponRec& w : s_weapons)
+        if (w.craft == craft) refill(w);
+}
+
+// WeaponUpdate (0x7FC39F24, weapon r3, craft r4): a weapon's update, which fires it on the
+// trigger and takes one from its count. The player's shot is given back before anything (HUD,
+// mission script) reads the count.
+void hle_WeaponUpdate(Ctx& c) {
+    const u32 weapon = c.r[3], craft = c.r[4];
+    f_7FC39F24_orig(c);
+    if (!settings::get().infiniteAmmo || !craft || craft != playerCraft()) return;
+    for (WeaponRec& w : s_weapons)
+        if (w.weapon == weapon && w.craft == craft) {
+            refill(w);
+            break;
+        }
 }
 
 // ...and its health (craft +0x6F4, a float: 180 for the X-wing) is kept full, so the HUD ring

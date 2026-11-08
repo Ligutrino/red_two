@@ -27,8 +27,10 @@
 8001D9EC salBuildCommandList   # nsDelay < 200 -> 10430 cycles; (nsDelay - 200) * busClock/400/5000 + 10430
 # Game (VM image), identified by reading its code
 7FD46244 GameFrameDelta          # returns 1/(59.94 - lost fps) (f1); stored per frame at 0x7FDE8288 by 0x7FC02CF0
-7FC397D4 CameraButtonCheck       # flight camera button (input+0xDC mask): tap -> 1 (caller 0x7FC39F24 cycles the view), hold 0.3 s -> hold mode (vt+0x70/+0x78), release after 1.3 s -> 2; obj+0xC locks, obj+0x51C allows hold
+7FC397D4 WeaponTrigger           # (weapon r3, input r4): fire button (input+0xDC mask): tap -> 1 (WeaponUpdate 0x7FC39F24 fires), hold 0.3 s -> hold mode (vt+0x70/+0x78), release after 1.3 s -> 2; weapon+0xC locks, +0x51C allows hold. (Was taken for the camera button: it is the weapons')
 7FD7648C LoseLife                # lives byte 0x800962EE (r13-0x4AB2, 3 at mission start): 1 -> game over (0x800962EF = 0x21, mode 6), else -1, returns 1
 7FC45AFC PlayerDeathCheck        # [0x7FDEFE14] (player craft) state +0x370 == 2 -> LoseLife, deaths stat 0x7FDF0510
+7FC14CEC CameraSetup             # (camera view r3 = camera object+0xA4, matrix r4, aspect f1, fovY f2 degrees): aspect +0x12C, fovY +0x134, derived horizontal fov +0x130, near/far +0x124/+0x128, view matrix, culling frustum vectors from +0x138; 0x7FC153C0 then builds the projection from +0x134/+0x12C/+0x124/+0x128 (0x7FD43668 -> MTXPerspective). Aspect and fov come from the current camera object (0x7FC1CE38) +0x274/+0x270
+7FC39F24 WeaponUpdate            # (weapon r3, craft r4): WeaponTrigger, then fires, taking one from the count (+0; -1 = unlimited); found by watching the X-wing's torpedo count (craft+0xC74) drop
 7FC396D4 WeaponInit              # (weapon r3, craft r4, slot r5): count +0 = max +4 = ammo from the craft's data ([craft+0x37C] + slot*4 + 0x14C), slot +0x520; found by watching the X-wing's torpedo count (craft+0xC74) being set at spawn
 7FC3E528 CraftDestroy            # craft vtable slot (shared base method): starts the explosion (state +0x370 = 1); 0x7FC3F538 = dead (2)
