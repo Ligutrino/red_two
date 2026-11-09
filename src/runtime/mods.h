@@ -32,6 +32,8 @@ void texturesInit();               // after Aurora is up: load the packs if enab
 void setTexturesEnabled(bool on);  // load / unload now (the menu)
 void reloadTextures();             // after an import: pick up new files
 const std::vector<PackInfo>& loadedPacks();
+// a replacement file of that name in the loaded packs (case-insensitive), "" if none
+std::string findPackFile(const std::string& name);
 size_t loadedTextureCount();
 std::string textureStats();  // replacement hits / pending loads (R2_GX_LOG)
 void textureFrame(bool ended);  // around aurora_end_frame: accumulates Aurora's counters

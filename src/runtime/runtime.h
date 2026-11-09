@@ -121,6 +121,8 @@ namespace gfx {
 bool menuOpen();  // gfx/menu.cpp: the settings menu has the controls (the game sees idle pads)
 void setHudAnchoring(bool on);  // gfx/menu.cpp: widescreen HUD pieces at the screen edges (in flight)
 void noteWidenedAspect(float aspect);  // gfx/menu.cpp: a projection aspect a camera was widened to
+void buttonIconsUpdate();  // gfx/button_icons.cpp: Xbox button prompts per the setting and bindings
+void buttonIconsNoteTexture(u32 fmt, u32 w, u32 h, const u8* data, u32 bytes);  // a bound texture (baked prompts)
 void setMenuTiling(bool on);    // gfx/gx_bridge.cpp: widescreen menu backgrounds tiled into the sides
 }
 

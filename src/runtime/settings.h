@@ -31,6 +31,8 @@ struct Settings {
     bool infiniteAmmo = false;  // secondary weapons: torpedoes, bombs, missiles
     // mods
     bool customTextures = true;  // texture packs in the textures folder (Dolphin's format; mods.cpp)
+    // controls
+    bool xboxButtons = true;  // on-screen button prompts as on an Xbox controller (gfx/button_icons.cpp)
 };
 
 Settings& get();

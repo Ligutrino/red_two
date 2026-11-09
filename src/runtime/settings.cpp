@@ -36,6 +36,7 @@ void set(const std::string& key, const std::string& value) {
     else if (key == "infinite_lives") s.infiniteLives = parseBool(value);
     else if (key == "infinite_ammo") s.infiniteAmmo = parseBool(value);
     else if (key == "custom_textures") s.customTextures = parseBool(value);
+    else if (key == "xbox_buttons") s.xboxButtons = parseBool(value);
     else logf("config", "unknown setting '%s'", key.c_str());
 }
 
@@ -115,6 +116,8 @@ void save() {
     fprintf(f, "infinite_ammo=%d\n", s.infiniteAmmo);
     fprintf(f, "# texture packs in the textures folder next to this file (Dolphin's format)\n");
     fprintf(f, "custom_textures=%d\n", s.customTextures);
+    fprintf(f, "# on-screen button prompts: 1 as on an Xbox controller, 0 GameCube\n");
+    fprintf(f, "xbox_buttons=%d\n", s.xboxButtons);
     fclose(f);
 }
 

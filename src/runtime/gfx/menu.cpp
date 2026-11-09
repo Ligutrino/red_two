@@ -877,6 +877,19 @@ void pageControls() {
         startCapture(s_pendingCapture);
         s_pendingCapture = -1;
     }
+    heading("ON-SCREEN BUTTONS");
+    {
+        settings::Settings& st = settings::get();
+        const bool sel = rowBegin("Button prompts", "The buttons the game shows in its prompts: as on an Xbox controller "
+                                                    "(the button each GameCube button is bound to), or the original GameCube ones.");
+        const int cur = st.xboxButtons ? 0 : 1;
+        const int next = choiceStep(cur, 2, selector("prompts", cur == 0 ? "XBOX" : "GAMECUBE", cur > 0, cur < 1, sel), sel);
+        if (next != cur) {
+            st.xboxButtons = next == 0;
+            s_changed = true;
+            buttonIconsUpdate();
+        }
+    }
     heading("INPUT DEVICE");
     {
         const bool sel = rowBegin("Remap", "Which device's bindings this page shows and changes.");
@@ -1287,6 +1300,15 @@ void menuDraw() {
     }
     settings::Settings& s = settings::get();
     modsPoll();
+    // button prompts follow the bindings (a controller connected, a rebind): checked twice a second
+    {
+        static u64 lastIconsTb = 0;
+        const u64 now = tbNow();
+        if (now - lastIconsTb >= kTbClock / 2) {
+            lastIconsTb = now;
+            buttonIconsUpdate();
+        }
+    }
     // volume: (volume / 100)^2 roughly follows loudness; silent in the background if asked
     {
         SDL_Window* win = aurora_get_window();

@@ -100,6 +100,8 @@ add_executable(red_two
     src/runtime/hw/hw.cpp
     src/runtime/hw/gx_fifo.cpp
     src/runtime/gfx/gx_bridge.cpp
+    src/runtime/gfx/tex_dump.cpp
+    src/runtime/gfx/button_icons.cpp
     src/runtime/input.cpp
     src/runtime/settings.cpp
     src/runtime/hle_game.cpp

@@ -157,6 +157,17 @@ void reloadTextures() {
 
 const std::vector<PackInfo>& loadedPacks() { return s_packs; }
 
+std::string findPackFile(const std::string& name) {
+    std::error_code ec;
+    for (const PackInfo& p : s_packs)
+        for (fs::recursive_directory_iterator it(u8(p.path), fs::directory_options::skip_permission_denied, ec), end;
+             it != end; it.increment(ec)) {
+            if (ec) break;
+            if (it->is_regular_file(ec) && ieq(str(it->path().filename()), name.c_str())) return str(it->path());
+        }
+    return {};
+}
+
 size_t loadedTextureCount() {
     size_t n = 0;
     for (const auto& p : s_packs) n += p.textures;

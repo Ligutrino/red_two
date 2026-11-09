@@ -44,6 +44,7 @@ extern "C" __declspec(dllimport) int __stdcall GetSystemMetrics(int);
 extern "C" __declspec(dllimport) int __stdcall ShowWindow(void*, int);
 #include "../hw/gx_fifo.h"
 #include "../mods.h"
+#include "tex_dump.h"
 #include "../runtime.h"
 #include "../settings.h"
 
@@ -458,6 +459,24 @@ void prepareTextures() {
             logf("tex", "map %u: %08X %ux%u fmt %u tlut %u mips %d mode0 %06X mode1 %06X: tex1_%ux%u%s_%016llx%s_%u", m, addr,
                  w, h, fmt, tlut, int(mips), mode0, mode1, w, h, mips ? "_m" : "", (unsigned long long)h64,
                  isPalette(fmt) ? "_<tlut>" : "", fmt);
+        }
+        {  // prompts baked into textures (button_icons.cpp; it only looks at a few sizes)
+            const u32 bytes0 = textureBytes(fmt, w, h, 1);
+            buttonIconsNoteTexture(fmt, w, h, physPtr(addr, bytes0), bytes0);
+        }
+        if (texdump::directory() && !s_copyDests.count(addr)) {  // R2_TEX_DUMP (tex_dump.cpp)
+            const u8* all = physPtr(addr, textureBytes(fmt, w, h, 1));
+            const u8* pal = nullptr;
+            u32 entries = 0, palFmt = 0;
+            if (isPalette(fmt)) {
+                const auto it = s_tlutLoads.find(tlutReg & 0x3FF);
+                if (it != s_tlutLoads.end()) {
+                    entries = it->second.entries;
+                    pal = physPtr(it->second.addr, entries * 2);
+                    palFmt = (tlutReg >> 10) & 3;
+                }
+            }
+            texdump::dump(fmt, w, h, mips, all, palFmt, pal, entries);
         }
         aur(GX_AURORA_LOAD_TEXOBJ);
         fifo::write_u8(u8(m));
@@ -1510,6 +1529,7 @@ bool init(int argc, char** argv) {
     }
     applyDisplaySettings();
     mods::texturesInit();  // texture packs (Dolphin's format) into Aurora's replacement registry
+    buttonIconsUpdate();   // Xbox button prompts (button_icons.cpp)
     static const char* backends[] = {"auto", "D3D11", "D3D12", "Metal", "Vulkan", "OpenGL", "OpenGL ES", "WebGPU", "null"};
     logf("gfx", "Aurora up: %s backend, window %ux%u", backends[info.backend], info.windowSize.width, info.windowSize.height);
     s_enabled = true;

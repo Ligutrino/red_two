@@ -34,6 +34,9 @@ The code generated from your disc ends up in `build/` and is yours alone: never 
   Xbox-style pad the face buttons follow the GameCube positions: A = A (fire), X (left) = B,
   B (right) = X, Y = Y; LT/RT = L/R, RB = Z, right stick = C-stick, Menu = Start. Keyboard: WASD or arrows steer, Space = A (fire),
   Left Shift = B, E = X, Q = Y, R = Z, 1/2 = L/R, Enter = Start, IJKL = C-stick, TFGH = D-pad.
+- The game's button prompts show the Xbox controller's buttons (the one each GameCube button is
+  bound to, e.g. "PRESS (Y)" and SELECT CRAFT's "(B) > pilot"); F1 > Controls > Button prompts
+  switches back to the GameCube ones. The C-stick icon stays.
 - F11 or Alt+Enter toggles fullscreen; `--fullscreen` starts that way.
 - Saves go to `saves/GSWE64_A.raw` (a Memory Card 59 in slot A; the game formats a new one).
   `R2_CARD_A=<path>` uses another card image.
