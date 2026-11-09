@@ -33,3 +33,5 @@ hle     CraftDestroy
 hle     WeaponInit
 hle     WeaponUpdate
 hle     CameraSetup
+# Widescreen: the targeting computer's screen is a 2D quad at corners projected from 3D
+hle     TargetingPass

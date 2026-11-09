@@ -120,6 +120,7 @@ void restartGame();         // main.cpp: start a new instance with the same argu
 namespace gfx {
 bool menuOpen();  // gfx/menu.cpp: the settings menu has the controls (the game sees idle pads)
 void setHudAnchoring(bool on);  // gfx/menu.cpp: widescreen HUD pieces at the screen edges (in flight)
+void noteWidenedAspect(float aspect);  // gfx/menu.cpp: a projection aspect a camera was widened to
 void setMenuTiling(bool on);    // gfx/gx_bridge.cpp: widescreen menu backgrounds tiled into the sides
 }
 

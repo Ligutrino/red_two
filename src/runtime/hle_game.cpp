@@ -146,9 +146,24 @@ void hle_GameFrameDelta(Ctx& c) {
 // ones below take the display aspect, so the game renders and culls for it. Aurora leaves
 // projections that are already wide alone (Aurora patch 0009).
 static std::atomic<float> s_displayAspect{4.f / 3.f};
+// Aspects written into the constants before (the window was resized, or the setting changed):
+// camera objects copied the default when they were created and keep passing the old value.
+static std::atomic<float> s_oldAspects[8];
+static std::atomic<u32> s_oldAspectCount{0};
+
+static bool oldGameAspect(double aspect) {
+    const u32 n = std::min<u32>(s_oldAspectCount.load(std::memory_order_relaxed), 8);
+    for (u32 i = 0; i < n; i++)
+        if (std::abs(aspect - double(s_oldAspects[i].load(std::memory_order_relaxed))) < 0.0005) return true;
+    return false;
+}
 
 void setGameAspect(double aspect) {
-    s_displayAspect.store(float(aspect), std::memory_order_relaxed);
+    const float previous = s_displayAspect.exchange(float(aspect), std::memory_order_relaxed);
+    if (previous != float(aspect) && std::abs(previous - 4.0 / 3.0) > 0.0005 && !oldGameAspect(previous)) {
+        const u32 i = s_oldAspectCount.fetch_add(1, std::memory_order_relaxed);
+        s_oldAspects[i % 8].store(previous, std::memory_order_relaxed);
+    }
     // (The flight camera culls with the camera-object default. HUD cameras built from it, such
     // as the radar globe's, aim off-center; Aurora keeps that offset in the 4:3 HUD layout.
     // 0x8009935C, the HUD's own MTXPerspective calls, stays 4:3.)
@@ -189,40 +204,78 @@ void setGameAspect(double aspect) {
 // trooper's feet below the screen) no longer drop out. The margin stays small and the
 // horizontal fov (+0x130, which e.g. the terrain grid walk 0x7FC269C4 sizes its area by) stays
 // the screen's: a 3x margin overflowed the game's per-frame buffers (heap chunk lists freed
-// with bad pointers in the logos and the menus). Flight keeps an exact volume; its camera is
-// already at the display aspect (setGameAspect) and passes unchanged, like the HUD's.
-// The projection: a full frame opened sideways gets the display's aspect with the game's fov,
-// which Aurora shows as it is (the same picture; anything else the game tests against the
-// projection sees the whole screen); otherwise (taller, letterboxed) the game's own aspect and
-// fov, which Aurora opens. R2_GAME_CULLING=1 keeps the game's own volumes, R2_CULL_MARGIN=<f>
-// sets the margin (1 = exactly the screen).
+// with bad pointers in the logos and the menus). In missions the flight camera (already at the
+// display aspect: setGameAspect) and the rest take kTerrainMargin, the horizontal fov included
+// (the terrain, below).
+// The projection: a full frame opened sideways gets the game's aspect widened r times with the
+// game's fov (4:3 -> the display's aspect; a cinematic camera's 2.105 drawn inside a full
+// 450-line frame, like the take-off, -> 2.105 r), which Aurora shows as it is (the same
+// picture; anything else the game tests against the projection sees the whole screen);
+// otherwise (taller, letterboxed) the game's own aspect and fov, which Aurora opens. The
+// camera's own copy of the projection (+0xA4) follows: the game places the engine glows with
+// it. R2_GAME_CULLING=1 keeps the game's own volumes, R2_CULL_MARGIN=<f> sets the margin (1 =
+// exactly the screen), R2_CAM_LOG=1 logs the camera setups.
 constexpr double kSceneMargin = 1.2;
+constexpr double kTerrainMargin = 1.2;
 
 void hle_CameraSetup(Ctx& c) {
-    const double aspect = c.f[1], fov = c.f[2];
+    double aspect = c.f[1];
+    const double fov = c.f[2];
     const double display = s_displayAspect.load(std::memory_order_relaxed);
+    // A camera object made before the window was resized (or the aspect setting changed) still
+    // holds the aspect it copied then: it is a widened 4:3 camera like the rest, so it takes
+    // today's. (It kept the old one: the flight camera's culling was opened from it and the
+    // radar globe drew squeezed.)
+    if (std::abs(aspect - display) >= 0.0005 && oldGameAspect(aspect)) {
+        aspect = display;
+        c.f[1] = c.ps1[1] = rsingle(display);
+    }
+    // R2_CAM_LOG=1: each camera setup (view, caller, aspect, fov) when it changes
+    static const bool camLog = envFlag("R2_CAM_LOG");
+    if (camLog) {
+        struct Seen {
+            u32 view, lr;
+            float aspect, fov;
+        };
+        static std::vector<Seen> seen;
+        const Seen s{c.r[3], c.lr, float(aspect), float(fov)};
+        Seen* e = nullptr;
+        for (Seen& x : seen)
+            if (x.view == s.view && x.lr == s.lr) e = &x;
+        if (!e || e->aspect != s.aspect || e->fov != s.fov) {
+            if (e) *e = s;
+            else if (seen.size() < 256) seen.push_back(s);
+            logf("cam", "setup view %08X from %08X: aspect %.4f fov %.2f (display %.4f, xfb %u lines)", s.view, s.lr,
+                 aspect, fov, display, viXfbLines());
+        }
+    }
     static const bool gameCulling = envFlag("R2_GAME_CULLING");
-    if (gameCulling || display < 4.0 / 3.0 + 0.01 || !(aspect > 0.5 && aspect < 8.0) || !(fov > 1.0 && fov < 170.0) ||
-        std::abs(aspect - display) < 0.002) {
+    if (gameCulling || display < 4.0 / 3.0 + 0.01 || !(aspect > 0.5 && aspect < 8.0) || !(fov > 1.0 && fov < 170.0)) {
         f_7FC14CEC_orig(c);
         return;
     }
+    const u32 view = c.r[3];
+    const u32 matrix = c.r[4];
+    const u32 craft = playerCraft();
+    // already at the display's aspect (setGameAspect: the flight and HUD cameras): not opened
+    const bool widened = std::abs(aspect - display) < 0.002;
     const u32 lines = viXfbLines();
-    const double k = display * 0.75, v = lines && lines < 408 ? 480.0 / lines : 1.0, r = k / v;
+    const double k = widened ? 1.0 : display * 0.75;
+    const double v = !widened && lines && lines < 408 ? 480.0 / lines : 1.0, r = k / v;
     static const double sceneMargin = [] {
         const char* e = getenv("R2_CULL_MARGIN");
         return e ? std::clamp(atof(e), 1.0, 20.0) : kSceneMargin;
+    }();
+    static const double terrainMargin = [] {
+        const char* e = getenv("R2_TERRAIN_MARGIN");
+        return e ? std::clamp(atof(e), 1.0, 3.0) : kTerrainMargin;
     }();
     // In a letterboxed frame every camera culls for at least the letterboxed picture: the hangar
     // (ship select) renders at 2.105 but sets the camera up once more per frame at 4:3, and that
     // volume decides what is there (the bay's sides popped in as the camera panned).
     const double base = v > 1.0 ? std::max(aspect, 4.0 / 3.0 * v) : aspect;
-    const u32 craft = playerCraft();
-    const bool flying = v == 1.0 && craft && rd32(craft + 0x370) == 0;
-    const double margin = flying ? 1.0 : sceneMargin;
+    const double margin = craft ? terrainMargin : sceneMargin;
     constexpr double kRad = 3.14159265358979323846 / 180.0;
-    const u32 view = c.r[3];
-    const u32 matrix = c.r[4];
     auto setup = [&](double m) {  // the volume opened for the screen, m times more
         const double wider = std::max(1.0, r) * m, taller = std::max(1.0, 1.0 / r) * m;
         c.r[3] = view;  // (the call keeps the non-volatile registers; arguments again)
@@ -231,16 +284,62 @@ void hle_CameraSetup(Ctx& c) {
         c.f[2] = c.ps1[2] = rsingle(std::min(2.0 * std::atan(std::tan(fov * 0.5 * kRad) * taller) / kRad, 170.0));
         f_7FC14CEC_orig(c);
     };
+    if (widened && margin == 1.0) {
+        f_7FC14CEC_orig(c);
+        return;
+    }
+    // Outside missions the horizontal fov stays the screen's (see above); in missions it takes
+    // the margin too: the terrain (the Death Star's surface) is laid out from it and the volume,
+    // whole tiles inside them, and past ~90 degrees (the cockpit's 55-degree view at 21:9) the
+    // tiles at the sides dropped out in a sawtooth that showed.
     u32 hfov = 0;
-    if (margin != 1.0) {
+    if (margin != 1.0 && !craft) {
         setup(1.0);
         hfov = rd32(view + 0x130);
     }
     setup(margin);
     if (hfov) wr32(view + 0x130, hfov);
+    // The projection. A full frame opened sideways: the game's view widened r times (4:3 ->
+    // the display's aspect; a cinematic camera's 2.105 inside a full frame -> 2.105 r), which
+    // Aurora is told to show as it is. Otherwise (letterboxed, or a display taller than the
+    // camera) the game's own, which Aurora opens.
     const bool sideways = v == 1.0 && r >= 1.0;
-    wr32(view + 0x12C, d2s(sideways ? display : aspect));
+    const double projAspect = sideways ? aspect * r : aspect;
+    if (sideways) gfx::noteWidenedAspect(float(projAspect));
+    wr32(view + 0x12C, d2s(projAspect));
     wr32(view + 0x134, d2s(fov));
+    // The camera keeps its own copy of the projection (+0xA4, and +0xE4 derived from it; built
+    // by 0x7FC14B8C from the aspect, fov and near/far): the game projects points with it, e.g.
+    // to place the engine glows. Built for the culling volume above, it put them closer to the
+    // center than the ships' engines; rebuilt here for the projection that is shown.
+    c.r[3] = view;
+    c.r[4] = view + 0xA4;
+    c.r[5] = view + 0xE4;
+    f_7FC14B8C(c);
+}
+
+// The targeting computer (cockpit view, Y). TargetingRect (0x7FCD5D08) projects the corners of
+// its screen with the camera's projection (+0xA4) to 640x480 screen units, and TargetingPass
+// (0x7FCD7D28, each frame pass) draws the orange screen there as a 2D quad and copies the EFB
+// under it. In widescreen those
+// are positions on the widened screen; Aurora laid the quad out like any 4:3 2D element and
+// squeezed it a second time. The drawing is bracketed for the bridge (gfx/gx_bridge.cpp,
+// screenSpace2D) by BP writes to an unused register, through the gather pipe so they stay in
+// order with the game's commands.
+static void gatherBp(u32 v) {
+    wr8(0xCC008000, 0x61);
+    wr32(0xCC008000, v);
+}
+
+void hle_TargetingPass(Ctx& c) {
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        logf("wide", "targeting computer screen drawn in screen space");
+    }
+    gatherBp(0x7E5C5201);
+    f_7FCD7D28_orig(c);
+    gatherBp(0x7E5C5200);
 }
 
 // Infinite lives (settings): LoseLife (0x7FD7648C) decrements the lives byte at 0x800962EE

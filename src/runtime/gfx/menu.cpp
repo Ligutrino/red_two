@@ -1213,6 +1213,20 @@ void setHudAnchoring(bool on) {
     if (on != last) AuroraSetHudAnchoring(last = on);
 }
 
+// Perspective aspects the game's cameras were widened to (hle_CameraSetup): Aurora shows those
+// projections as they are. The latest 8; Aurora hears of each new one once.
+void noteWidenedAspect(float aspect) {
+    static float list[8] = {};
+    static u32 count = 0, next = 0;
+    for (u32 i = 0; i < count; i++)
+        if (std::abs(list[i] - aspect) < 0.0005f) return;
+    list[next] = aspect;
+    next = (next + 1) % 8;
+    count = std::min<u32>(count + 1, 8);
+    AuroraSetWidenedAspects(list, count);
+    logf("wide", "widened camera aspect %.4f", aspect);
+}
+
 void menuImGuiInit(const void*) {
     ImGuiIO& io = ImGui::GetIO();
     // the menu does its own navigation (above); ImGui's would move a second cursor

@@ -38,6 +38,10 @@
 
 // user32 SetWindowPos without pulling <windows.h> into this file (its macros clash with GX names).
 extern "C" __declspec(dllimport) int __stdcall SetWindowPos(void*, void*, int, int, int, int, unsigned);
+extern "C" __declspec(dllimport) long long __stdcall GetWindowLongPtrW(void*, int);
+extern "C" __declspec(dllimport) long long __stdcall SetWindowLongPtrW(void*, int, long long);
+extern "C" __declspec(dllimport) int __stdcall GetSystemMetrics(int);
+extern "C" __declspec(dllimport) int __stdcall ShowWindow(void*, int);
 #include "../hw/gx_fifo.h"
 #include "../mods.h"
 #include "../runtime.h"
@@ -690,14 +694,42 @@ void sendProjection(float shiftX = 0.f, bool mirror = false, float axis = 0.f) {
     for (u32 w : pr) fifo::write_u32(w);
 }
 
+// --- screen-space 2D ---------------------------------------------------------------------
+// The targeting computer (cockpit view, Y) draws its orange screen as a 2D quad in 640x480
+// screen units at corners the game projected from 3D with the camera's own projection, which
+// widescreen already made wide: those are positions on the widened screen, and Aurora's 4:3
+// layout for 2D squeezed the quad a second time (the screen came out narrower than its frame by
+// the widening, and the targets it shows did not line up). hle_TargetingPass brackets that
+// drawing with a BP write to an unused register (never forwarded); orthographic draws in
+// screen units (not the identity projection: the centered reticle diamond keeps its shape)
+// inside it go to Aurora as screen space (GX_AURORA_SET_SCREEN_SPACE_2D).
+constexpr u8 kScreenSpaceMarker = 0x7E;
+constexpr u32 kScreenSpaceMagic = 0x5C5200;
+bool s_screenSpaceWindow = false, s_screenSpaceSent = false;
+
+void screenSpace2D() {
+    const bool want = s_screenSpaceWindow && s_projKnown && s_xfProj[6] != 0 && asFloat(s_xfProj[0]) != 1.f;
+    if (want == s_screenSpaceSent) return;
+    s_screenSpaceSent = want;
+    static int logs = 0;
+    if (s_copyLog && logs < 20) {
+        logs++;
+        logf("gfx", "screen-space 2D %s (projection p0 %g)", want ? "on" : "off", asFloat(s_xfProj[0]));
+    }
+    aur(GX_AURORA_SET_SCREEN_SPACE_2D);
+    fifo::write_u8(want ? 1 : 0);
+}
+
 // Debugging: R2_GX_SKIP=<first>-<last>:<filter>[;...] drops the draws matching <filter> while
-// the retrace count (vblanks, as in R2_INPUT) is in [first, last]. Filters: v<VCD low hex> (e.g. v1E00),
+// the retrace count is in [first, last] (s<first>-<last>: seconds since the start instead; the
+// retrace count runs ahead while a cinematic is skipped, and with the frame rate). Filters: v<VCD low hex> (e.g. v1E00),
 // p<primitive hex> (e.g. pB8), t<map 0 image address hex> (BP 0x94 value, e.g. t47F9B),
 // b<BP 0x41 blend mode hex>, z<BP 0x40 z mode hex>, i<first>-<last> (draw index within the
 // frame, decimal), or * (everything). One rule per window: screenshots taken
 // meanwhile show what each group of draws is.
 struct SkipRule {
     u64 first, last;
+    bool seconds;
     char kind;
     u32 value, value2;
 };
@@ -707,6 +739,8 @@ std::vector<SkipRule> parseSkipRules() {
     while (s && *s) {
         char* end;
         SkipRule r{};
+        r.seconds = *s == 's';
+        if (r.seconds) s++;
         r.first = strtoull(s, &end, 10);
         r.last = *end == '-' ? strtoull(end + 1, &end, 10) : r.first;
         if (*end != ':') break;
@@ -732,7 +766,9 @@ bool skipDraw(u8 op) {
     static u64 announced = ~0ull;
     for (size_t i = 0; i < rules.size(); i++) {
         const SkipRule& r = rules[i];
-        if (s_vblanks < r.first || s_vblanks > r.last) continue;
+        static const u64 startTb = tbNow();
+        const u64 now = r.seconds ? (tbNow() - startTb) / kTbClock : s_vblanks;
+        if (now < r.first || now > r.last) continue;
         if (announced != i) {
             announced = i;
             logf("gfx", "skip rule %zu active (vblank %llu, frame %llu)", i, (unsigned long long)s_vblanks, (unsigned long long)s_frames);
@@ -1168,6 +1204,7 @@ void onCommand(const u8* p, u32 len) {
         if (skipDraw(op)) [[unlikely]]
             return;
         if (s_seamPending && !isTileDraw()) seamBlend();  // the background is complete
+        screenSpace2D();
         prepareArrays(p);
         prepareTextures();
         // Aurora merges consecutive draws with unchanged state. That broke on this game's
@@ -1225,6 +1262,10 @@ void onCommand(const u8* p, u32 len) {
     case 0x61: {  // BP register
         const u32 raw = be32(p + 1);
         const u8 reg = u8(raw >> 24);
+        if (reg == kScreenSpaceMarker && (raw & 0xFFFFFE) == kScreenSpaceMagic) {
+            s_screenSpaceWindow = raw & 1;  // hle_TargetingPass's bracket: not for the GPU (and
+            return;                         // a pending BP mask stays for the game's next write)
+        }
         if (reg == 0xFE) {
             s_bpMask = raw & 0xFFFFFF;
             fifo::write_data(p, len);
@@ -1355,6 +1396,18 @@ void onCommand(const u8* p, u32 len) {
 void sendToBack(void* hwnd) {
     constexpr unsigned SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOACTIVATE = 0x10;
     SetWindowPos(hwnd, reinterpret_cast<void*>(1) /* HWND_BOTTOM */, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+    // Out of the way entirely: left of every monitor and without a taskbar button (a tool
+    // window), so a test run cannot be clicked, closed or minimized by someone working at the
+    // machine. DWM still renders it, and PrintWindow still captures it. R2_ONSCREEN=1 keeps it
+    // visible.
+    if (envFlag("R2_ONSCREEN")) return;
+    constexpr int GWL_EXSTYLE = -20, SM_XVIRTUALSCREEN = 76, SW_HIDE = 0, SW_SHOWNOACTIVATE = 4;
+    constexpr long long WS_EX_TOOLWINDOW = 0x80, WS_EX_APPWINDOW = 0x40000;
+    ShowWindow(hwnd, SW_HIDE);  // (the taskbar only drops the button of a hidden window)
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW);
+    SetWindowPos(hwnd, reinterpret_cast<void*>(1), GetSystemMetrics(SM_XVIRTUALSCREEN) - 8000, 0, 0, 0,
+                 SWP_NOSIZE | SWP_NOACTIVATE);
+    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 }
 
 void logCallback(AuroraLogLevel level, const char* module, const char* message, unsigned int len) {
@@ -1466,9 +1519,42 @@ bool init(int argc, char** argv) {
     return true;
 }
 
+// R2_RESIZE="<seconds>:<w>x<h>[,...]": resize the window at those times (tests of what a
+// player's resizing does, e.g. with the aspect matching the window)
+static void scriptedResize() {
+    struct Resize {
+        u64 tb;
+        int w, h;
+    };
+    static std::vector<Resize> list = [] {
+        std::vector<Resize> v;
+        if (const char* e = getenv("R2_RESIZE")) {
+            for (const char* p = e; *p;) {
+                double s = 0;
+                int w = 0, h = 0;
+                if (sscanf(p, "%lf:%dx%d", &s, &w, &h) == 3 && w >= 160 && h >= 120)
+                    v.push_back({u64(s * double(kTbClock)), w, h});
+                const char* comma = strchr(p, ',');
+                if (!comma) break;
+                p = comma + 1;
+            }
+        }
+        return v;
+    }();
+    if (list.empty()) return;
+    static const u64 start = tbNow();
+    if (tbNow() - start < list.front().tb) return;
+    if (SDL_Window* w = aurora_get_window()) {
+        SDL_SetWindowSize(w, list.front().w, list.front().h);
+        logf("gfx", "R2_RESIZE: window %dx%d", list.front().w, list.front().h);
+    }
+    list.erase(list.begin());
+}
+
 void vblank() {
     s_vblanks++;
     if (!s_enabled) return;
+    scriptedResize();
     input::poll();
     // Keep the window responsive (and closable) while the game is not presenting: loading
     // screens, or a frame that never ends. Polling only reads SDL events, so it is safe mid-frame.
