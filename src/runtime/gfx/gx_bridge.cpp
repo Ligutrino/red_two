@@ -39,6 +39,7 @@
 // user32 SetWindowPos without pulling <windows.h> into this file (its macros clash with GX names).
 extern "C" __declspec(dllimport) int __stdcall SetWindowPos(void*, void*, int, int, int, int, unsigned);
 #include "../hw/gx_fifo.h"
+#include "../mods.h"
 #include "../runtime.h"
 #include "../settings.h"
 
@@ -230,7 +231,9 @@ void endFrame() {
     if (!s_inFrame) return;
     menuDraw();
     const u64 endStart = tbNow();
+    mods::textureFrame(false);  // (Aurora's replacement counters reset at the end of a frame)
     aurora_end_frame();
+    mods::textureFrame(true);
     frameLog(endStart, tbNow());
     tileFrameEnd();
     s_inFrame = false;
@@ -444,10 +447,13 @@ void prepareTextures() {
         const u32 tlut = isPalette(fmt) ? bindTlut(tlutReg) : 0;
         static const bool logTex = envFlag("R2_TEX_LOG");
         if (logTex) {
-            u32 sum = 0;
-            for (int i = 0; i < 64; i++) sum += host[i];
-            logf("tex", "map %u: %08X %ux%u fmt %u tlut %u mips %d mode0 %06X mode1 %06X (first 64 bytes sum %u)", m, addr, w, h,
-                 fmt, tlut, int(mips), mode0, mode1, sum);
+            // with Dolphin's replacement name (tex1_<w>x<h>[_m]_<XXH64 of level 0>[_<palette>]_<fmt>)
+            const u32 bytes0 = textureBytes(fmt, w, h, 1);
+            const u8* all = physPtr(addr, bytes0);
+            const u64 h64 = all ? XXH64(all, bytes0, 0) : 0;
+            logf("tex", "map %u: %08X %ux%u fmt %u tlut %u mips %d mode0 %06X mode1 %06X: tex1_%ux%u%s_%016llx%s_%u", m, addr,
+                 w, h, fmt, tlut, int(mips), mode0, mode1, w, h, mips ? "_m" : "", (unsigned long long)h64,
+                 isPalette(fmt) ? "_<tlut>" : "", fmt);
         }
         aur(GX_AURORA_LOAD_TEXOBJ);
         fifo::write_u8(u8(m));
@@ -1450,6 +1456,7 @@ bool init(int argc, char** argv) {
         }
     }
     applyDisplaySettings();
+    mods::texturesInit();  // texture packs (Dolphin's format) into Aurora's replacement registry
     static const char* backends[] = {"auto", "D3D11", "D3D12", "Metal", "Vulkan", "OpenGL", "OpenGL ES", "WebGPU", "null"};
     logf("gfx", "Aurora up: %s backend, window %ux%u", backends[info.backend], info.windowSize.width, info.windowSize.height);
     s_enabled = true;
@@ -1480,7 +1487,9 @@ std::string stats() {
              st->drawCallCount, st->mergedDrawCallCount, st->queuedPipelines, st->createdPipelines, st->lastVertSize / 1024,
              st->lastTextureUploadSize / 1024, (unsigned long long)s_arraySends, (unsigned long long)(s_arrayBytes >> 20));
     s_arraySends = s_arrayBytes = 0;
-    return b;
+    std::string out = b;
+    if (mods::loadedTextureCount()) out += "; " + mods::textureStats();
+    return out;
 }
 
 }  // namespace rt::gfx

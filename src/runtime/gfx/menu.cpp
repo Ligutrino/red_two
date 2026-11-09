@@ -15,6 +15,7 @@
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_joystick.h>
+#include <SDL3/SDL_misc.h>
 #include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_video.h>
 #include <aurora/aurora.h>
@@ -29,10 +30,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
 #include "../hw/musyx_dsp.h"
+#include "../mods.h"
 #include "../runtime.h"
 #include "../settings.h"
 
@@ -190,8 +193,8 @@ bool padTest() {
     return on;
 }
 
-enum Section { Display, Gameplay, Audio, Controls, Cheats, SectionCount };
-const char* const kSectionNames[SectionCount] = {"DISPLAY", "GAMEPLAY", "AUDIO", "CONTROLS", "CHEATS"};
+enum Section { Display, Gameplay, Audio, Controls, Cheats, Mods, SectionCount };
+const char* const kSectionNames[SectionCount] = {"DISPLAY", "GAMEPLAY", "AUDIO", "CONTROLS", "CHEATS", "MODS"};
 int s_section = 0;
 int s_rowSel[SectionCount] = {};    // each page's selected row
 int s_rowCount[SectionCount] = {};  // the rows each page had when it was last drawn
@@ -482,7 +485,10 @@ bool rowBegin(const char* text, const char* help) {
     if (sel) {
         dl->AddRectFilledMultiColor(a, b, alpha(kHolo, 50), alpha(kHolo, 4), alpha(kHolo, 4), alpha(kHolo, 50));
         dl->AddRectFilled(a, ImVec2(a.x + 4.f * s_ui, b.y), kAmber);
-        s_help = help;
+        // (copied: some pages build their descriptions on the fly)
+        static std::string helpText;
+        helpText = help ? help : "";
+        s_help = help ? helpText.c_str() : nullptr;
         if (s_scrollToSel) {
             s_scrollToSel = false;
             if (idx == 0) ImGui::SetScrollY(0.f);  // the page's first heading too
@@ -713,6 +719,157 @@ void pageCheats(settings::Settings& s) {
     if (toggleRow("Infinite bombs", s.infiniteAmmo, "Torpedoes, bombs and missiles never run out.")) s_changed = true;
 }
 
+// --- mods: texture packs, codes, importing from Dolphin -------------------------------------
+mods::DolphinScan s_dolphin;       // what Dolphin has for this game (scanned when the page shows)
+bool s_dolphinScanned = false;
+bool s_confirmSave = false;        // the save import asks for a second press
+std::string s_modsStatus;          // the last import's outcome
+
+std::string gigabytes(uint64_t b) {
+    char t[32];
+    // (binary units, as Explorer shows them)
+    snprintf(t, sizeof t, b >= (1ull << 30) ? "%.1f GB" : "%.0f MB", b >= (1ull << 30) ? double(b) / double(1ull << 30) : double(b) / double(1ull << 20));
+    return t;
+}
+
+void openFolder(const std::string& dir) {
+    std::string url = "file:///";
+    for (char c : dir) {
+        if (c == '\\') url += '/';
+        else if (c == ' ') url += "%20";
+        else url += c;
+    }
+    SDL_OpenURL(url.c_str());
+}
+
+// a texture pack copy finished (the menu may be closed by then): load what it brought
+void modsPoll() {
+    mods::CopyProgress& copy = mods::packCopy();
+    if (!copy.done.exchange(false)) return;
+    s_modsStatus = copy.message;
+    if (!copy.failed) mods::reloadTextures();
+    s_dolphinScanned = false;  // (now up to date)
+}
+
+void pageMods(settings::Settings& s) {
+    if (!s_dolphinScanned) {
+        s_dolphin = mods::scanDolphin();
+        s_dolphinScanned = true;
+    }
+    modsPoll();
+    const mods::CopyProgress& copy = mods::packCopy();
+
+    heading("TEXTURE PACKS");
+    {
+        const auto& packs = mods::loadedPacks();
+        std::string help;
+        if (!s.customTextures) help = "Replacement textures in Dolphin's format, from Red Two's textures folder.";
+        else if (packs.empty()) help = "No texture pack for Rogue Leader in Red Two's textures folder yet.";
+        else help = std::to_string(mods::loadedTextureCount()) + " replacement textures loaded (Dolphin's format).";
+        if (toggleRow("Custom textures", s.customTextures, help.c_str())) {
+            s_changed = true;
+            mods::setTexturesEnabled(s.customTextures);
+        }
+    }
+    if (buttonRow("Textures folder", "OPEN", "Opens Red Two's textures folder: packs go in a GSWE64 folder inside, as in Dolphin.")) {
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path(std::u8string(mods::texturesDir().begin(), mods::texturesDir().end())), ec);
+        openFolder(mods::texturesDir());
+    }
+
+    heading("CODES");
+    const auto list = mods::codesSnapshot();
+    if (list.empty())
+        ImGui::TextDisabled("None yet: import Dolphin's below, or add Gecko / Action Replay codes to codes.ini.");
+    for (size_t i = 0; i < list.size(); i++) {
+        const mods::Code& c = list[i];
+        ImGui::PushID(int(i));
+        static const char* kinds[] = {"Gecko code", "Action Replay code", "Patch"};
+        std::string help = std::string(kinds[int(c.kind)]) + (c.creator.empty() ? "" : " by " + c.creator) +
+                           (c.notes.empty() ? "." : ": " + c.notes);
+        if (c.supported) {
+            bool v = c.enabled;
+            if (toggleRow(c.name.c_str(), v, help.c_str())) mods::setCodeEnabled(i, v);
+        } else {
+            buttonRow(c.name.c_str(), "NOT SUPPORTED", c.why.c_str(), kDim);
+        }
+        ImGui::PopID();
+    }
+
+    heading("IMPORT FROM DOLPHIN");
+    if (!s_dolphin.found) {
+        ImGui::TextDisabled("Dolphin was not found on this PC.");
+        return;
+    }
+    {  // save
+        const bool have = !s_dolphin.saves.empty();
+        std::string help = "No Rogue Leader save in Dolphin's memory cards.";
+        if (have) {
+            const mods::DolphinSave& sv = s_dolphin.saves.front();
+            help = "Saved " + sv.when + " in " + sv.where + ". Replaces Red Two's save (old card kept in saves\\backup), restarts.";
+        }
+        const int row = s_row;
+        const bool pressed = buttonRow("Save data", !have ? "NONE FOUND" : s_confirmSave ? "PRESS AGAIN: REPLACE" : "IMPORT",
+                                       help.c_str(), have ? (s_confirmSave ? kAmber : kText) : kDim);
+        if (s_rowSel[s_section] != row) s_confirmSave = false;
+        if (pressed && have) {
+            if (!s_confirmSave) {
+                s_confirmSave = true;
+            } else {
+                s_confirmSave = false;
+                std::string msg;
+                if (mods::importSave(s_dolphin.saves.front(), msg)) {
+                    restartGame();  // (returns only if it could not start the new instance)
+                    msg += " Restart Red Two to play with it.";
+                }
+                s_modsStatus = msg;
+            }
+        }
+    }
+    {  // texture packs
+        const bool have = !s_dolphin.packs.empty();
+        size_t files = 0;
+        uint64_t bytes = 0;
+        for (const auto& p : s_dolphin.packs) files += p.files, bytes += p.bytes;
+        bool imported = have;
+        for (const auto& p : s_dolphin.packs) imported &= p.imported;
+        std::string caption = !have ? "NONE FOUND" : imported ? "UP TO DATE" : "IMPORT";
+        if (copy.running) {
+            const uint64_t t = copy.bytesTotal, d = copy.bytesDone;
+            caption = "COPYING " + std::to_string(t ? int(d * 100 / t) : 0) + "%";
+        }
+        std::string help = "No Rogue Leader texture pack in Dolphin's Load\\Textures folder.";
+        if (have)
+            help = std::to_string(files) + " files (" + gigabytes(bytes) + ")" + (imported ? ", already copied from " : ", copied from ") +
+                   s_dolphin.packs.front().path;
+        if (buttonRow("Texture pack", caption.c_str(), help.c_str(), have ? (copy.running ? kAmber : kText) : kDim) && have &&
+            !copy.running) {
+            s_modsStatus.clear();
+            mods::startPackImport(s_dolphin.packs);
+        }
+    }
+    {  // codes
+        const bool have = !s_dolphin.codes.empty();
+        size_t on = 0;
+        for (const auto& c : s_dolphin.codes) on += c.enabled;
+        const size_t n = s_dolphin.codes.size();
+        const std::string help = have ? std::to_string(n) + (n == 1 ? " code" : " codes") + " for this game in Dolphin (" +
+                                            std::to_string(on) + " enabled there), kept on or off as they are there."
+                                      : "Dolphin has no codes for Rogue Leader.";
+        if (buttonRow("Codes", have ? "IMPORT" : "NONE FOUND", help.c_str(), have ? kText : kDim) && have) {
+            std::string msg;
+            mods::importCodes(s_dolphin, msg);
+            s_modsStatus = msg;
+        }
+    }
+    if (!s_modsStatus.empty()) {
+        ImGui::Dummy(ImVec2(0, 4.f * s_ui));
+        ImGui::PushStyleColor(ImGuiCol_Text, vec(kHolo));
+        ImGui::TextWrapped("%s", s_modsStatus.c_str());
+        ImGui::PopStyleColor();
+    }
+}
+
 void pageControls() {
     const auto rows = controlRows();
     finishCapture(rows);
@@ -913,6 +1070,7 @@ bool drawMenu(settings::Settings& s, float t) {
         case Audio: pageAudio(s); break;
         case Controls: pageControls(); break;
         case Cheats: pageCheats(s); break;
+        case Mods: pageMods(s); break;
         }
         ImGui::Dummy(ImVec2(0, 8.f * s_ui));
         s_rowCount[s_section] = s_row;
@@ -1035,6 +1193,8 @@ void padSelfTest() {
 
 void setOpen(bool open) {
     if (!open) cancelCapture();
+    if (open) s_dolphinScanned = false;  // Dolphin's files may have changed meanwhile
+    s_confirmSave = false;
     s_open = open;
     s_focus = open;
     s_navFresh = true;
@@ -1112,6 +1272,7 @@ void menuDraw() {
         else if (w && h) setGameAspect(double(w) / double(h));
     }
     settings::Settings& s = settings::get();
+    modsPoll();
     // volume: (volume / 100)^2 roughly follows loudness; silent in the background if asked
     {
         SDL_Window* win = aurora_get_window();

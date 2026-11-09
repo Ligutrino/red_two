@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "../mods.h"
 #include "../runtime.h"
 #include "gx_fifo.h"
 #include "musyx_dsp.h"
@@ -142,6 +143,7 @@ void onVi() {
     viUpdateIrq();
     siPollAll();
     cardFlushAll();
+    mods::codesFrame();  // Gecko / Action Replay codes and patches, like Dolphin once per field
     viFrameHook();
     // The timer fires a little late every time (and the guest may be busy for a moment): counting
     // the next period from the actual retrace ran 60 fps at ~59 and 144 at ~139. Schedule early by
@@ -505,6 +507,7 @@ struct MemCard {
     u32 addr = 0;
     u32 dirtyLo = ~0u, dirtyHi = 0;
     FILE* file = nullptr;  // the image, open for the whole session
+    bool detached = false;  // a save was imported into the file: the game's writes stay in memory
 } s_card[2];
 constexpr u32 kCardLatency = 4;  // dummy bytes between a read command and its data
 
@@ -519,7 +522,7 @@ void cardMarkDirty(MemCard& m, u32 lo, u32 hi) {
 // kept open: opening the file for every 128-byte page program cost several milliseconds each
 // on Windows (file-open scanning), so saving stalled the game for seconds.
 void cardFlush(MemCard& m) {
-    if (m.dirtyLo >= m.dirtyHi || m.path.empty()) return;
+    if (m.dirtyLo >= m.dirtyHi || m.path.empty() || m.detached) return;
     if (!m.file) m.file = fopen(m.path.c_str(), "r+b");
     if (m.file && fseek(m.file, long(m.dirtyLo), SEEK_SET) == 0 &&
         fwrite(m.data.data() + m.dirtyLo, 1, m.dirtyHi - m.dirtyLo, m.file) == m.dirtyHi - m.dirtyLo &&
@@ -560,6 +563,37 @@ void cardInit(int slot, const std::string& path) {
     static const bool atExit = [] { return std::atexit(cardFlushAll) == 0; }();
     (void)atExit;
 }
+
+}  // namespace (reopened below)
+
+// --- card images for the save importer (runtime.h) ----------------------------------------
+std::string cardImagePath(int slot) {
+    if (slot != 0) return {};
+    const char* env = getenv("R2_CARD_A");
+    return env && *env ? env : "saves/GSWE64_A.raw";
+}
+
+bool cardCurrentImage(int slot, std::vector<u8>& out) {
+    MemCard& m = s_card[slot & 1];
+    if (!m.present) return false;
+    cardFlush(m);
+    out = m.data;
+    return true;
+}
+
+// The importer wrote a new image to the file: the running game keeps the card it mounted
+// (its save is already in RAM and would be written back over the import), so from now on the
+// card lives in memory only. The player restarts to play with the imported save.
+void cardDetach(int slot) {
+    MemCard& m = s_card[slot & 1];
+    m.detached = true;
+    if (m.file) {
+        fclose(m.file);
+        m.file = nullptr;
+    }
+}
+
+namespace {
 
 // A formatted card's header serial is the console's flash ID scrambled by a generator seeded
 // with the format time (CARDFormat; checked by VerifyID). Recover the flash ID from it so a
@@ -1125,8 +1159,7 @@ void hwInit() {
     sramInit();
     // Memory card in slot A: R2_CARD_A=<path> (default saves/GSWE64_A.raw), R2_NO_CARD=1 for none.
     if (!envFlag("R2_NO_CARD")) {
-        const char* env = getenv("R2_CARD_A");
-        const std::string path = env && *env ? env : "saves/GSWE64_A.raw";
+        const std::string path = cardImagePath(0);
         std::error_code ec;
         const auto dir = std::filesystem::path(path).parent_path();
         if (!dir.empty()) std::filesystem::create_directories(dir, ec);

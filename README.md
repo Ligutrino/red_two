@@ -36,7 +36,19 @@ The code generated from your disc ends up in `build/` and is yours alone: never 
   Left Shift = B, E = X, Q = Y, R = Z, 1/2 = L/R, Enter = Start, IJKL = C-stick, TFGH = D-pad.
 - F11 or Alt+Enter toggles fullscreen; `--fullscreen` starts that way.
 - Saves go to `saves/GSWE64_A.raw` (a Memory Card 59 in slot A; the game formats a new one).
-  `R2_CARD_A=<path>` uses another card image, for example a Dolphin `.raw` card.
+  `R2_CARD_A=<path>` uses another card image.
+- **Mods** (F1, MODS tab): texture packs in Dolphin's format go in
+  `%APPDATA%\Red Two\textures\` (a `GSWE64` folder inside, exactly as in Dolphin's
+  `Load\Textures`; `.dds` and `.png`, mip files and wildcards work). Gecko / Action Replay codes and
+  patches go in `%APPDATA%\Red Two\codes.ini` (Dolphin's GameSettings format) and can be switched
+  in the menu. The game is recompiled ahead of time, so codes that change its code (Gecko C2
+  "insert ASM", writes into code) cannot work; the menu marks them as not supported.
+- **Importing from Dolphin**: MODS -> IMPORT FROM DOLPHIN, or
+  `red_two.exe --import-dolphin[=saves,textures,codes] --console`. Red Two finds Dolphin's user
+  folder (AppData, Documents, a portable install, the registry, a custom Load folder in
+  `Dolphin.ini`) and brings over this game's newest save (from GCI folders or `.raw` cards; the
+  previous card is kept in `saves\backup`, and the game restarts), its texture packs (copied) and
+  its codes (with their on/off states). `R2_DOLPHIN_DIR=<User folder>` points it elsewhere.
 - `R2_NO_AUDIO=1` runs without sound. The log goes to `red_two.log` (or `--console` for a
   console window).
 

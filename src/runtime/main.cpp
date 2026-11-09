@@ -1,6 +1,6 @@
 // Red Two: boots the recompiled game.
 //
-//   red_two.exe [--disc <GSWE64.iso>] [--trace]
+//   red_two.exe [--disc <GSWE64.iso>] [--trace] [--import-dolphin[=saves,textures,codes]]
 //
 // Environment: R2_IO_LOG=1 (every hardware register access), R2_DVD_LOG=1, R2_DSP_LOG=1,
 // R2_ARAM_LOG=1, R2_TRACE=1 (record guest function entries; ring dumped on fatal errors).
@@ -17,6 +17,7 @@
 
 #include "gfx/gx_bridge.h"
 #include "hw/gx_fifo.h"
+#include "mods.h"
 #include "runtime.h"
 #include "settings.h"
 #include "../common/disc_image.h"
@@ -62,6 +63,25 @@ void quit(int code) {
     fflush(stdout);
     fflush(stderr);
     TerminateProcess(GetCurrentProcess(), UINT(code));
+}
+
+// After a save import: the game read its save at boot, so a new instance (same program, same
+// arguments, same working folder) takes over and this one quits.
+void restartGame() {
+    wchar_t exe[MAX_PATH];
+    if (!GetModuleFileNameW(nullptr, exe, MAX_PATH)) return;
+    std::wstring cmd = GetCommandLineW();
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(exe, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        logf("main", "restart failed (error %lu)", GetLastError());
+        return;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    logf("main", "restarting");
+    quit(0);
 }
 
 static LONG WINAPI onHostCrash(EXCEPTION_POINTERS* ep) {
@@ -374,6 +394,12 @@ int main(int argc, char** argv) {
     }
     eventsInit();
     settings::load();  // after eventsInit: logging needs the time base
+    // --import-dolphin[=saves,textures,codes]: bring this game's things over from Dolphin, exit
+    for (int i = 1; i < argc; i++) {
+        if (!strncmp(argv[i], "--import-dolphin", 16) && (argv[i][16] == 0 || argv[i][16] == '='))
+            quit(mods::importCommandLine(argv[i][16] ? argv[i] + 17 : ""));
+    }
+    mods::codesInit();  // cheat codes (codes.ini), applied every retrace
     viSetRate(settings::get().fps);
     profilerStart();
     s_t0Tb = tbNow();
@@ -396,6 +422,10 @@ int main(int argc, char** argv) {
     const u32 entry = bootDisc();
     if (!envFlag("R2_NO_GFX")) gfx::init(argc, argv);
     else input::init(false);  // scripted input still works without a renderer
+    if (envFlag("R2_RESTART_TEST")) {  // the save importer's restart, once (the new instance runs on)
+        _putenv("R2_RESTART_TEST=");
+        restartGame();
+    }
     audio::init();
     hwInit();
     c.msr = 0x2032;  // FP, IR, DR, RI; interrupts off until the OS enables them

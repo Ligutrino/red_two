@@ -103,6 +103,10 @@ add_executable(red_two
     src/runtime/input.cpp
     src/runtime/settings.cpp
     src/runtime/hle_game.cpp
+    src/runtime/mods.cpp
+    src/runtime/codes.cpp
+    src/runtime/card_image.cpp
+    src/runtime/dolphin_import.cpp
     src/runtime/gfx/menu.cpp)
 target_include_directories(red_two PRIVATE src/runtime "${GEN_DIR}" extern/aurora/lib)
 # Program icon: your own res/icon.ico (not in the repository), built in when it exists.

@@ -29,6 +29,8 @@ struct Settings {
     bool invincible = false;
     bool infiniteLives = false;
     bool infiniteAmmo = false;  // secondary weapons: torpedoes, bombs, missiles
+    // mods
+    bool customTextures = true;  // texture packs in the textures folder (Dolphin's format; mods.cpp)
 };
 
 Settings& get();
