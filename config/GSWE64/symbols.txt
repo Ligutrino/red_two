@@ -44,3 +44,12 @@
 7FD89784 TerrainTeardown         # frees the terrain's buffers (mission end)
 7FCBAA0C TerrainSpans            # rasterizes the view footprint onto the terrain grid: one (left, right) s16 pair per row into [0x7FDF5BB0], as many rows as the footprint covers (no bound)
 7FCBA684 TerrainSpanEdge         # one edge of that footprint for TerrainSpans
+7FC464B0 StatsReset              # (stats r3 = 0x7FDF04F0) at a mission's start: +0x00/+0x04 shots fired, +0x0C hits, +0x10 enemies that appeared, +0x14 destroyed by the player, +0x18 friendlies, +0x1C friendlies lost, +0x20 lives lost, +0x24 time (s), +0x28/+0x2C targeting computer uses/seconds; +0x4C.. per-index records (-1)
+7FC46644 StatsAccuracy           # (stats, &shots, &hits) -> f1 = 100 * hits / shots
+7FC466CC StatsEnemies            # (stats, &appeared, &destroyed) -> f1 percent
+7FC46744 StatsFriendlies         # (stats, &friendlies, &lost) -> f1 percent kept
+7FC467C0 StatsTargeting          # (stats, &uses, &seconds) -> f1 targeting computer efficiency %
+7FC46840 StatsObjectDestroyed    # counts the player's kills (+0x14) and friendlies lost (+0x1C); found watching the stats while firing
+7FC468C8 StatsObjectAdded        # counts enemies (+0x10) and friendlies (+0x18) as they appear
+7FD76514 MissionResults          # (r3 unused, record r4): minutes f32 +0, destroyed u16 +4, accuracy % u16 +6, friendlies lost u16 +8, lives lost u32 +0xC, targeting computer % f32 +0x10; the results screen (0x7FD73DAC) and the medal (MedalRank) use it
+7FD765F4 MedalRank               # (results object r3, record r4): compares with the mission's 20-byte requirements ([r3+0x40], mission * 3 + tier - 2), best tier first; 5 = none

@@ -38,6 +38,9 @@ The code generated from your disc ends up in `build/` and is yours alone: never 
   bound to, e.g. "PRESS (Y)" and SELECT CRAFT's "(B) > pilot"); F1 > Controls > Button prompts
   switches back to the GameCube ones. The C-stick icon stays.
 - F11 or Alt+Enter toggles fullscreen; `--fullscreen` starts that way.
+- **Cheats** (F1 > Cheats): invincibility, infinite lives, infinite bombs, and perfect mission
+  stats: the results screen says 0:01, every enemy destroyed, 100% accuracy, no friendlies or
+  lives lost and 100% targeting computer efficiency, and the medal is awarded for those.
 - **Save states**: Back + RB saves, Back + LB loads, Back + D-pad right / left picks the slot
   (8 slots; keyboard F5 / F8, F7 / F6). F1 > Controls has the slot, save / load buttons and the
   hotkeys, each any combination of buttons (or keys) held together: pick the row, press A, hold

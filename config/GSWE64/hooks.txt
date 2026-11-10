@@ -37,3 +37,5 @@ hle     CameraSetup
 hle     TargetingPass
 # Widescreen: the terrain's span array is sized for the 4:3 view; wider views overflowed it
 hle     HeapAlloc
+# Cheat: perfect mission stats (the results record the screen and the medal use)
+hle     MissionResults

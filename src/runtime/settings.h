@@ -29,6 +29,7 @@ struct Settings {
     bool invincible = false;
     bool infiniteLives = false;
     bool infiniteAmmo = false;  // secondary weapons: torpedoes, bombs, missiles
+    bool perfectStats = false;  // mission results: 0:01, every enemy, 100%, nothing lost (hle_game.cpp)
     // mods
     bool customTextures = true;  // texture packs in the textures folder (Dolphin's format; mods.cpp)
     // controls

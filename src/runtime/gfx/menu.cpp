@@ -732,6 +732,10 @@ void pageCheats(settings::Settings& s) {
     if (toggleRow("Invincibility", s.invincible, "Your ship cannot be destroyed.")) s_changed = true;
     if (toggleRow("Infinite lives", s.infiniteLives, "Losing a ship costs no life.")) s_changed = true;
     if (toggleRow("Infinite bombs", s.infiniteAmmo, "Torpedoes, bombs and missiles never run out.")) s_changed = true;
+    if (toggleRow("Perfect mission stats", s.perfectStats,
+                  "The mission results say 0:01, every enemy destroyed, 100% accuracy, no friendlies or lives lost and 100% "
+                  "targeting computer efficiency; the medals follow."))
+        s_changed = true;
 }
 
 // --- mods: texture packs, codes, importing from Dolphin -------------------------------------

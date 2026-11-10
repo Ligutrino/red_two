@@ -36,6 +36,7 @@ void set(const std::string& key, const std::string& value) {
     else if (key == "invincible") s.invincible = parseBool(value);
     else if (key == "infinite_lives") s.infiniteLives = parseBool(value);
     else if (key == "infinite_ammo") s.infiniteAmmo = parseBool(value);
+    else if (key == "perfect_stats") s.perfectStats = parseBool(value);
     else if (key == "custom_textures") s.customTextures = parseBool(value);
     else if (key == "xbox_buttons") s.xboxButtons = parseBool(value);
     else if (key == "state_slot") s.stateSlot = n < 1 ? 1 : n > 8 ? 8 : n;
@@ -123,6 +124,7 @@ void save() {
     fprintf(f, "invincible=%d\n", s.invincible);
     fprintf(f, "infinite_lives=%d\n", s.infiniteLives);
     fprintf(f, "infinite_ammo=%d\n", s.infiniteAmmo);
+    fprintf(f, "perfect_stats=%d\n", s.perfectStats);
     fprintf(f, "# texture packs in the textures folder next to this file (Dolphin's format)\n");
     fprintf(f, "custom_textures=%d\n", s.customTextures);
     fprintf(f, "# on-screen button prompts: 1 as on an Xbox controller, 0 GameCube\n");

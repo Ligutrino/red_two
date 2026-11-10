@@ -74,6 +74,7 @@ static bool bootScreen() { return rd32(0x7FDE8254) == 5 && rd32(0x7FDE822C) == 2
 static void keepHealth();
 static void keepAmmo();
 static void craftDiffProbe();
+static void resultsTest(Ctx& c);
 
 void hle_GameFrameDelta(Ctx& c) {
     frameDelta(c);
@@ -117,6 +118,7 @@ void hle_GameFrameDelta(Ctx& c) {
     keepHealth();
     keepAmmo();
     craftDiffProbe();
+    resultsTest(c);
     // widescreen: the flight HUD goes to the screen edges (not the menus: their layout is 4:3)
     gfx::setHudAnchoring(s.hudEdges && s.aspect != settings::Aspect::R4_3 && playerCraft() && !cinematic);
     // menu screens only (no player craft; not the boot screen's intro and logos, whose 2D draws
@@ -335,6 +337,60 @@ void hle_HeapAlloc(Ctx& c) {
         c.r[3] *= 4;
     }
     f_800070C4_orig(c);
+}
+
+// Perfect mission stats (settings). The mission's running stats live at 0x7FDF04F0 (StatsReset
+// 0x7FC464B0 at a mission's start): +0x00/+0x04 shots fired (lasers / other), +0x0C hits, +0x10
+// enemies that appeared, +0x14 enemies the player destroyed, +0x18 friendlies, +0x1C friendlies
+// lost (StatsObjectDestroyed 0x7FC46840), +0x20 lives lost, +0x24 mission time (seconds; weapons
+// and respawns read it, so it is left alone during play), +0x28/+0x2C targeting computer uses
+// and seconds. At the end MissionResults (0x7FD76514) turns them into the record the results
+// screen shows and MedalRank (0x7FD765F4) compares with the mission's requirements: +0x00 time
+// (minutes, float), +0x04 enemies destroyed, +0x06 accuracy %, +0x08 friendlies lost (u16 each),
+// +0x0C lives lost (u32), +0x10 targeting computer efficiency % (float). With the cheat the
+// record says 0:01, every enemy that appeared destroyed, 100%, 0, 0 and 100%. (Mission 15's
+// +0x08 counts something where more is better: left as it is.)
+void hle_MissionResults(Ctx& c) {
+    const u32 rec = c.r[4];
+    f_7FD76514_orig(c);
+    if (!settings::get().perfectStats) return;
+    constexpr u32 kStats = 0x7FDF04F0;
+    const u32 enemies = std::max(rd32(kStats + 0x10), rd32(kStats + 0x14));
+    wr32(rec + 0x00, fbits(1.25f / 60.f));  // 1.25 s: shown as 0:01, compared in whole seconds
+    wr16(rec + 0x04, std::min<u32>(enemies, 0xFFFF));
+    wr16(rec + 0x06, 100);
+    if (rd8(0x800962EC) != 15) wr16(rec + 0x08, 0);  // the mission (r13-0x4AB4)
+    wr32(rec + 0x0C, 0);
+    wr32(rec + 0x10, fbits(100.f));
+    logf("cheat", "perfect mission stats: 0:01, %u enemies destroyed, 100%% accuracy, nothing lost, 100%% targeting computer",
+         enemies);
+}
+
+// R2_RESULTS_TEST=<seconds>: once, that long after the start, MissionResults into a scratch
+// record below the guest stack, logged before and after the cheat (missions are long to finish
+// in a test). Called from GameFrameDelta, an ordinary guest call.
+static void resultsTest(Ctx& c) {
+    static const double at = getenv("R2_RESULTS_TEST") ? atof(getenv("R2_RESULTS_TEST")) : -1.0;
+    static bool done = false;
+    if (at < 0 || done) return;
+    static const u64 t0 = tbNow();
+    if (double(tbNow() - t0) / double(kTbClock) < at) return;
+    done = true;
+    for (int pass = 0; pass < 2; pass++) {
+        settings::Settings& s = settings::get();
+        const bool keep = s.perfectStats;
+        s.perfectStats = pass == 1;
+        Ctx t = c;
+        t.r[1] = c.r[1] - 0x200;
+        const u32 rec = t.r[1] + 0x100;
+        t.r[4] = rec;
+        t.lr = 0;
+        hle_MissionResults(t);
+        s.perfectStats = keep;
+        logf("cheat", "results test (%s): time %.3f min, enemies %u, accuracy %u%%, friendlies lost %u, lives lost %u, targeting computer %.1f%%",
+             pass ? "cheat" : "game's", s2d(rd32(rec)), rd16(rec + 4), rd16(rec + 6), rd16(rec + 8), rd32(rec + 12),
+             s2d(rd32(rec + 16)));
+    }
 }
 
 // The targeting computer (cockpit view, Y). TargetingRect (0x7FCD5D08) projects the corners of
