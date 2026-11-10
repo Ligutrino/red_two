@@ -33,7 +33,16 @@ struct Settings {
     bool customTextures = true;  // texture packs in the textures folder (Dolphin's format; mods.cpp)
     // controls
     bool xboxButtons = true;  // on-screen button prompts as on an Xbox controller (gfx/button_icons.cpp)
+    // save states (savestate.cpp): the slot the hotkeys use, and the hotkeys (hotkeys.cpp), each a
+    // combination held together: controller buttons by SDL name, keys by SDL key name, " + "
+    // between them; empty = none
+    int stateSlot = 1;
+    std::string hotkeyPad[4] = {"back + rightshoulder", "back + leftshoulder", "back + dpright", "back + dpleft"};
+    std::string hotkeyKeys[4] = {"F5", "F8", "F7", "F6"};
 };
+// hotkey actions (the index into hotkeyPad / hotkeyKeys)
+enum HotkeyAction : int { HkSaveState = 0, HkLoadState, HkNextSlot, HkPrevSlot, HkCount };
+const char* hotkeyDefault(int action, bool pad);
 
 Settings& get();
 void load();  // once at startup, before anything reads the settings

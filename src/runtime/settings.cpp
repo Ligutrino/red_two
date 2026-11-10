@@ -15,6 +15,7 @@ namespace {
 
 Settings s_settings;
 std::string s_path;  // empty: do not persist (automated runs)
+const char* const kHotkeyNames[HkCount] = {"save_state", "load_state", "next_slot", "previous_slot"};
 
 bool parseBool(const std::string& v) { return v == "1" || v == "true" || v == "on" || v == "yes"; }
 
@@ -37,7 +38,15 @@ void set(const std::string& key, const std::string& value) {
     else if (key == "infinite_ammo") s.infiniteAmmo = parseBool(value);
     else if (key == "custom_textures") s.customTextures = parseBool(value);
     else if (key == "xbox_buttons") s.xboxButtons = parseBool(value);
-    else logf("config", "unknown setting '%s'", key.c_str());
+    else if (key == "state_slot") s.stateSlot = n < 1 ? 1 : n > 8 ? 8 : n;
+    else {
+        for (int a = 0; a < HkCount; a++) {
+            const std::string base = std::string("hotkey_") + kHotkeyNames[a];
+            if (key == base + "_pad") return void(s.hotkeyPad[a] = value);
+            if (key == base + "_keys") return void(s.hotkeyKeys[a] = value);
+        }
+        logf("config", "unknown setting '%s'", key.c_str());
+    }
 }
 
 std::string trim(std::string s) {
@@ -118,7 +127,19 @@ void save() {
     fprintf(f, "custom_textures=%d\n", s.customTextures);
     fprintf(f, "# on-screen button prompts: 1 as on an Xbox controller, 0 GameCube\n");
     fprintf(f, "xbox_buttons=%d\n", s.xboxButtons);
+    fprintf(f, "# save states: the slot (1-8) and the hotkeys, buttons or keys held together (SDL names, \" + \" between)\n");
+    fprintf(f, "state_slot=%d\n", s.stateSlot);
+    for (int a = 0; a < HkCount; a++) {
+        fprintf(f, "hotkey_%s_pad=%s\n", kHotkeyNames[a], s.hotkeyPad[a].c_str());
+        fprintf(f, "hotkey_%s_keys=%s\n", kHotkeyNames[a], s.hotkeyKeys[a].c_str());
+    }
     fclose(f);
+}
+
+const char* hotkeyDefault(int action, bool pad) {
+    static const Settings d;
+    if (action < 0 || action >= HkCount) return "";
+    return pad ? d.hotkeyPad[action].c_str() : d.hotkeyKeys[action].c_str();
 }
 
 const char* resolutionName(Resolution r) {

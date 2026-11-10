@@ -38,6 +38,13 @@ The code generated from your disc ends up in `build/` and is yours alone: never 
   bound to, e.g. "PRESS (Y)" and SELECT CRAFT's "(B) > pilot"); F1 > Controls > Button prompts
   switches back to the GameCube ones. The C-stick icon stays.
 - F11 or Alt+Enter toggles fullscreen; `--fullscreen` starts that way.
+- **Save states**: Back + RB saves, Back + LB loads, Back + D-pad right / left picks the slot
+  (8 slots; keyboard F5 / F8, F7 / F6). F1 > Controls has the slot, save / load buttons and the
+  hotkeys, each any combination of buttons (or keys) held together: pick the row, press A, hold
+  the buttons, let go. On a controller Back alone (released with nothing else pressed) still
+  opens the menu. States live in `%APPDATA%\Red Two\states` and also load after a restart, but
+  only into the same build of Red Two (a rebuild makes them "OLD"). The memory card is not part
+  of a state: loading one does not undo the game's own saves.
 - Saves go to `saves/GSWE64_A.raw` (a Memory Card 59 in slot A; the game formats a new one).
   `R2_CARD_A=<path>` uses another card image.
 - **Mods** (F1, MODS tab): texture packs in Dolphin's format go in

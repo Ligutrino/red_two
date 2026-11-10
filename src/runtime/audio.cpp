@@ -87,4 +87,9 @@ void push(const u8* data, u32 frames, u32 rate) {
     SDL_PutAudioStreamData(s_stream, buf.data(), bytes);
 }
 
+// a state was loaded: what is queued belongs to the other timeline
+void flush() {
+    if (s_stream) SDL_ClearAudioStream(s_stream);
+}
+
 }  // namespace rt::audio

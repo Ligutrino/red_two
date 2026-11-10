@@ -214,3 +214,17 @@ void wrSplit(u32 a, u32 v, int n) {
 }
 
 }  // namespace rt
+
+// --- save states ----------------------------------------------------------------------------
+#include "savestate.h"
+namespace rt {
+void vmSaveState(state::Writer& w) {
+    w.pod(s_sr);
+    w.pod(s_sdr1);
+}
+void vmLoadState(state::Reader& r) {
+    r.pod(s_sr);
+    r.pod(s_sdr1);
+    vmFlushAll();  // the page table in guest memory changed: walk it again
+}
+}  // namespace rt

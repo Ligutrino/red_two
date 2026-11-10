@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "hw/gx_fifo.h"
+#include "hotkeys.h"
 #include "runtime.h"
 
 namespace rt::input {
@@ -110,6 +111,12 @@ void poll() {
     if (s_pads) PADRead(st);
     else
         for (auto& e : st) e.err = PAD_ERR_NO_CONTROLLER;
+    // a hotkey's modifier (Back) is down, or a hotkey just fired: its buttons are not the game's
+    if (hotkeys::muteGame())
+        for (auto& e : st) {
+            e.button = 0;
+            e.triggerLeft = e.triggerRight = 0;
+        }
     u16 scripted = 0;
     // script times count 59.94 Hz retraces, whatever the retrace rate (settings fps; it also
     // changes while a cinematic is skipped)

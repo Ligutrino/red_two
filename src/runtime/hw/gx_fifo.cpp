@@ -455,3 +455,60 @@ void gxCpWrite(u32 off, u16 v) {
 }
 
 }  // namespace rt
+
+// --- save states ----------------------------------------------------------------------------
+#include "../savestate.h"
+namespace rt {
+void gxFifoSaveState(state::Writer& w) {
+    w.section("GXFF");
+    w.pod(s_piBase);
+    w.pod(s_piEnd);
+    w.pod(s_piWp);
+    w.pod(s_cpReg);
+    w.pod(s_cpBase);
+    w.pod(s_cpEnd);
+    w.pod(s_cpWp);
+    w.pod(s_cpRp);
+    w.pod(s_cpHi);
+    w.pod(s_cpLo);
+    w.pod(s_cpBp);
+    w.pod(s_cpCr);
+    w.vec(s_cmd);
+    w.pod(s_vcdLo);
+    w.pod(s_vcdHi);
+    w.pod(s_vatA);
+    w.pod(s_vatB);
+    w.pod(s_vatC);
+    w.pod(s_bpHit);
+    w.pod(s_gp);
+    w.pod(s_gpLen);
+    w.pod(s_gpFifoSets);
+}
+
+void gxFifoLoadState(state::Reader& r) {
+    r.section("GXFF");
+    r.pod(s_piBase);
+    r.pod(s_piEnd);
+    r.pod(s_piWp);
+    r.pod(s_cpReg);
+    r.pod(s_cpBase);
+    r.pod(s_cpEnd);
+    r.pod(s_cpWp);
+    r.pod(s_cpRp);
+    r.pod(s_cpHi);
+    r.pod(s_cpLo);
+    r.pod(s_cpBp);
+    r.pod(s_cpCr);
+    r.vec(s_cmd);
+    r.pod(s_vcdLo);
+    r.pod(s_vcdHi);
+    r.pod(s_vatA);
+    r.pod(s_vatB);
+    r.pod(s_vatC);
+    r.pod(s_bpHit);
+    r.pod(s_gp);
+    r.pod(s_gpLen);
+    r.pod(s_gpFifoSets);
+    cpUpdateIrq();
+}
+}  // namespace rt

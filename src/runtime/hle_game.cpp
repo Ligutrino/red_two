@@ -36,9 +36,11 @@ static void frameDelta(Ctx& c) {
 
 // The player's craft (0x7FDEFE14 in missions), or 0 when that pointer holds something else:
 // a craft's vtable (+0x80) has CraftDestroy (0x7FC3E528).
+static u32 s_craftLast = 0;  // playerCraft's cache (a state load clears it)
+static bool s_craftLastIsCraft = false;
 static u32 playerCraft() {
-    static u32 last = 0;
-    static bool lastIsCraft = false;
+    u32& last = s_craftLast;
+    bool& lastIsCraft = s_craftLastIsCraft;
     const u32 p = rd32(0x7FDEFE14);
     if (p != last) {
         last = p;
@@ -150,6 +152,8 @@ static std::atomic<float> s_displayAspect{4.f / 3.f};
 // camera objects copied the default when they were created and keep passing the old value.
 static std::atomic<float> s_oldAspects[8];
 static std::atomic<u32> s_oldAspectCount{0};
+constexpr u32 k43 = 0x3FAAAAAB;  // 4/3
+static u32 s_aspectWritten = k43;  // the value setGameAspect last put into the constants
 
 static bool oldGameAspect(double aspect) {
     const u32 n = std::min<u32>(s_oldAspectCount.load(std::memory_order_relaxed), 8);
@@ -173,8 +177,7 @@ void setGameAspect(double aspect) {
         0x800994F4,  // 0x7FCD771C
         0x80099548,  // 0x7FCDA190: the world camera
     };
-    constexpr u32 k43 = 0x3FAAAAAB;  // 4/3
-    static u32 written = k43;
+    u32& written = s_aspectWritten;
     const float f = float(aspect);
     u32 bits;
     memcpy(&bits, &f, 4);
@@ -427,10 +430,13 @@ void hle_WeaponUpdate(Ctx& c) {
 // The full value is what the craft has when it starts flying (state +0x370 = 0: the game fills it
 // at a spawn and a respawn); while the craft is being set up the field holds other things, and
 // keeping one of those (more than full) made the HUD's health ring vanish.
+static u32 s_healthCraft = 0;  // keepHealth's craft and its full health
+static float s_healthFull = 0.f;
+static bool s_healthFlying = false;
 static void keepHealth() {
-    static u32 craft = 0;
-    static float full = 0.f;
-    static bool flyingBefore = false;
+    u32& craft = s_healthCraft;
+    float& full = s_healthFull;
+    bool& flyingBefore = s_healthFlying;
     const u32 p = settings::get().invincible ? playerCraft() : 0;
     if (p != craft) {
         craft = p;
@@ -507,4 +513,44 @@ static void craftDiffProbe() {
     }
 }
 
+}  // namespace rt
+
+// --- save states ----------------------------------------------------------------------------
+#include "savestate.h"
+namespace rt {
+void hleSaveState(state::Writer& w) {
+    w.section("HLE ");
+    w.vec(s_weapons);
+}
+
+void hleLoadState(state::Reader& r) {
+    r.section("HLE ");
+    r.vec(s_weapons);
+}
+
+// After a load (on the guest's fiber): caches of guest objects start over, a skip in progress
+// ends, and the camera aspect constants hold what the saved session wrote (a stale aspect for
+// the camera objects of the state if the window has another shape now).
+void hleAfterLoad() {
+    s_craftLast = 0;
+    s_craftLastIsCraft = false;
+    s_healthCraft = 0;
+    s_healthFull = 0.f;
+    s_healthFlying = false;
+    if (s_skip) {
+        s_skip = false;
+        viSetRate(settings::get().fps);
+        setDvdBoost(1.0);
+        setAudioSpeed(1.0, false);
+    }
+    const u32 bits = rd32(0x80099548);  // the world camera's (see setGameAspect)
+    s_aspectWritten = bits;
+    float f;
+    memcpy(&f, &bits, 4);
+    const float display = s_displayAspect.load(std::memory_order_relaxed);
+    if (bits != k43 && f > 0.5f && f < 8.f && std::abs(f - display) >= 0.0005f && !oldGameAspect(f)) {
+        const u32 i = s_oldAspectCount.fetch_add(1, std::memory_order_relaxed);
+        s_oldAspects[i % 8].store(f, std::memory_order_relaxed);
+    }
+}
 }  // namespace rt

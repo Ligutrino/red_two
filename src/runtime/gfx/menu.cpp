@@ -1,7 +1,9 @@
 // In-game settings menu: Dear ImGui (through Aurora), drawn over the game's frame. F1 or the
 // controller's Back/Select button (the GameCube pad has none, so the game never sees it) opens
-// and closes it; Escape or the controller's B closes it. While it is open the game sees idle
-// controllers (input.cpp, which also keeps buttons held when it closes from the game).
+// and closes it - Back when it is let go without another button pressed meanwhile, since Back
+// also starts the save state hotkeys (Back + RB); Escape or the controller's B closes it. While
+// it is open the game sees idle controllers (input.cpp, which also keeps buttons held when it
+// closes from the game).
 //
 // Tabs run along the top: LB / RB (Q / E, Tab) switch them. The d-pad or the left stick (arrow
 // keys) moves through a page's rows and left / right changes the selected value; A (Enter)
@@ -34,9 +36,11 @@
 #include <string>
 #include <vector>
 
+#include "../hotkeys.h"
 #include "../hw/musyx_dsp.h"
 #include "../mods.h"
 #include "../runtime.h"
+#include "../savestate.h"
 #include "../settings.h"
 
 namespace rt::gfx {
@@ -242,7 +246,7 @@ void readPads(bool held[NavCount]) {
 // this frame's presses; `enabled` false (a rebind in progress) still tracks what is held
 void pollNav(bool enabled) {
     bool held[NavCount] = {};
-    if (!automatedRun() || padTest()) readPads(held);
+    if (!automatedRun() || padTest() || getenv("R2_HOTKEY_TEST")) readPads(held);
     const double now = double(SDL_GetTicksNS()) * 1e-9;
     for (int k = 0; k < NavCount; k++) {
         NavKey& st = s_navKey[k];
@@ -448,9 +452,20 @@ void finishCapture(const std::vector<ControlRow>& rows) {
     s_navBackTb = tbNow() + kTbClock / 4;
 }
 
+// hotkey rows (hotkeys.cpp captures a combination: held together, then let go)
+int s_pendingHotkey = -1;  // chosen with A / Enter: the capture starts once that is released
+bool s_hotkeyWasCapturing = false;
+
 void cancelCapture() {
     if (s_captureRow >= 0) aurora::binding::cancel_capture();
     s_captureRow = s_pendingCapture = -1;
+    s_pendingHotkey = -1;
+    hotkeys::captureCancel();
+}
+
+bool rebindingNow() {
+    return s_captureRow >= 0 || s_pendingCapture >= 0 || s_pendingHotkey >= 0 || hotkeys::capturing() ||
+           (s_navBackTb && tbNow() < s_navBackTb);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -877,6 +892,16 @@ void pageControls() {
         startCapture(s_pendingCapture);
         s_pendingCapture = -1;
     }
+    if (s_pendingHotkey >= 0 && !acceptHeld()) {
+        hotkeys::captureStart(s_pendingHotkey, s_padDevice);
+        s_pendingHotkey = -1;
+    } else if (hotkeys::capturing() &&
+               (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right))) {
+        hotkeys::captureCancel();  // a click elsewhere
+    }
+    hotkeys::captureTick();
+    if (s_hotkeyWasCapturing && !hotkeys::capturing()) s_navBackTb = tbNow() + kTbClock / 4;  // (its release is no menu press)
+    s_hotkeyWasCapturing = hotkeys::capturing();
     heading("ON-SCREEN BUTTONS");
     {
         settings::Settings& st = settings::get();
@@ -890,6 +915,25 @@ void pageControls() {
             buttonIconsUpdate();
         }
     }
+    heading("SAVE STATES");
+    {
+        settings::Settings& st = settings::get();
+        const bool sel = rowBegin("State slot", "The slot the save state hotkeys use (the next / previous slot hotkeys "
+                                                "change it too). States are kept in your Red Two folder, states.");
+        const std::string info = state::slotInfo(st.stateSlot);
+        char buf[64];
+        snprintf(buf, sizeof buf, "SLOT %d   %s", st.stateSlot, info.empty() ? "EMPTY" : info.c_str());
+        const int cur = st.stateSlot - 1;
+        const int next = choiceStep(cur, state::kSlots, selector("slot", buf, cur > 0, cur < state::kSlots - 1, sel), sel);
+        if (next != cur) {
+            st.stateSlot = next + 1;
+            s_changed = true;
+        }
+    }
+    if (buttonRow("Save state now", "SAVE", "Saves the game as it is right now into the slot."))
+        state::request(state::Op::Save, settings::get().stateSlot);
+    if (buttonRow("Load state now", "LOAD", "Puts the game back the way it was saved in the slot."))
+        state::request(state::Op::Load, settings::get().stateSlot);
     heading("INPUT DEVICE");
     {
         const bool sel = rowBegin("Remap", "Which device's bindings this page shows and changes.");
@@ -900,9 +944,11 @@ void pageControls() {
         }
     }
     const bool noPad = s_padDevice && !aurora::pad::port_controller(0);
-    if (buttonRow("Reset to defaults", "RESET", "Puts back the original bindings of the device shown.") && !noPad) {
+    if (buttonRow("Reset to defaults", "RESET", "Puts back the original bindings and hotkeys of the device shown.") &&
+        !noPad) {
         aurora::pad::reset_to_defaults(profileTarget());
         aurora::pad::save_profiles();
+        hotkeys::resetDefaults(s_padDevice);
     }
     if (noPad) {
         ImGui::TextDisabled("No controller connected.");
@@ -913,13 +959,32 @@ void pageControls() {
         const char* name = pad ? SDL_GetGamepadName(pad) : nullptr;
         ImGui::TextDisabled("%s", name ? name : "Controller");
     }
+    heading("HOTKEYS");
+    static const char* const kHotkeyNames[settings::HkCount] = {"Save state", "Load state", "Next slot", "Previous slot"};
+    for (int a = 0; a < settings::HkCount; a++) {
+        ImGui::PushID(100 + a);
+        const bool capturing = hotkeys::captureAction() == a || s_pendingHotkey == a;
+        const std::string text = capturing ? std::string("HOLD, THEN LET GO...")
+                                           : hotkeys::label(a, s_padDevice);
+        const bool idle = !rebindingNow();
+        const bool pressed = buttonRow(kHotkeyNames[a], text.c_str(),
+                                       s_padDevice ? "Press A (or click), then hold the buttons together - Back + RB - and let "
+                                                     "go. X or a right-click clears it."
+                                                   : "Press Enter (or click), then hold the keys together and let go. Delete "
+                                                     "or a right-click clears it. Esc cancels.",
+                                       capturing ? kGold : kText);
+        const bool sel = s_rowSel[s_section] == s_row - 1;
+        if (pressed && idle) s_pendingHotkey = a;  // listens once the click / A / Enter is released
+        if (idle && (ImGui::IsItemClicked(ImGuiMouseButton_Right) || (sel && s_in.clear))) hotkeys::clear(a, s_padDevice);
+        ImGui::PopID();
+    }
     heading("GAMECUBE CONTROLLER");
     for (int i = 0; i < int(rows.size()); i++) {
         const ControlRow& row = rows[size_t(i)];
         ImGui::PushID(i);
         const bool capturing = s_captureRow == i || s_pendingCapture == i;
         const std::string text = capturing ? std::string("PRESS A KEY OR BUTTON...") : bindingText(row);
-        const bool idle = s_captureRow < 0 && s_pendingCapture < 0;
+        const bool idle = s_captureRow < 0 && s_pendingCapture < 0 && s_pendingHotkey < 0 && !hotkeys::capturing();
         const bool pressed = buttonRow(row.name, text.c_str(),
                                        "Press A / Enter (or click), then the new key or button. X / Delete or a right-click "
                                        "clears it. Back / Esc cancels.",
@@ -939,7 +1004,15 @@ void switchSection(int i) {
     s_section = i;
     s_scrollToSel = true;
     s_pendingCapture = -1;
+    s_pendingHotkey = -1;
+    hotkeys::captureCancel();
 }
+
+// the controller's Back: down now, and whether another button went down meanwhile (menuEvent)
+bool s_backDown = false, s_backChord = false;
+// a short message at the top of the screen (save states)
+std::string s_toast;
+u64 s_toastTb = 0;
 
 // a small key cap: the button that does something here
 void keyCap(ImDrawList* dl, ImVec2 c, const char* text, bool lit) {
@@ -990,7 +1063,7 @@ void tabBar() {
 // returns false when the menu closed
 bool drawMenu(settings::Settings& s, float t) {
     // input first: B closes, LB / RB switch tabs, up / down move the selection
-    const bool rebinding = s_captureRow >= 0 || s_pendingCapture >= 0 || (s_navBackTb && tbNow() < s_navBackTb);
+    const bool rebinding = rebindingNow();
     pollNav(!rebinding);
     if (s_nav[NavBack]) return false;
     if (s_nav[NavPrevTab]) switchSection((s_section + SectionCount - 1) % SectionCount);
@@ -1258,7 +1331,7 @@ void menuImGuiInit(const void*) {
 
 void menuEvent(const void* p) {
     const SDL_Event& e = *static_cast<const SDL_Event*>(p);
-    if (s_captureRow >= 0 || s_pendingCapture >= 0 || (s_navBackTb && tbNow() < s_navBackTb)) return;  // rebinding takes these
+    if (rebindingNow()) return;  // rebinding takes these
     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
         if (e.key.key == SDLK_F1) {
             logf("menu", "F1: %s", s_open ? "close" : "open");
@@ -1268,11 +1341,32 @@ void menuEvent(const void* p) {
             logf("menu", "Esc: close");
             setOpen(false);
         }
-    } else if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK && !automatedRun()) {
-        logf("menu", "controller Back: %s", s_open ? "close" : "open");
-        s_usingPad = true;
-        setOpen(!s_open);
+    } else if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+        // Back toggles the menu when it is let go with nothing else pressed meanwhile: Back + RB
+        // and the other hotkeys hold it too
+        if (e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK) {
+            s_backDown = true;
+            s_backChord = false;
+        } else if (s_backDown) {
+            s_backChord = true;
+        }
+    } else if (e.type == SDL_EVENT_GAMEPAD_AXIS_MOTION && s_backDown && e.gaxis.value > 16000 &&
+               (e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || e.gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)) {
+        s_backChord = true;
+    } else if (e.type == SDL_EVENT_GAMEPAD_BUTTON_UP && e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK) {
+        const bool toggle = s_backDown && !s_backChord && (!automatedRun() || getenv("R2_HOTKEY_TEST"));
+        s_backDown = false;
+        if (toggle) {
+            logf("menu", "controller Back: %s", s_open ? "close" : "open");
+            s_usingPad = true;
+            setOpen(!s_open);
+        }
     }
+}
+
+void toast(const std::string& text) {
+    s_toast = text;
+    s_toastTb = tbNow();
 }
 
 void applyDisplaySettings() {
@@ -1325,6 +1419,7 @@ void menuDraw() {
         if (const char* sec = getenv("R2_MENU_SECTION")) s_section = std::clamp(atoi(sec), 0, int(SectionCount) - 1);
         if (const char* row = getenv("R2_MENU_ROW")) s_rowSel[s_section] = std::max(0, atoi(row));
         s_usingPad = envFlag("R2_MENU_PAD");
+        s_padDevice = envFlag("R2_MENU_PAD");  // (the Controls page shows the controller)
     }
 
     // presented frames per second (half-second window)
@@ -1348,6 +1443,24 @@ void menuDraw() {
         panel(fg, ImVec2(at.x - 8.f * ui, at.y - 5.f * ui), ImVec2(at.x + tw + 10.f * ui, at.y + px + 5.f * ui), 6.f * ui,
               IM_COL32(6, 14, 30, 170), IM_COL32(2, 6, 14, 190), alpha(kGold, 140), 1.f);
         drawText(fg, s_font, px, at, kGold, buf, 2.f * ui);
+    }
+    // save state messages: 2.5 s at the top, fading out
+    if (!s_toast.empty()) {
+        const double age = double(now - s_toastTb) / double(kTbClock);
+        if (age < 2.5) {
+            const float a = age < 2.0 ? 1.f : float((2.5 - age) / 0.5);
+            const float px = 24.f * ui;
+            const float tw = textWidth(s_font, px, s_toast.c_str(), 3.f * ui);
+            const ImVec2 c(io.DisplaySize.x * 0.5f, 64.f * ui);
+            const ImVec2 pa(c.x - tw * 0.5f - 22.f * ui, c.y - px * 0.5f - 12.f * ui),
+                pb(c.x + tw * 0.5f + 22.f * ui, c.y + px * 0.5f + 12.f * ui);
+            panel(fg, pa, pb, 10.f * ui, alpha(IM_COL32(8, 18, 38, 255), int(225 * a)), alpha(IM_COL32(2, 6, 14, 255), int(235 * a)),
+                  alpha(kGold, int(200 * a)), 1.5f * ui);
+            drawText(fg, s_font, px, ImVec2(c.x - tw * 0.5f, c.y - px * 0.55f), alpha(kGold, int(255 * a)), s_toast.c_str(),
+                     3.f * ui);
+        } else {
+            s_toast.clear();
+        }
     }
     if (cinematicSkip()) {
         const char* text = "SKIPPING";

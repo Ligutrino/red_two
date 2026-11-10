@@ -109,7 +109,9 @@ add_executable(red_two
     src/runtime/codes.cpp
     src/runtime/card_image.cpp
     src/runtime/dolphin_import.cpp
-    src/runtime/gfx/menu.cpp)
+    src/runtime/gfx/menu.cpp
+    src/runtime/savestate.cpp
+    src/runtime/hotkeys.cpp)
 target_include_directories(red_two PRIVATE src/runtime "${GEN_DIR}" extern/aurora/lib)
 # Program icon: your own res/icon.ico (not in the repository), built in when it exists.
 if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/res/icon.ico")
@@ -120,9 +122,12 @@ endif()
 target_compile_definitions(red_two PRIVATE ${R2_DEFS})
 target_link_libraries(red_two PRIVATE r2game winmm aurora::core aurora::gx aurora::vi aurora::pad xxHash::xxhash zstd::libzstd dbghelp)
 if(MSVC)
-    target_compile_options(red_two PRIVATE -fno-strict-aliasing)
-    # GUI subsystem (no console window), still entering through main()
-    target_link_options(red_two PRIVATE /STACK:16777216 /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
+    # /GS-: save states keep the guest threads' host stacks, also into a later session, whose
+    # stack cookies differ (the generated code is built without them too)
+    target_compile_options(red_two PRIVATE -fno-strict-aliasing /GS-)
+    # GUI subsystem (no console window), still entering through main(). No ASLR: those stacks
+    # hold return addresses into the exe (savestate.h).
+    target_link_options(red_two PRIVATE /STACK:16777216 /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup /DYNAMICBASE:NO)
 endif()
 
 # Dawn and SDL3 are DLLs on Windows: copy them next to the executable.

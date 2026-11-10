@@ -381,3 +381,26 @@ void psqStoreQ(Ctx& c, u32 fs, u32 a, bool w, u32 gqr) {
 }
 
 }  // namespace rt
+
+// --- save states ----------------------------------------------------------------------------
+#include "savestate.h"
+namespace rt {
+void vmSaveState(state::Writer& w);
+void vmLoadState(state::Reader& r);
+
+void cpuSaveState(state::Writer& w) {
+    w.section("CPU ");
+    w.pod(s_spr);
+    w.pod(s_tbOffset);
+    vmSaveState(w);
+}
+
+void cpuLoadState(state::Reader& r) {
+    r.section("CPU ");
+    r.pod(s_spr);
+    r.pod(s_tbOffset);
+    // the guest's time base goes on from where it was saved (host time moved on by tbDelta)
+    s_tbOffset = u64(s64(s_tbOffset) - r.tbDelta);
+    vmLoadState(r);
+}
+}  // namespace rt

@@ -168,3 +168,38 @@ void decAck() {
 }
 
 }  // namespace rt
+
+// --- save states ----------------------------------------------------------------------------
+#include "savestate.h"
+namespace rt {
+void eventsSaveState(state::Writer& w) {
+    w.section("EVNT");
+    {
+        std::lock_guard lk(s_mu);
+        w.pod(s_due);
+    }
+    w.pod(s_decBaseTb);
+    w.pod(s_decValue);
+    w.pod(s_decPending);
+}
+
+void eventsLoadState(state::Reader& r) {
+    r.section("EVNT");
+    u64 due[EV_COUNT];
+    r.pod(due);
+    r.pod(s_decBaseTb);
+    r.pod(s_decValue);
+    r.pod(s_decPending);
+    s_decBaseTb = r.time(s_decBaseTb);
+    {
+        std::lock_guard lk(s_mu);
+        for (int i = 0; i < EV_COUNT; i++) s_due[i] = r.time(due[i]);
+        recomputeEarliest();
+    }
+    if (s_wakeEv) SetEvent(s_wakeEv);
+    if (!g_eventHandlers[EV_DEC]) g_eventHandlers[EV_DEC] = onDec;
+    if (s_decPending) g_irqLine |= 2;
+    else g_irqLine &= ~2u;
+    g_irqPending = 1;
+}
+}  // namespace rt

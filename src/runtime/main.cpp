@@ -22,6 +22,7 @@
 #include "settings.h"
 #include "../common/disc_image.h"
 #include "hw/musyx_dsp.h"
+#include "savestate.h"
 #include "table.h"
 
 namespace rt {
@@ -210,6 +211,7 @@ void viFrameHook() {
     s_frames++;
     if (noGfx) input::poll();  // otherwise the renderer polls (Aurora pads)
     else gfx::vblank();
+    state::scriptTick();  // R2_STATE_SCRIPT (tests)
     // R2_MEM_DUMP=<vblank>,<phys addr>,<len>[;...]: guest memory -> build/mem_<vblank>_<addr>.bin.
     static const char* memDump = getenv("R2_MEM_DUMP");
     for (const char* s = memDump; s && *s;) {
@@ -430,7 +432,5 @@ int main(int argc, char** argv) {
     hwInit();
     c.msr = 0x2032;  // FP, IR, DR, RI; interrupts off until the OS enables them
     logf("boot", "%u recompiled functions; jumping to %s", g_funcCount, describeAddr(entry).c_str());
-    dispatch(c, entry);
-    logf("boot", "the game returned from its entry point");
-    return 0;
+    threadsRun(entry);  // the boot fiber runs the game; this thread only takes save states now
 }

@@ -936,6 +936,8 @@ void aramDma() {
     schedule(EV_ARAM, s_aramDoneTb);
 }
 
+u64 s_aiDue = 0;  // when the AI DMA block playing now ends
+
 void onAi() {
     if (!s_aiDma.on) return;
     // the block just finished: latch the next one from the registers and interrupt
@@ -951,7 +953,7 @@ void onAi() {
     // Next block from when this one was due, not from now: a late interrupt (the guest was
     // busy) must not slow the audio clock down. Resynchronise only after a long stall.
     // Skipping shortens the blocks: MusyX (synthesis, sequencer, streams) keeps pace.
-    static u64 due = 0;
+    u64& due = s_aiDue;
     const u64 now = tbNow(), period = u64(double(samples) * double(kTbClock) / (double(rate) * s_audioSpeed));
     due = (due && now - due < 4 * period) ? due + period : now + period;
     schedule(EV_AI, due);
@@ -1277,4 +1279,108 @@ void ioWrite(u32 a, u32 v, int size) {
 }
 
 
+}  // namespace rt
+
+// --- save states ----------------------------------------------------------------------------
+// Register files, transfers in flight and their timers (moved to now), ARAM. Not saved: the
+// controllers (live input), the retrace rate (a setting) and the memory card's contents (its
+// file keeps the game's saves; only the transfer state of the EXI channel is restored).
+#include "../savestate.h"
+namespace rt {
+void hwSaveState(state::Writer& w) {
+    w.section("HW  ");
+    w.pod(pi_intsr);
+    w.pod(pi_intmr);
+    w.pod(vi);
+    w.pod(s_viFrameStartTb);
+    w.pod(s_viDueTb);
+    w.pod(s_viFrames);
+    w.vec(s_viFbs);
+    w.pod(s_viTop);
+    w.pod(di);
+    w.pod(s_diPendingErr);
+    w.pod(s_diOp);
+    w.pod(si);
+    w.pod(exi);
+    w.pod(s_sram);
+    w.pod(s_ipl);
+    for (const MemCard& m : s_card) {
+        w.pod(m.status);
+        w.pod(m.irqEnabled);
+        w.pod(m.pos);
+        w.pod(m.cmd);
+        w.pod(m.args);
+        w.pod(m.addr);
+    }
+    w.pod(ai);
+    w.pod(dsp);
+    w.pod(s_mailToDsp);
+    w.pod(s_mailToDspFull);
+    w.vec(s_mailsFromDsp);
+    w.pod(s_mailOut);
+    w.pod(s_mailOutValid);
+    w.pod(s_dspState);
+    w.pod(s_bootParams);
+    w.pod(s_bootParamIdx);
+    w.pod(s_aiDma);
+    w.pod(s_aramDoneTb);
+    w.pod(s_aiCountBaseTb);
+    w.pod(s_aiCountBase);
+    w.pod(s_aiDue);
+    w.pod(pe);
+    w.pod(mi);
+    w.vec(s_aram);
+}
+
+void hwLoadState(state::Reader& r) {
+    r.section("HW  ");
+    r.pod(pi_intsr);
+    r.pod(pi_intmr);
+    r.pod(vi);
+    r.pod(s_viFrameStartTb);
+    r.pod(s_viDueTb);
+    r.pod(s_viFrames);
+    r.vec(s_viFbs);
+    r.pod(s_viTop);
+    r.pod(di);
+    r.pod(s_diPendingErr);
+    r.pod(s_diOp);
+    r.pod(si);
+    r.pod(exi);
+    r.pod(s_sram);
+    r.pod(s_ipl);
+    for (MemCard& m : s_card) {
+        r.pod(m.status);
+        r.pod(m.irqEnabled);
+        r.pod(m.pos);
+        r.pod(m.cmd);
+        r.pod(m.args);
+        r.pod(m.addr);
+    }
+    r.pod(ai);
+    r.pod(dsp);
+    r.pod(s_mailToDsp);
+    r.pod(s_mailToDspFull);
+    r.vec(s_mailsFromDsp);
+    r.pod(s_mailOut);
+    r.pod(s_mailOutValid);
+    r.pod(s_dspState);
+    r.pod(s_bootParams);
+    r.pod(s_bootParamIdx);
+    r.pod(s_aiDma);
+    r.pod(s_aramDoneTb);
+    r.pod(s_aiCountBaseTb);
+    r.pod(s_aiCountBase);
+    r.pod(s_aiDue);
+    r.pod(pe);
+    r.pod(mi);
+    if (r.get<u64>() == s_aram.size()) r.bytes(s_aram.data(), s_aram.size());  // (aramBase() stays put)
+    else r.ok = false;
+    s_viFrameStartTb = r.time(s_viFrameStartTb);
+    s_viDueTb = r.time(s_viDueTb);
+    s_aramDoneTb = r.time(s_aramDoneTb);
+    s_aiCountBaseTb = r.time(s_aiCountBaseTb);
+    s_aiDue = r.time(s_aiDue);
+    piUpdate();
+}
 }  // namespace rt

@@ -26,6 +26,7 @@
 #include <dolphin/gx/GXCommandList.h>
 
 #include <algorithm>
+#include <bitset>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -43,9 +44,11 @@ extern "C" __declspec(dllimport) long long __stdcall SetWindowLongPtrW(void*, in
 extern "C" __declspec(dllimport) int __stdcall GetSystemMetrics(int);
 extern "C" __declspec(dllimport) int __stdcall ShowWindow(void*, int);
 #include "../hw/gx_fifo.h"
+#include "../hotkeys.h"
 #include "../mods.h"
 #include "tex_dump.h"
 #include "../runtime.h"
+#include "../savestate.h"
 #include "../settings.h"
 
 namespace rt::gfx {
@@ -66,6 +69,13 @@ u32 s_bp[256] = {};
 u32 s_vcdLo = 0, s_vcdHi = 0, s_vatA[8] = {}, s_vatB[8] = {}, s_vatC[8] = {};
 u32 s_cpMtxA = 0;         // CP 0x30: position matrix index (draws without per-vertex indices)
 float s_xfMtx[256] = {};  // XF 0x000-0x0FF: position/texture matrices (where sprites are, drawExtentX)
+// Everything the stream set, for a save state: after a load it is replayed (bridgeAfterLoad)
+std::bitset<256> s_bpValid;   // BP registers written so far
+u32 s_cp[256] = {};           // CP registers as written
+std::bitset<256> s_cpValid;
+constexpr u32 kXfShadow = 0x1058;  // XF memory (matrices, lights) and registers
+u32 s_xfMem[kXfShadow] = {};
+u16 s_xfBlock[kXfShadow] = {};     // XF loads by start address: their length (Aurora takes blocks)
 
 struct Array {
     u32 base = 0;       // physical
@@ -111,6 +121,7 @@ void pollEvents() {
     for (; e && e->type != AURORA_NONE; ++e) {
         if (e->type == AURORA_EXIT) {
             logf("gfx", "window closed");
+            state::finishWrites();  // a save state still being written
             quit(0);
         }
         if (e->type == AURORA_SDL_EVENT) menuEvent(&e->sdl);
@@ -1244,6 +1255,8 @@ void onCommand(const u8* p, u32 len) {
     case 0x08: {  // CP register
         const u8 reg = p[1];
         const u32 v = be32(p + 2);
+        s_cp[reg] = v;
+        s_cpValid.set(reg);
         if (reg >= 0xA0 && reg <= 0xAF) {  // array base: sent as a host pointer when used
             Array& a = s_arrays[reg - 0xA0];
             if (a.base != (v & 0x03FFFFFF)) {
@@ -1266,13 +1279,14 @@ void onCommand(const u8* p, u32 len) {
         const u32 n = 12 + (op - 0x20) / 8;
         const u32 idx = be16(p + 1), cnt = (be16(p + 3) >> 12) + 1;
         const u32 stride = s_arrays[n].stride ? s_arrays[n].stride : 4;
-        if (n == 12) {  // position matrices: shadowed
-            const u32 dst = be16(p + 3) & 0xFFF;
-            if (const u8* d = physPtr(s_arrays[n].base + idx * stride, cnt * 4))
-                for (u32 i = 0; i < cnt && dst + i < 256; i++) {
-                    const u32 w = be32(d + 4 * i);
-                    memcpy(&s_xfMtx[dst + i], &w, 4);
-                }
+        const u32 dst = be16(p + 3) & 0xFFF;
+        if (const u8* d = physPtr(s_arrays[n].base + idx * stride, cnt * 4)) {
+            for (u32 i = 0; i < cnt && dst + i < kXfShadow; i++) {
+                const u32 w = be32(d + 4 * i);
+                s_xfMem[dst + i] = w;
+                if (n == 12 && dst + i < 256) memcpy(&s_xfMtx[dst + i], &w, 4);  // position matrices
+            }
+            if (dst < kXfShadow) s_xfBlock[dst] = std::max(s_xfBlock[dst], u16(cnt));
         }
         sendArray(n, idx * stride + cnt * 4);
         fifo::write_data(p, len);
@@ -1293,6 +1307,7 @@ void onCommand(const u8* p, u32 len) {
         const u32 v = (s_bp[reg] & ~s_bpMask) | (raw & s_bpMask & 0xFFFFFF);
         s_bpMask = 0xFFFFFF;
         s_bp[reg] = v;
+        s_bpValid.set(reg);
         if ((reg >= 0x80 && reg <= 0x9B) || (reg >= 0xA0 && reg <= 0xBB)) {
             const u32 idx = reg & 0x1F;
             if (idx < 0x1C) s_tex[(idx & 3) + (reg >= 0xA0 ? 4 : 0)].dirty = true;
@@ -1387,8 +1402,10 @@ void onCommand(const u8* p, u32 len) {
         const u32 hdr = be32(p + 1);
         const u32 addr = hdr & 0xFFFF, cnt = (len - 5) / 4;
         bool touched = false;
+        if (addr < kXfShadow) s_xfBlock[addr] = std::max(s_xfBlock[addr], u16(cnt));  // (the longest: it covers most)
         for (u32 i = 0; i < cnt; i++) {
             const u32 a = addr + i, w = be32(p + 5 + 4 * i);
+            if (a < kXfShadow) s_xfMem[a] = w;
             if (a < 0x100) {
                 memcpy(&s_xfMtx[a], &w, 4);
             } else if (a >= 0x101A && a <= 0x101F) {
@@ -1575,6 +1592,7 @@ void vblank() {
     s_vblanks++;
     if (!s_enabled) return;
     scriptedResize();
+    hotkeys::tick();  // (before the game's input: a hotkey's buttons are muted for it)
     input::poll();
     // Keep the window responsive (and closable) while the game is not presenting: loading
     // screens, or a frame that never ends. Polling only reads SDL events, so it is safe mid-frame.
@@ -1596,6 +1614,112 @@ std::string stats() {
     std::string out = b;
     if (mods::loadedTextureCount()) out += "; " + mods::textureStats();
     return out;
+}
+
+}  // namespace rt::gfx
+
+// --- save states ----------------------------------------------------------------------------
+// The register state the stream built (BP, CP, XF as loaded, palette loads) is part of a state.
+// After a load it goes to Aurora again through onCommand, as the game's own writes would
+// (actions left out: EFB copies, palette loads, draw done and tokens), so Aurora's state, which
+// belongs to the session's own timeline, matches the restored game. Textures and arrays are
+// sent again at their next use; one frame may mix the two timelines.
+namespace rt::gfx {
+namespace {
+struct TlutRec {
+    u32 tmem, addr, entries;
+};
+bool replayedBp(u32 reg) {
+    switch (reg) {
+    case 0x45: case 0x47: case 0x48:  // draw done, tokens
+    case 0x52:                        // EFB copy
+    case 0x64: case 0x65: case 0x66:  // palette load, texture cache invalidation
+    case 0x67:                        // performance counters
+    case kScreenSpaceMarker:
+    case 0xFE:                        // mask
+        return false;
+    default:
+        return true;
+    }
+}
+}  // namespace
+
+void gpuDrain() { gpSync(); }
+
+void bridgeSaveState(state::Writer& w) {
+    w.section("GFX ");
+    w.pod(s_bp);
+    w.pod(s_bpValid);
+    w.pod(s_bpMask);
+    w.pod(s_cp);
+    w.pod(s_cpValid);
+    w.pod(s_xfMem);
+    w.pod(s_xfBlock);
+    std::vector<TlutRec> tluts;
+    for (const auto& [tmem, ld] : s_tlutLoads) tluts.push_back({tmem, ld.addr, ld.entries});
+    w.vec(tluts);
+    w.pod(s_screenSpaceWindow);
+}
+
+void bridgeLoadState(state::Reader& r) {
+    r.section("GFX ");
+    r.pod(s_bp);
+    r.pod(s_bpValid);
+    r.pod(s_bpMask);
+    r.pod(s_cp);
+    r.pod(s_cpValid);
+    r.pod(s_xfMem);
+    r.pod(s_xfBlock);
+    std::vector<TlutRec> tluts;
+    r.vec(tluts);
+    s_tlutLoads.clear();
+    for (const TlutRec& t : tluts) s_tlutLoads[t.tmem] = {t.addr, t.entries};
+    r.pod(s_screenSpaceWindow);
+}
+
+void bridgeAfterLoad() {
+    if (!s_enabled) return;
+    const u32 mask = s_bpMask;
+    std::vector<u8> cmd;
+    auto put32 = [&](u32 v) {
+        for (int s = 24; s >= 0; s -= 8) cmd.push_back(u8(v >> s));
+    };
+    for (u32 reg = 0; reg < 256; reg++) {  // CP (array bases included: the bridge keeps those)
+        if (!s_cpValid[reg]) continue;
+        cmd = {0x08, u8(reg)};
+        put32(s_cp[reg]);
+        onCommand(cmd.data(), u32(cmd.size()));
+    }
+    for (u32 a = 0; a < kXfShadow; a++) {  // XF, in the blocks the game loaded
+        const u32 n = std::min<u32>(s_xfBlock[a], kXfShadow - a);
+        if (!n) continue;
+        cmd = {0x10};
+        put32(((n - 1) << 16) | a);
+        for (u32 i = 0; i < n; i++) put32(s_xfMem[a + i]);
+        onCommand(cmd.data(), u32(cmd.size()));
+    }
+    for (u32 reg = 0; reg < 256; reg++) {  // BP
+        if (!s_bpValid[reg] || !replayedBp(reg)) continue;
+        cmd = {0x61};
+        put32((reg << 24) | (s_bp[reg] & 0xFFFFFF));
+        onCommand(cmd.data(), u32(cmd.size()));
+    }
+    sendScissor();
+    sendProjection();
+    if (mask != 0xFFFFFF) {  // the game's pending BP mask (its next write takes it)
+        s_bpMask = mask;
+        fifo::write_u8(0x61);
+        fifo::write_u32(0xFE000000u | mask);
+    }
+    for (Array& a : s_arrays) a.sentSize = 0;
+    for (TexMap& t : s_tex) t.dirty = true;
+    for (TlutSlot& t : s_tlutSlots) t = TlutSlot{};
+    for (auto& [key, t] : s_texInfo) {
+        t.frame = ~0ull;
+        t.hashTb = 0;
+    }
+    setMenuTiling(false);
+    logf("state", "renderer state replayed");
 }
 
 }  // namespace rt::gfx

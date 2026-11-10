@@ -419,3 +419,18 @@ std::string musyxDspStats() {
 }
 
 }  // namespace rt
+
+// --- save states ----------------------------------------------------------------------------
+#include "../savestate.h"
+namespace rt {
+void musyxSaveState(state::Writer& w) {
+    w.section("MUSY");
+    w.pod(s_pendingFirstSize);
+    w.pod(s_expectList);
+}
+void musyxLoadState(state::Reader& r) {
+    r.section("MUSY");
+    r.pod(s_pendingFirstSize);
+    r.pod(s_expectList);
+}
+}  // namespace rt
