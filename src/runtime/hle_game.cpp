@@ -321,6 +321,22 @@ void hle_CameraSetup(Ctx& c) {
     f_7FC14B8C(c);
 }
 
+// The terrain's span array. TerrainSetup (0x7FD89210) allocates it at a mission's start with
+// one 4-byte (left, right) pair per grid row, as many rows as the view distance spans for the
+// game's own 4:3 view; every frame TerrainSpans (0x7FCBAA0C) rasterizes the view footprint onto
+// the terrain grid and writes one pair per row it covers, with no bound. Widened views (the
+// display's aspect, the terrain margin above) cover more rows: the pairs ran past the array
+// into the next heap block's header (the tile records, 0x80095FA4), and the game crashed in
+// HeapFree when the mission ended (or later). That one allocation (this return address) gets
+// four times the room, enough for 32:9 with the margin.
+void hle_HeapAlloc(Ctx& c) {
+    if (c.lr == 0x7FD893E8u) [[unlikely]] {
+        logf("wide", "terrain span array: room for %u rows instead of %u", c.r[3], c.r[3] / 4);
+        c.r[3] *= 4;
+    }
+    f_800070C4_orig(c);
+}
+
 // The targeting computer (cockpit view, Y). TargetingRect (0x7FCD5D08) projects the corners of
 // its screen with the camera's projection (+0xA4) to 640x480 screen units, and TargetingPass
 // (0x7FCD7D28, each frame pass) draws the orange screen there as a 2D quad and copies the EFB

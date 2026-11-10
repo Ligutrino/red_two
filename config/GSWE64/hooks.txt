@@ -35,3 +35,5 @@ hle     WeaponUpdate
 hle     CameraSetup
 # Widescreen: the targeting computer's screen is a 2D quad at corners projected from 3D
 hle     TargetingPass
+# Widescreen: the terrain's span array is sized for the 4:3 view; wider views overflowed it
+hle     HeapAlloc

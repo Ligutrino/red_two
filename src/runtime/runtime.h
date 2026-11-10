@@ -20,6 +20,8 @@ std::string traceRing(int n);  // recent guest function entries (R2_TRACE)
 void printTraceRing(FILE* f, int n);
 void debugInit();  // R2_LOGFN, R2_WATCH
 void dumpThreads();  // guest OSThread list (debugging)
+u32 peekGuest32(u32 a);  // a guest word without faulting (VM pages not mapped read as 0)
+std::string guestBacktrace();  // threads.cpp: the running guest thread's call chain (fatal errors)
 
 // --- memory ---------------------------------------------------------------------------
 constexpr u32 kMem1Size = 0x01800000;

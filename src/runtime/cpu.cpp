@@ -93,10 +93,23 @@ void debugInit() {
     }
 }
 
+// R2_WATCH_PTR (main.cpp): the watched range follows a pointer the game keeps
+void watchSet(u32 lo, u32 len) {
+    s_watchLo = lo;
+    s_watchHi = lo + len;
+    g_watch = len != 0;
+}
+
 void watchStore(u32 a, u32 v, int size) {
     if (a + u32(size) <= s_watchLo || a >= s_watchHi) return;
     const Ctx& c = curCtx();
     logf("watch", "store%d %08X = %08X in %s (lr %08X)", size * 8, a, v, describeAddr(c.curFn).c_str(), c.lr);
+    // R2_WATCH_BT=<n>: the guest call chain with the first n stores (who got there)
+    static int bt = getenv("R2_WATCH_BT") ? atoi(getenv("R2_WATCH_BT")) : 0;
+    if (bt > 0) {
+        bt--;
+        logf("watch", "  r1 %08X %s", c.r[1], guestBacktrace().c_str());
+    }
 }
 
 // Host-side writes into guest memory (DMA, HLE): same R2_WATCH range, physical addresses.

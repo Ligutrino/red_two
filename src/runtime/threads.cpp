@@ -230,6 +230,22 @@ HostFiber* newFiber() {
 
 Ctx& curCtx() { return s_cur->ctx; }
 
+// The running guest thread's calls (fatal errors): LR, then the return addresses its stack's
+// back chain holds (each frame's caller saved its LR at back chain + 4).
+std::string guestBacktrace() {
+    if (!s_cur) return {};
+    const Ctx& c = s_cur->ctx;
+    std::string out = "guest calls (fiber " + std::to_string(s_cur->id) + ", newest first): " + describeAddr(c.lr);
+    u32 sp = c.r[1];
+    for (int i = 0; i < 24 && sp; i++) {
+        const u32 next = peekGuest32(sp);
+        if (!next || next <= sp || next - sp > 0x100000) break;
+        out += " < " + describeAddr(peekGuest32(next + 4));
+        sp = next;
+    }
+    return out + "\n";
+}
+
 void threadsInit(Ctx*& boot) {
     NT_TIB* tib = reinterpret_cast<NT_TIB*>(NtCurrentTeb());
     s_root.base = tib->StackBase;

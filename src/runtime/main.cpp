@@ -49,7 +49,8 @@ void fatal(const char* fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
-    fprintf(stderr, "\nFATAL: %s\n", buf);
+    fprintf(stderr, "\n[%9.3f] FATAL: %s\n", double(tbNow() - s_t0Tb) / double(kTbClock), buf);
+    fprintf(stderr, "%s", guestBacktrace().c_str());
     if (g_trace) {
         fprintf(stderr, "recent guest functions (oldest first):\n");
         printTraceRing(stderr, 40);
@@ -167,7 +168,7 @@ std::string discFileAt(u64 off) {
 }
 
 // --- guest thread dump (debugging; races with the guest, reads memory without faulting) ---
-static u32 peek32(u32 a) {
+u32 peekGuest32(u32 a) {
     u8* p;
     if (isVm(a)) {
         p = g_vmRead[(a - kVmStart) >> 12];
@@ -184,23 +185,23 @@ static u32 peek32(u32 a) {
 void dumpThreads() {
     // OSThread: context 0x000, state u16 0x2C8, priority 0x2D0, queue 0x2DC, linkActive 0x2FC
     static const char* states[] = {"?", "ready", "running", "?", "waiting", "?", "?", "?", "moribund"};
-    u32 t = peek32(0x800000DC);
+    u32 t = peekGuest32(0x800000DC);
     for (int n = 0; t && n < 32; n++) {
-        const u32 state = peek32(t + 0x2C8) >> 16;
+        const u32 state = peekGuest32(t + 0x2C8) >> 16;
         std::string chain;
-        u32 sp = peek32(t + 4);
+        u32 sp = peekGuest32(t + 4);
         for (int d = 0; d < 10 && sp; d++) {
-            sp = peek32(sp);
-            const u32 lr = sp ? peek32(sp + 4) : 0;
+            sp = peekGuest32(sp);
+            const u32 lr = sp ? peekGuest32(sp + 4) : 0;
             if (!lr) break;
             char b[16];
             snprintf(b, sizeof b, " %08X", lr);
             chain += b;
         }
         logf("thread", "%08X %-8s prio %2u waits on %08X ctx lr %08X srr0 %08X | stack:%s", t,
-             state < 9 ? states[state] : "?", peek32(t + 0x2D0), peek32(t + 0x2DC), peek32(t + 0x84), peek32(t + 0x198),
+             state < 9 ? states[state] : "?", peekGuest32(t + 0x2D0), peekGuest32(t + 0x2DC), peekGuest32(t + 0x84), peekGuest32(t + 0x198),
              chain.c_str());
-        t = peek32(t + 0x2FC);
+        t = peekGuest32(t + 0x2FC);
     }
 }
 
@@ -212,6 +213,30 @@ void viFrameHook() {
     if (noGfx) input::poll();  // otherwise the renderer polls (Aurora pads)
     else gfx::vblank();
     state::scriptTick();  // R2_STATE_SCRIPT (tests)
+    // R2_WATCH_PTR=<addr>[,<offset>,<len>[,<from seconds>]] (hex): R2_WATCH on what the pointer at addr points to,
+    // offset -0x20 len 0x20 by default (the game's heap block header: who corrupts it?)
+    if (static const char* wp = getenv("R2_WATCH_PTR"); wp) {
+        static u32 at = 0, last = 0;
+        static s32 off = -0x20;
+        static u32 len = 0x20;
+        static double from = 0;  // ,<seconds>: start following then
+        if (!at) {
+            char* end;
+            at = u32(strtoul(wp, &end, 16));
+            if (*end == ',') off = s32(strtol(end + 1, &end, 16));
+            if (*end == ',') len = u32(strtoul(end + 1, &end, 16));
+            if (*end == ',') from = strtod(end + 1, &end);
+        }
+        const u32 p = double(tbNow() - s_t0Tb) / double(kTbClock) >= from ? peekGuest32(at) : 0;
+        if (p != last) {
+            last = p;
+            extern void watchSet(u32 lo, u32 len);
+            watchSet(p ? p + u32(off) : 0, p ? len : 0);
+            logf("watch", "%08X now points to %08X: watching %08X+%X (header %08X %08X %08X %08X %08X %08X %08X %08X)", at, p,
+                 p + u32(off), len, peekGuest32(p - 32), peekGuest32(p - 28), peekGuest32(p - 24), peekGuest32(p - 20),
+                 peekGuest32(p - 16), peekGuest32(p - 12), peekGuest32(p - 8), peekGuest32(p - 4));
+        }
+    }
     // R2_MEM_DUMP=<vblank>,<phys addr>,<len>[;...]: guest memory -> build/mem_<vblank>_<addr>.bin.
     static const char* memDump = getenv("R2_MEM_DUMP");
     for (const char* s = memDump; s && *s;) {
@@ -222,7 +247,7 @@ void viFrameHook() {
             // VM addresses: the pages mapped right now (others read as zero)
             std::vector<u8> buf(len & ~3u);
             for (u32 o = 0; o < buf.size(); o += 4) {
-                const u32 w = peek32(addr + o);
+                const u32 w = peekGuest32(addr + o);
                 buf[o] = u8(w >> 24), buf[o + 1] = u8(w >> 16), buf[o + 2] = u8(w >> 8), buf[o + 3] = u8(w);
             }
             char name[64];
@@ -255,7 +280,7 @@ void viFrameHook() {
             std::string line;
             for (u32 o = 0; o < len; o += 4) {
                 char b[12];
-                snprintf(b, sizeof b, "%s%08X", o % 32 ? " " : (o ? " | " : ""), peek32(addr + o));
+                snprintf(b, sizeof b, "%s%08X", o % 32 ? " " : (o ? " | " : ""), peekGuest32(addr + o));
                 line += b;
             }
             logf("peek", "v%u %08X: %s", s_frames, addr, line.c_str());
