@@ -934,6 +934,16 @@ void pageControls() {
         state::request(state::Op::Save, settings::get().stateSlot);
     if (buttonRow("Load state now", "LOAD", "Puts the game back the way it was saved in the slot."))
         state::request(state::Op::Load, settings::get().stateSlot);
+    {  // both devices' hotkeys at a glance (the HOTKEYS rows below show and change one device's)
+        const std::string padSave = hotkeys::label(settings::HkSaveState, true),
+                          padLoad = hotkeys::label(settings::HkLoadState, true),
+                          keySave = hotkeys::label(settings::HkSaveState, false),
+                          keyLoad = hotkeys::label(settings::HkLoadState, false);
+        ImGui::PushStyleColor(ImGuiCol_Text, vec(kHolo));
+        ImGui::Text("   Controller: %s saves, %s loads        Keyboard: %s saves, %s loads", padSave.c_str(), padLoad.c_str(),
+                    keySave.c_str(), keyLoad.c_str());
+        ImGui::PopStyleColor();
+    }
     heading("INPUT DEVICE");
     {
         const bool sel = rowBegin("Remap", "Which device's bindings this page shows and changes.");
@@ -1336,6 +1346,7 @@ void menuEvent(const void* p) {
         if (e.key.key == SDLK_F1) {
             logf("menu", "F1: %s", s_open ? "close" : "open");
             s_usingPad = false;
+            if (!s_open) s_padDevice = false;  // Controls shows the keyboard's
             setOpen(!s_open);
         } else if (e.key.key == SDLK_ESCAPE && s_open) {
             logf("menu", "Esc: close");
@@ -1359,6 +1370,7 @@ void menuEvent(const void* p) {
         if (toggle) {
             logf("menu", "controller Back: %s", s_open ? "close" : "open");
             s_usingPad = true;
+            if (!s_open) s_padDevice = aurora::pad::port_controller(0) != 0;  // Controls shows the controller's
             setOpen(!s_open);
         }
     }
