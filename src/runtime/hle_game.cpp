@@ -223,6 +223,18 @@ void setGameAspect(double aspect) {
 constexpr double kSceneMargin = 1.2;
 constexpr double kTerrainMargin = 1.2;
 
+// MTXPerspective (SDK 0x8002FEA4; fovY f1, aspect f2, near f3, far f4). The HUD's cameras (the
+// radar globe: 0x7FCD22C4, 0x7FCD4F60, 0x7FCD50F4) build their projections here, not through
+// CameraSetup, from the aspect their objects copied when the mission started: after a window
+// resize they kept the old window's (2.37 at 1280x1024: the globe drew squeezed). An aspect
+// setGameAspect wrote before is a widened 4:3 one, like in hle_CameraSetup: today's instead.
+void hle_MTXPerspective(Ctx& c) {
+    const double aspect = c.f[2];
+    const double display = s_displayAspect.load(std::memory_order_relaxed);
+    if (std::abs(aspect - display) >= 0.0005 && oldGameAspect(aspect)) c.f[2] = c.ps1[2] = rsingle(display);
+    f_8002FEA4_orig(c);
+}
+
 void hle_CameraSetup(Ctx& c) {
     double aspect = c.f[1];
     const double fov = c.f[2];

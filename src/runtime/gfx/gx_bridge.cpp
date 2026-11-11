@@ -1163,6 +1163,83 @@ void xwingDraw(const u8* p, u32 len) {
     if (swap) bpFull(gen);
 }
 
+// --- full-frame cards in widened views ------------------------------------------------------
+// The crawl's "A long time ago..." card is one perspective quad (640x384 CMPR: blue text on
+// black, clamped) placed to fill the cinematic's own 2.105:1 view edge to edge. Widescreen opens
+// that view, and on displays wider than 2.105 (21:9, 32:9) the starfield drawn before it showed
+// past its sides. Such a quad (four vertices covering the game's view, direct f32 positions, no
+// indexed attributes) gets two extensions drawn after it: from each side edge outward, every
+// vertex carrying that edge's attributes (texture coordinates: the clamped edge column, the
+// card's border). They do not overlap the card, so a fading card blends the same everywhere;
+// where the view is no wider than the screen they lie off-screen.
+void cardFill(const u8* p, u32 len) {
+    if (p[0] != 0x80 || be16(p + 1) != 4 || !s_projKnown || s_xfProj[6] != 0) return;  // one perspective quad
+    const u32 lo = s_vcdLo, hi = s_vcdHi, fmt = p[0] & 7, A = s_vatA[fmt];
+    if (lo & 0x1FF) return;                    // per-vertex matrix indices
+    if (((lo >> 9) & 3) != 1 || ((A >> 1) & 7) != 4 || !(A & 1)) return;  // direct f32 xyz positions
+    for (u32 sh = 11; sh <= 15; sh += 2)
+        if (((lo >> sh) & 3) > 1) return;     // indexed normals / colors
+    for (u32 t = 0; t < 8; t++)
+        if (((hi >> (2 * t)) & 3) > 1) return;  // indexed texture coordinates
+    const u32 vs = (len - 3) / 4;
+    if (vs < 12) return;
+    const float* m = &s_xfMtx[(s_cpMtxA & 0x3F) * 4];
+    const float p0 = asFloat(s_xfProj[0]), p1 = asFloat(s_xfProj[1]), p2 = asFloat(s_xfProj[2]),
+                p3 = asFloat(s_xfProj[3]);
+    float pos[4][3], nx[4], ny[4];
+    for (u32 i = 0; i < 4; i++) {
+        const u8* d = p + 3 + i * vs;  // positions come first (no matrix indices)
+        for (u32 c = 0; c < 3; c++) pos[i][c] = asFloat(be32(d + 4 * c));
+        const float* v = pos[i];
+        const float ex = m[0] * v[0] + m[1] * v[1] + m[2] * v[2] + m[3];
+        const float ey = m[4] * v[0] + m[5] * v[1] + m[6] * v[2] + m[7];
+        const float ez = m[8] * v[0] + m[9] * v[1] + m[10] * v[2] + m[11];
+        if (ez >= 0.f) return;
+        nx[i] = (p0 * ex + p1 * ez) / -ez;
+        ny[i] = (p2 * ey + p3 * ez) / -ez;
+    }
+    const float minX = std::min({nx[0], nx[1], nx[2], nx[3]}), maxX = std::max({nx[0], nx[1], nx[2], nx[3]});
+    const float minY = std::min({ny[0], ny[1], ny[2], ny[3]}), maxY = std::max({ny[0], ny[1], ny[2], ny[3]});
+    if (minX > -0.98f || maxX < 0.98f || minY > -0.98f || maxY < 0.98f) return;  // not the whole view
+    // a screen-aligned rectangle: two vertices on each side edge
+    const float tol = 0.02f * (maxX - minX);
+    bool left[4];
+    for (u32 i = 0; i < 4; i++) {
+        left[i] = nx[i] - minX < tol;
+        if (!left[i] && maxX - nx[i] >= tol) return;
+    }
+    if (left[0] + left[1] + left[2] + left[3] != 2) return;
+    u32 partner[4];  // the vertex on the other side edge in the same row
+    for (u32 i = 0; i < 4; i++) {
+        float best = 1e30f;
+        for (u32 j = 0; j < 4; j++)
+            if (left[j] != left[i] && std::fabs(ny[j] - ny[i]) < best) {
+                best = std::fabs(ny[j] - ny[i]);
+                partner[i] = j;
+            }
+    }
+    constexpr float kOut = 4.f;  // how far out (card widths): past a 32:9 screen's edge
+    static std::vector<u8> buf;
+    buf.assign(p, p + len);
+    for (int side = 0; side < 2; side++) {  // 0: left extension, 1: right
+        for (u32 i = 0; i < 4; i++) {
+            const bool onSide = left[i] == (side == 0);
+            const u32 src = onSide ? i : partner[i];  // the side edge's vertex in this row
+            u8* d = buf.data() + 3 + i * vs;
+            memcpy(d, p + 3 + src * vs, vs);
+            if (onSide) {  // moved outward, away from the opposite edge
+                const u32 o = partner[i];
+                for (u32 c = 0; c < 3; c++) {
+                    const u32 w = asBits(pos[i][c] + (pos[i][c] - pos[o][c]) * kOut);
+                    d[4 * c] = u8(w >> 24); d[4 * c + 1] = u8(w >> 16); d[4 * c + 2] = u8(w >> 8); d[4 * c + 3] = u8(w);
+                }
+            }
+        }
+        fifo::write_data(buf.data(), len);
+        fifo::finish_draw();
+    }
+}
+
 void tileFrameEnd() {
     s_tileRun.clear();
     s_tileRunLast = 0;
@@ -1249,6 +1326,7 @@ void onCommand(const u8* p, u32 len) {
         fifo::finish_draw();
         tileDraw(p, len);
         xwingDraw(p, len);
+        cardFill(p, len);
         return;
     }
     switch (op) {

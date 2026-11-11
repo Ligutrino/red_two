@@ -25,6 +25,7 @@
 80006A40 main
 # MusyX (identified against the MusyX decomp, MUSY_VERSION <= 2.0.0: its DSP ucode is byte-identical)
 8001D9EC salBuildCommandList   # nsDelay < 200 -> 10430 cycles; (nsDelay - 200) * busClock/400/5000 + 10430
+8002FEA4 MTXPerspective        # SDK (f1 fovY degrees, f2 aspect, f3 near, f4 far -> r3): the HUD's cameras (radar globe: callers 0x7FCD22C4, 0x7FCD4F60, 0x7FCD50F4, fov 100.4) pass the aspect their camera objects copied when created
 800269C0 salCallback           # AI DMA callback (hw_dolphin.c): index++, AIInitDMA 0x8004156C, OSGetTick -> salLastTick r13-18364;
                                # salDspIsDone r13-18376 (0x800965D8), salLogicIsWaiting r13-18372 (0x800965DC),
                                # salLogicActive r13-18368 (0x800965E0), userCallback r13-18384, salAIBufferBase r13-18380 (0x800965D4),

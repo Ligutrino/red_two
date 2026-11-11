@@ -33,6 +33,9 @@ hle     CraftDestroy
 hle     WeaponInit
 hle     WeaponUpdate
 hle     CameraSetup
+# Widescreen: HUD cameras (the radar globe) build projections from the aspect their objects
+# copied when the mission started; after a resize that one is stale
+hle     MTXPerspective
 # Widescreen: the targeting computer's screen is a 2D quad at corners projected from 3D
 hle     TargetingPass
 # Widescreen: the terrain's span array is sized for the 4:3 view; wider views overflowed it
