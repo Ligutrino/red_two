@@ -12,6 +12,7 @@ bool musyxDspMail(u32 mail, u32& reply);
 std::string musyxDspStats();  // lists and voice frames since the last call
 
 u8* aramBase();  // hw.cpp: the 16 MiB of ARAM
+void aiTraceEvent(char kind, u32 v);  // hw.cpp: R2_AI_LOG's audio event trail
 
 namespace audio {
 void init();  // host audio output (SDL3); R2_NO_AUDIO=1 for none, R2_AUDIO_DUMP=<file.wav>

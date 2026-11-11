@@ -25,6 +25,12 @@
 80006A40 main
 # MusyX (identified against the MusyX decomp, MUSY_VERSION <= 2.0.0: its DSP ucode is byte-identical)
 8001D9EC salBuildCommandList   # nsDelay < 200 -> 10430 cycles; (nsDelay - 200) * busClock/400/5000 + 10430
+800269C0 salCallback           # AI DMA callback (hw_dolphin.c): index++, AIInitDMA 0x8004156C, OSGetTick -> salLastTick r13-18364;
+                               # salDspIsDone r13-18376 (0x800965D8), salLogicIsWaiting r13-18372 (0x800965DC),
+                               # salLogicActive r13-18368 (0x800965E0), userCallback r13-18384, salAIBufferBase r13-18380 (0x800965D4),
+                               # salAIBufferIndex (byte) r13-18348; found as the caller chain of salBuildCommandList (salCtrlDsp 0x80026CB4)
+80026A74 dspResumeCallback     # salDspIsDone = 1; runs the waiting user callback
+80026CB4 salCtrlDsp            # salBuildCommandList + mails 0xBABE0000|size and the list
 # Game (VM image), identified by reading its code
 7FD46244 GameFrameDelta          # returns 1/(59.94 - lost fps) (f1); stored per frame at 0x7FDE8288 by 0x7FC02CF0
 7FC397D4 WeaponTrigger           # (weapon r3, input r4): fire button (input+0xDC mask): tap -> 1 (WeaponUpdate 0x7FC39F24 fires), hold 0.3 s -> hold mode (vt+0x70/+0x78), release after 1.3 s -> 2; weapon+0xC locks, +0x51C allows hold. (Was taken for the camera button: it is the weapons')

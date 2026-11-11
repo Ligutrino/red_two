@@ -363,6 +363,7 @@ void runList(u32 addr) {
                 }
             }
             watchHost(arg32(2), kN * 4, "DSP output");
+            aiTraceEvent('M', arg32(2));
             watchHost(arg32(0), kN * 4, "DSP surround");
             addr += 2 * 5;
             break;

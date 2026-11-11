@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 #include "../mods.h"
 #include "../runtime.h"
@@ -116,6 +117,47 @@ void viSetRate(int fps) {
 }
 double viRate() { return s_viHz; }
 u32 viRetraceCount() { return s_viFrames; }
+
+// R2_AI_LOG=1: audio events (B boundary + block latched, A AI interrupt acknowledged,
+// M MusyX mixed a block into an AI buffer, D DSP interrupt acknowledged); a block that plays
+// without a new mix since it last played prints the recent ones.
+namespace {
+struct AiEvent {
+    u64 tb;
+    char kind;
+    u32 v;
+};
+AiEvent s_aiEvents[24];
+u32 s_aiEventCount = 0;
+std::unordered_map<u32, u32> s_aiMixes, s_aiMixesPlayed;
+}  // namespace
+bool aiTraceOn() {
+    static const bool on = envFlag("R2_AI_LOG");
+    return on;
+}
+void aiTraceEvent(char kind, u32 v) {
+    if (!aiTraceOn()) return;
+    if (kind == 'M' || kind == 'B') v &= 0x03FFFFE0;
+    s_aiEvents[s_aiEventCount++ % std::size(s_aiEvents)] = {tbNow(), kind, v};
+    if (kind == 'M') s_aiMixes[v]++;
+    if (kind != 'B') return;
+    const u32 mixes = s_aiMixes[v];
+    const auto it = s_aiMixesPlayed.find(v);
+    // (a skipped cinematic runs the audio clock fast and silent: blocks repeat there by design)
+    if (it != s_aiMixesPlayed.end() && it->second == mixes && s_audioSpeed == 1.0 && !s_audioMute) {
+        std::string trail;
+        const u64 now = tbNow();
+        for (u32 i = 0; i < std::size(s_aiEvents) && i < s_aiEventCount; i++) {
+            const AiEvent& e = s_aiEvents[(s_aiEventCount - 1 - i) % std::size(s_aiEvents)];
+            char b[48];
+            if (e.v) snprintf(b, sizeof b, " %c:%04X@%.1f", e.kind, e.v & 0xFFFF, double(now - e.tb) * 1000.0 / kTbClock);
+            else snprintf(b, sizeof b, " %c@%.1f", e.kind, double(now - e.tb) * 1000.0 / kTbClock);
+            trail += b;
+        }
+        logf("ai", "block %08X plays without a new mix; recent (ms ago):%s", v, trail.c_str());
+    }
+    s_aiMixesPlayed[v] = mixes;
+}
 
 namespace {
 
@@ -936,13 +978,64 @@ void aramDma() {
     schedule(EV_ARAM, s_aramDoneTb);
 }
 
-u64 s_aiDue = 0;  // when the AI DMA block playing now ends
+u64 s_aiDue = 0;           // when the AI DMA block playing now ends
+
+// MusyX's AI interrupt state (hw_dolphin.c; small data, r13 = 0x8009ADA0), identified in
+// salCallback 0x800269C0 (AIInitDMA, OSGetTick -> salLastTick, then these flags):
+// salLogicIsWaiting r13-18372 (the interrupt came before the DSP finished: the mix waits for
+// the DSP's resume) and salLogicActive r13-18368 (its callback is mixing the block two ahead
+// and running the synth for the next frame, interrupts enabled). An AI interrupt taken while
+// either is set loses that frame's mix.
+// salAIBufferBase r13-18380 (four 0x280-byte blocks) precedes them.
+constexpr u32 kSalAIBufferBase = 0x000965D4;  // salLogicIsWaiting +8, salLogicActive +12
+u32 rdPhys32(const u8* p) { return (u32(p[0]) << 24) | (u32(p[1]) << 16) | (u32(p[2]) << 8) | p[3]; }
+// the DMA plays MusyX's buffers (else nothing waits: boot, other AI users)
+bool musyxPlaying() {
+    const u8* p = physPtr(kSalAIBufferBase, 4);
+    const u32 base = p ? rdPhys32(p) & 0x03FFFFE0 : 0;
+    return base && s_aiDma.addr >= base && s_aiDma.addr < base + 4 * 0x280;
+}
+bool musyxFrameBusy() {
+    const u8* p = physPtr(kSalAIBufferBase + 8, 8);
+    return p && (rdPhys32(p) == 1 || rdPhys32(p + 4) == 1);
+}
 
 void onAi() {
     if (!s_aiDma.on) return;
+    // The game hands the DMA its next buffer from the AI interrupt, and MusyX mixes a block two
+    // ahead from the same handler. We take interrupts at the guest thread's safepoints: after a
+    // boundary a few ms late (the guest held up on the host) the catch-up boundaries came back
+    // to back. Before the handler ran, the block just played was latched again (5 ms repeated);
+    // while MusyX's callback still ran, its next interrupt skipped a mix (a stale block two
+    // later): clicks either way. Hardware's boundaries are 5 ms apart and the game always keeps
+    // up, so a boundary now waits until the handler gave the DMA its next buffer (AIInitDMA:
+    // the address registers moved on; the AIDINT acknowledgement comes before that) and MusyX
+    // is done with that frame, looking again every 0.5 ms, at most kAiWaitMax: the catch-up
+    // runs as fast as the game handles it and the host's audio cushion covers the delay.
+    // Not while a cinematic is skipped: silent, and the audio clock must keep the game's pace.
+    const u64 now = tbNow();
+    constexpr u64 kAiWaitMax = kTbClock / 50;  // 20 ms
+    if (s_audioSpeed == 1.0 && (dspCsr() & CSR_AIDMSK) && s_aiDue && now - s_aiDue < kAiWaitMax &&
+        musyxPlaying()) {
+        const u32 next = ((u32(dsp[0x30 / 2]) << 16) | dsp[0x32 / 2]) & 0x03FFFFE0;
+        if ((dspCsr() & CSR_AIDINT) || next == s_aiDma.addr || musyxFrameBusy()) {
+            schedule(EV_AI, now + kTbClock / 2000);
+            return;
+        }
+    }
+    static const bool aiLog = envFlag("R2_AI_LOG");  // R2_AI_LOG=1: late or repeated blocks
+    if (aiLog) {
+        const u32 next = ((u32(dsp[0x30 / 2]) << 16) | dsp[0x32 / 2]) & 0x03FFFFE0;
+        const bool pending = dspCsr() & CSR_AIDINT;
+        const double late = s_aiDue ? double(now - s_aiDue) * 1000.0 / kTbClock : 0.0;
+        if ((pending || next == s_aiDma.addr || late > 2.0) && s_audioSpeed == 1.0)
+            logf("ai", "boundary %.2f ms late: interrupt %s, next %08X%s", late, pending ? "NOT handled" : "handled",
+                 next, next == s_aiDma.addr ? " = the block just played" : "");
+    }
     // the block just finished: latch the next one from the registers and interrupt
     s_aiDma.addr = ((u32(dsp[0x30 / 2]) << 16) | dsp[0x32 / 2]) & 0x03FFFFE0;
     s_aiDma.blocks = dsp[0x36 / 2] & 0x7FFF;
+    aiTraceEvent('B', s_aiDma.addr);
     dspCsr() |= CSR_AIDINT;
     dspUpdateIrq();
     const u64 samples = u64(s_aiDma.blocks ? s_aiDma.blocks : 1) * 32 / 4;
@@ -954,7 +1047,7 @@ void onAi() {
     // busy) must not slow the audio clock down. Resynchronise only after a long stall.
     // Skipping shortens the blocks: MusyX (synthesis, sequencer, streams) keeps pace.
     u64& due = s_aiDue;
-    const u64 now = tbNow(), period = u64(double(samples) * double(kTbClock) / (double(rate) * s_audioSpeed));
+    const u64 period = u64(double(samples) * double(kTbClock) / (double(rate) * s_audioSpeed));
     due = (due && now - due < 4 * period) ? due + period : now + period;
     schedule(EV_AI, due);
 }
@@ -1004,6 +1097,8 @@ void dspWrite(u32 off, u16 v) {
         c = u16((c & (CSR_AIDINT | CSR_ARINT | CSR_DSPINT | CSR_DMABUSY)) |
                 (v & ~(CSR_AIDINT | CSR_ARINT | CSR_DSPINT | CSR_DMABUSY | CSR_RES)));
         c &= u16(~ack);
+        if (ack & CSR_AIDINT) aiTraceEvent('A', 0);
+        if (ack & CSR_DSPINT) aiTraceEvent('D', 0);
         if (v & CSR_RES) dspReset();
         // released from halt after a reset: the ROM boots and says hello
         if ((old & CSR_HALT) && !(c & CSR_HALT) && s_dspState == DspState::Reset) {
