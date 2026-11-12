@@ -62,6 +62,7 @@ u64 s_lastFrameTb = 0;
 u64 s_frames = 0;
 u64 s_vblanks = 0;    // retraces seen (R2_GX_SKIP windows)
 u32 s_frameDraws = 0;  // draws so far in this presented frame (R2_GX_SKIP i<from>-<to>)
+bool s_topCopied = false;  // this frame already has a display copy at the XFB's first line
 
 // --- raw state shadowed from the stream ---
 u32 s_bpMask = 0xFFFFFF;
@@ -217,7 +218,10 @@ void frameLog(u64 endStart, u64 endDone) {
     // R2_FRAME_LOG=1: every 10 s; =<n> (2 or more): every n seconds
     static const int secs = getenv("R2_FRAME_LOG") ? std::max(1, atoi(getenv("R2_FRAME_LOG"))) : 0;
     if (!secs) return;
-    static u64 last = 0, windowStart = 0, frames = 0, over = 0, maxInterval = 0, endSum = 0, endMax = 0, drawsSum = 0;
+    static u64 last = 0, windowStart = 0, frames = 0, over = 0, maxInterval = 0, endSum = 0, endMax = 0, drawsSum = 0,
+               drawsMax = 0;
+    // Aurora's per-frame buffers, largest frame (its stats describe the last frame it finished)
+    static u32 vertMax = 0, idxMax = 0, uniMax = 0, storMax = 0;
     const u64 period = u64(double(kTbClock) / viRate());
     if (last) {
         const u64 interval = endDone - last;
@@ -230,14 +234,24 @@ void frameLog(u64 endStart, u64 endDone) {
     endSum += endDone - endStart;
     endMax = std::max(endMax, endDone - endStart);
     drawsSum += s_frameDraws;
+    drawsMax = std::max<u64>(drawsMax, s_frameDraws);
+    if (const AuroraStats* st = aurora_get_stats()) {
+        vertMax = std::max(vertMax, st->lastVertSize);
+        idxMax = std::max(idxMax, st->lastIndexSize);
+        uniMax = std::max(uniMax, st->lastUniformSize);
+        storMax = std::max(storMax, st->lastStorageSize);
+    }
     if (endDone - windowStart >= u64(secs == 1 ? 10 : secs) * kTbClock) {
         auto ms = [](u64 tb) { return double(tb) * 1000.0 / double(kTbClock); };
         logf("frame", "%llu frames (%.1f fps), %llu over 1.5 periods, longest %.2f ms; end of frame avg %.2f max %.2f ms; "
-             "%llu draws/frame", (unsigned long long)frames, double(frames) * double(kTbClock) / double(endDone - windowStart),
+             "%llu draws/frame (max %llu); largest frame: verts %u KiB, indices %u KiB, uniforms %u KiB, storage %u KiB",
+             (unsigned long long)frames, double(frames) * double(kTbClock) / double(endDone - windowStart),
              (unsigned long long)over, ms(maxInterval), ms(endSum) / double(frames), ms(endMax),
-             (unsigned long long)(drawsSum / frames));
+             (unsigned long long)(drawsSum / frames), (unsigned long long)drawsMax, vertMax >> 10, idxMax >> 10,
+             uniMax >> 10, storMax >> 10);
         windowStart = endDone;
-        frames = over = maxInterval = endSum = endMax = drawsSum = 0;
+        frames = over = maxInterval = endSum = endMax = drawsSum = drawsMax = 0;
+        vertMax = idxMax = uniMax = storMax = 0;
     }
 }
 
@@ -255,6 +269,7 @@ void endFrame() {
     s_inFrame = false;
     s_frames++;
     s_frameDraws = 0;
+    s_topCopied = false;
     s_lastFrameTb = tbNow();
 }
 
@@ -1466,11 +1481,18 @@ void onCommand(const u8* p, u32 len) {
             const u32 h = ((s_bp[0x4A] >> 10) & 0x3FF) + 1;
             u32 line = 0, lines = 0;
             const bool shown = disp && viLocateCopy(dest, stride, line, lines);
-            const bool completes = shown && line + h >= lines;  // reaches the bottom: frame done
+            // Reaching the bottom completes the frame. So does a second copy to the top (a
+            // frame that never reached the bottom was a whole picture after all), which bounds
+            // how many game frames can pile into one of Aurora's. Battle of Hoth's intro copies
+            // its first 304-line frame while the VI still scans 450 lines (the new VI setup
+            // lands at the next retrace), the second into an XFB the VI does not show yet, and
+            // only the third completes: ~54,000 draws in one frame (Aurora patch 0018).
+            const bool completes = shown && (line + h >= lines || (line == 0 && s_topCopied));
+            if (shown && line == 0) s_topCopied = true;
             if (disp && s_copyLog)
-                logf("gfx", "display copy src %u,%u %ux%u stride %u -> %08X: %s line %u of %u", s_bp[0x49] & 0x3FF,
+                logf("gfx", "display copy src %u,%u %ux%u stride %u -> %08X: %s line %u of %u (%u draws in the frame)", s_bp[0x49] & 0x3FF,
                      (s_bp[0x49] >> 10) & 0x3FF, (s_bp[0x4A] & 0x3FF) + 1, h, stride, dest, shown ? "XFB" : "not in XFB",
-                     line, lines);
+                     line, lines, s_frameDraws);
             static const bool presentAtTexCopy = getenv("R2_NO_XFB") && atoi(getenv("R2_NO_XFB")) == 2;
             if (!disp && presentAtTexCopy) {  // debugging: show the EFB as a texture copy sees it
                 endFrame();

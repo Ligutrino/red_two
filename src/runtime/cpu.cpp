@@ -72,13 +72,20 @@ void dispatch(Ctx& c, u32 addr) {
 static u32 s_ring[64];
 static volatile u32 s_ringPos;
 static std::vector<u32> s_logFns;  // R2_LOGFN=addr,addr,...
+static std::vector<u32> s_logFnLr;  // the caller filter of each (0: any)
 static u32 s_watchLo = 0, s_watchHi = 0;
+static u32 s_watchValLo = 0, s_watchValHi = 0;  // R2_WATCH_VALUE: 32-bit stores of such values
+static double s_watchValFrom = 0;
+static u32 s_watchValMinAddr = 0;
 bool g_watch = false;
 
 void debugInit() {
-    if (const char* v = getenv("R2_LOGFN")) {
+    if (const char* v = getenv("R2_LOGFN")) {  // addr[@lr],...: @lr logs only calls returning there
         for (const char* p = v; *p;) {
             s_logFns.push_back(u32(strtoul(p, const_cast<char**>(&p), 16)));
+            u32 lr = 0;
+            if (*p == '@') lr = u32(strtoul(p + 1, const_cast<char**>(&p), 16));
+            s_logFnLr.push_back(lr);
             while (*p == ',' || *p == ' ') p++;
         }
         if (!s_logFns.empty()) g_trace = true;
@@ -91,6 +98,17 @@ void debugInit() {
         s_watchHi = s_watchLo + len;
         g_watch = true;
     }
+    // R2_WATCH_VALUE=<lo>,<hi>[,<from seconds>[,<lowest address>]] (hex but the seconds): every
+    // 32-bit guest store of a value in [lo, hi), e.g. a pointer past the end of memory (who
+    // wrote it), and DMA writes carrying such a word; the first 20 with the guest call chain
+    if (const char* v = getenv("R2_WATCH_VALUE")) {
+        char* end = nullptr;
+        s_watchValLo = u32(strtoul(v, &end, 16));
+        s_watchValHi = end && *end == ',' ? u32(strtoul(end + 1, &end, 16)) : s_watchValLo + 1;
+        if (end && *end == ',') s_watchValFrom = strtod(end + 1, &end);
+        if (end && *end == ',') s_watchValMinAddr = u32(strtoul(end + 1, nullptr, 16));
+        g_watch = true;
+    }
 }
 
 // R2_WATCH_PTR (main.cpp): the watched range follows a pointer the game keeps
@@ -101,6 +119,16 @@ void watchSet(u32 lo, u32 len) {
 }
 
 void watchStore(u32 a, u32 v, int size) {
+    if (size == 4 && v >= s_watchValLo && v < s_watchValHi && a < 0xCC000000 && a >= s_watchValMinAddr) {
+        static int n = 0;
+        static const u64 t0 = tbNow();
+        if (n < 200 && double(tbNow() - t0) / double(kTbClock) >= s_watchValFrom) {
+            const Ctx& c = curCtx();
+            logf("watch", "value store %08X = %08X in %s (lr %08X)%s%s", a, v, describeAddr(c.curFn).c_str(), c.lr,
+                 n < 20 ? " " : "", n < 20 ? guestBacktrace().c_str() : "");
+            n++;
+        }
+    }
     if (a + u32(size) <= s_watchLo || a >= s_watchHi) return;
     const Ctx& c = curCtx();
     logf("watch", "store%d %08X = %08X in %s (lr %08X)", size * 8, a, v, describeAddr(c.curFn).c_str(), c.lr);
@@ -115,6 +143,19 @@ void watchStore(u32 a, u32 v, int size) {
 // Host-side writes into guest memory (DMA, HLE): same R2_WATCH range, physical addresses.
 void watchHost(u32 phys, u32 len, const char* who) {
     if (!g_watch) return;
+    if (s_watchValHi > s_watchValLo) {  // R2_WATCH_VALUE: words of the DMA'd data
+        const u8* d = physPtr(phys & 0x1FFFFFFC, len);
+        static int n = 0;
+        for (u32 i = 0; d && i + 4 <= len && n < 50; i += 4) {
+            const u32 w = u32(d[i] << 24 | d[i + 1] << 16 | d[i + 2] << 8 | d[i + 3]);
+            if (w >= s_watchValLo && w < s_watchValHi && (0x80000000u | ((phys & 0x1FFFFFFC) + i)) >= s_watchValMinAddr) {
+                logf("watch", "%s wrote %08X at %08X (in %s)", who, w, (phys & 0x1FFFFFFC) + i,
+                     describeAddr(curCtx().curFn).c_str());
+                n++;
+            }
+        }
+    }
+    if (s_watchHi <= s_watchLo) return;
     const u32 lo = s_watchLo & 0x1FFFFFFF, hi = lo + (s_watchHi - s_watchLo);
     phys &= 0x1FFFFFFF;
     if (phys + len <= lo || phys >= hi) return;
@@ -128,8 +169,8 @@ void traceEnter(Ctx& c, u32 addr) {
     s_ring[s_ringPos & 63] = addr;
     s_ringPos = s_ringPos + 1;
     if (!s_logFns.empty()) [[unlikely]] {
-        for (u32 f : s_logFns)
-            if (f == addr) {
+        for (size_t i = 0; i < s_logFns.size(); i++)
+            if (s_logFns[i] == addr && (!s_logFnLr[i] || s_logFnLr[i] == c.lr)) {
                 logf("call", "%s(r3=%08X r4=%08X r5=%08X r6=%08X r7=%08X f1=%g f2=%g f3=%g) lr=%08X r1=%08X r2=%08X r13=%08X",
                      describeAddr(addr).c_str(), c.r[3], c.r[4], c.r[5], c.r[6], c.r[7], c.f[1], c.f[2], c.f[3], c.lr, c.r[1],
                      c.r[2], c.r[13]);

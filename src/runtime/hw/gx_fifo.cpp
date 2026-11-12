@@ -373,7 +373,10 @@ void gxPiWrite(u32 off, u32 v) {
     if (fifoLog()) logf("fifo", "PI %02X = %08X (gp pending %u)", off, v, s_gpLen);
     switch (off) {
     case 0x0C: s_piBase = v & 0x03FFFFE0; break;
-    case 0x10: s_piEnd = v & 0x03FFFFE0; break;
+    // Battle of Hoth records display lists with base 0, end 0x04000000 (past all memory: no wrap)
+    // and the write pointer at the list; masked to 26 bits that end read as 0, "no FIFO", and
+    // every burst of the list was dropped. (Dolphin keeps all bits of these registers.)
+    case 0x10: s_piEnd = v & 0x07FFFFE0; break;
     case 0x14: s_piWp = v & 0x23FFFFE0; break;
     case 0x18:  // FIFO reset: the write pointer goes back to the base
         if (v & 1) s_piWp = s_piBase;

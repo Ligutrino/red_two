@@ -5,11 +5,14 @@
 // Environment: R2_IO_LOG=1 (every hardware register access), R2_DVD_LOG=1, R2_DSP_LOG=1,
 // R2_ARAM_LOG=1, R2_TRACE=1 (record guest function entries; ring dumped on fatal errors).
 #include <windows.h>
+#include <dbghelp.h>
 
+#include <csignal>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <mutex>
 #include <thread>
 #include <string>
@@ -86,12 +89,54 @@ void restartGame() {
     quit(0);
 }
 
+// The host call stack, symbolized from the PDB (fatal errors only).
+void printHostStack(FILE* f, int skip) {
+    void* frames[48];
+    const USHORT n = CaptureStackBackTrace(DWORD(skip + 1), 48, frames, nullptr);
+    const HANDLE proc = GetCurrentProcess();
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    SymInitialize(proc, nullptr, TRUE);  // fails harmlessly if the profiler already did it
+    fprintf(f, "host call stack (thread %lu):\n", GetCurrentThreadId());
+    for (USHORT i = 0; i < n; i++) {
+        alignas(SYMBOL_INFO) char buf[sizeof(SYMBOL_INFO) + 256];
+        auto* si = reinterpret_cast<SYMBOL_INFO*>(buf);
+        si->SizeOfStruct = sizeof(SYMBOL_INFO);
+        si->MaxNameLen = 255;
+        DWORD64 disp = 0;
+        const DWORD64 a = DWORD64(frames[i]);
+        if (SymFromAddr(proc, a, &disp, si)) {
+            IMAGEHLP_LINE64 line{};
+            line.SizeOfStruct = sizeof line;
+            DWORD ldisp = 0;
+            if (SymGetLineFromAddr64(proc, a, &ldisp, &line))
+                fprintf(f, "  %s+0x%llx (%s:%lu)\n", si->Name, (unsigned long long)disp, line.FileName, line.LineNumber);
+            else
+                fprintf(f, "  %s+0x%llx\n", si->Name, (unsigned long long)disp);
+        } else {
+            fprintf(f, "  %p\n", frames[i]);
+        }
+    }
+}
+
 static LONG WINAPI onHostCrash(EXCEPTION_POINTERS* ep) {
     fprintf(stderr, "\nFATAL: host exception %08lX at %p\n", ep->ExceptionRecord->ExceptionCode,
             ep->ExceptionRecord->ExceptionAddress);
     if (g_trace) printTraceRing(stderr, 40);
     quit(3);
     return EXCEPTION_EXECUTE_HANDLER;
+}
+
+// abort() (Aurora's and the C++ library's last resort, std::terminate) ends the process through
+// __fastfail, past the unhandled-exception filter: say where it came from first.
+static void onAbort(int) {
+    fprintf(stderr, "\n[%9.3f] FATAL: abort() called\n", double(tbNow() - s_t0Tb) / double(kTbClock));
+    printHostStack(stderr, 1);
+    fprintf(stderr, "%s", guestBacktrace().c_str());
+    if (g_trace) {
+        fprintf(stderr, "recent guest functions (oldest first):\n");
+        printTraceRing(stderr, 40);
+    }
+    quit(4);
 }
 
 bool envFlag(const char* name) {
@@ -406,6 +451,9 @@ int main(int argc, char** argv) {
         SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof pt);
     }
     SetUnhandledExceptionFilter(onHostCrash);
+    signal(SIGABRT, onAbort);
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+    std::set_terminate([] { onAbort(SIGABRT); });
     SetConsoleCtrlHandler([](DWORD) -> BOOL { quit(0); return TRUE; }, TRUE);  // Ctrl+C / console closed
     debugInit();
     if (const char* w = getenv("R2_WATCHDOG")) {
