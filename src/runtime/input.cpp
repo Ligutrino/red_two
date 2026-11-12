@@ -19,17 +19,21 @@ bool s_ready = false;
 // R2_INPUT="<vblank>:<BUTTON>[*frames],...": scripted presses for automated runs.
 struct Press {
     u64 start, frames;
-    u16 button;
+    u32 button;  // GameCube buttons; kStick* above them
 };
+// script names SUP / SDOWN / SLEFT / SRIGHT: the main stick pushed fully that way
+constexpr u32 kStickUp = 1u << 16, kStickDown = 1u << 17, kStickLeft = 1u << 18, kStickRight = 1u << 19;
 std::vector<Press> s_script;
 u64 s_vblank = 0;
 
 void parseScript(const char* s) {
     static const struct {
         const char* name;
-        u16 bit;
-    } names[] = {{"LEFT", 0x0001}, {"RIGHT", 0x0002}, {"DOWN", 0x0004}, {"UP", 0x0008}, {"Z", 0x0010}, {"R", 0x0020},
-                 {"L", 0x0040}, {"A", 0x0100}, {"B", 0x0200}, {"X", 0x0400}, {"Y", 0x0800}, {"START", 0x1000}};
+        u32 bit;
+    } names[] = {{"LEFT", 0x0001},      {"RIGHT", 0x0002},     {"DOWN", 0x0004},      {"UP", 0x0008},
+                 {"Z", 0x0010},         {"R", 0x0020},         {"L", 0x0040},         {"A", 0x0100},
+                 {"B", 0x0200},         {"X", 0x0400},         {"Y", 0x0800},         {"START", 0x1000},
+                 {"SUP", kStickUp},     {"SDOWN", kStickDown}, {"SLEFT", kStickLeft}, {"SRIGHT", kStickRight}};
     while (*s) {
         char* end;
         const u64 start = strtoull(s, &end, 10);
@@ -117,7 +121,7 @@ void poll() {
             e.button = 0;
             e.triggerLeft = e.triggerRight = 0;
         }
-    u16 scripted = 0;
+    u32 scripted = 0;
     // script times count 59.94 Hz retraces, whatever the retrace rate (settings fps; it also
     // changes while a cinematic is skipped)
     static double scriptTime = 0;
@@ -127,7 +131,11 @@ void poll() {
         if (t >= p.start && t < p.start + p.frames) scripted |= p.button;
     if (scripted) {
         st[0].err = PAD_ERR_NONE;
-        st[0].button |= scripted;
+        st[0].button |= u16(scripted);
+        if (scripted & kStickUp) st[0].stickY = 127;
+        if (scripted & kStickDown) st[0].stickY = -127;
+        if (scripted & kStickLeft) st[0].stickX = -127;
+        if (scripted & kStickRight) st[0].stickX = 127;
     }
     static const bool padLog = envFlag("R2_PAD_LOG");
     if (padLog && s_vblank % 30 == 0) {

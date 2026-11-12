@@ -223,6 +223,28 @@ void setGameAspect(double aspect) {
 constexpr double kSceneMargin = 1.2;
 constexpr double kTerrainMargin = 1.2;
 
+// CameraHFovAtan (0x7FC8DE3C; only caller CameraSetup, 0x7FC14D30): atan of f1 clamped to
+// [-1, 1]. CameraSetup takes the horizontal fov (+0x130) as 2 * this(aspect * tan(fovY / 2)), so
+// it never passes 90 degrees, and the far-plane corners and side planes derived from it neither:
+// plenty at 4:3 (the cockpit's 55-degree view is 69.5 wide), but the cockpit at 2.13:1 shows 96
+// degrees (106 with the margin) and the Death Star's terrain (TerrainDraw 0x7FCBCCC4 lays out
+// the tiles inside the hull of the camera and the far corners seen from above) left the sides
+// out in a sawtooth, at 32:9 all but a wedge in the middle. While hle_CameraSetup sets up a widened volume in a mission the full atan
+// (0x8005348C, the SDK's) is taken, up to 70 degrees (140 wide): the terrain span array (4x its
+// rows, hle_HeapAlloc) holds a footprint twice the far corners' distance across, which stays
+// under ~250 of its 284 rows there.
+static bool s_wideVolume = false;
+constexpr double kMaxHalfTan = 2.7474774;  // tan(70 degrees)
+
+void hle_CameraHFovAtan(Ctx& c) {
+    if (s_wideVolume && std::abs(c.f[1]) > 1.0) {
+        c.f[1] = std::clamp(c.f[1], -kMaxHalfTan, kMaxHalfTan);
+        f_8005348C(c);
+        return;
+    }
+    f_7FC8DE3C_orig(c);
+}
+
 // MTXPerspective (SDK 0x8002FEA4; fovY f1, aspect f2, near f3, far f4). The HUD's cameras (the
 // radar globe: 0x7FCD22C4, 0x7FCD4F60, 0x7FCD50F4) build their projections here, not through
 // CameraSetup, from the aspect their objects copied when the mission started: after a window
@@ -292,6 +314,11 @@ void hle_CameraSetup(Ctx& c) {
     // volume decides what is there (the bay's sides popped in as the camera panned).
     const double base = v > 1.0 ? std::max(aspect, 4.0 / 3.0 * v) : aspect;
     const double margin = craft ? terrainMargin : sceneMargin;
+    // in missions the horizontal fov may pass 90 degrees (hle_CameraHFovAtan)
+    struct WideVolume {
+        explicit WideVolume(bool on) { s_wideVolume = on; }
+        ~WideVolume() { s_wideVolume = false; }
+    } wideVolume(craft != 0);
     constexpr double kRad = 3.14159265358979323846 / 180.0;
     auto setup = [&](double m) {  // the volume opened for the screen, m times more
         const double wider = std::max(1.0, r) * m, taller = std::max(1.0, 1.0 / r) * m;
@@ -306,9 +333,9 @@ void hle_CameraSetup(Ctx& c) {
         return;
     }
     // Outside missions the horizontal fov stays the screen's (see above); in missions it takes
-    // the margin too: the terrain (the Death Star's surface) is laid out from it and the volume,
-    // whole tiles inside them, and past ~90 degrees (the cockpit's 55-degree view at 21:9) the
-    // tiles at the sides dropped out in a sawtooth that showed.
+    // the margin too: the terrain (the Death Star's surface) is laid out from the volume, whole
+    // tiles inside it, and the tiles at the sides dropped out in a sawtooth just inside the edges
+    // (and past 90 degrees everywhere outside that: hle_CameraHFovAtan).
     u32 hfov = 0;
     if (margin != 1.0 && !craft) {
         setup(1.0);

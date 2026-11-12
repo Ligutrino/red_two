@@ -33,6 +33,8 @@ hle     CraftDestroy
 hle     WeaponInit
 hle     WeaponUpdate
 hle     CameraSetup
+# Widescreen: CameraSetup's horizontal fov stops at 90 degrees (the cockpit's terrain at 2.13:1)
+hle     CameraHFovAtan
 # Widescreen: HUD cameras (the radar globe) build projections from the aspect their objects
 # copied when the mission started; after a resize that one is stale
 hle     MTXPerspective
