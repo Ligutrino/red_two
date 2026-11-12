@@ -65,6 +65,20 @@ constexpr int kSkipHz = 600;
 static bool s_skip = false;
 bool cinematicSkip() { return s_skip; }
 
+// The game has a skip of its own for scenes seen before (this session): SceneSkipAllowed
+// (0x7FD56FD8; scene id r3) returns A pressed if SceneSeen (0x7FD56E5C) says so, scenes 13 and 23
+// always, and in game mode 5 (the attract demo) as its exit. The scene player (0x7FD544B8,
+// 0x7FD5540C, 0x7FD554DC) then goes on to the next scene, not to play: on a mission's second crawl
+// the next cutscene's music started about 2 s after the press while the crawl still scrolled,
+// the crawl faded a second later, and the cutscene opened on several seconds of stars before its
+// voices - it looked like the crawl went on under the next scene's sound. With skippable cutscenes
+// on, a skip the game allows starts ours too (as B does), straight to play.
+static bool s_gameSkipped = false;
+void hle_SceneSkipAllowed(Ctx& c) {
+    f_7FD56FD8_orig(c);
+    if ((c.r[3] & 0xFF) && rd8(0x800962EF) != 5) s_gameSkipped = true;  // r13-19121: game mode
+}
+
 // Skip intro logos (settings): the boot screen (mode 5, screen 22 at 0x7FDE8254/0x7FDE822C, see
 // the top-level loop 0x7FC00030) shows the legal notice, checks the memory card, then plays the
 // 3D LucasArts intro and the logos: 16x and silent, still drawn (the card dialogs may need an
@@ -89,9 +103,11 @@ void hle_GameFrameDelta(Ctx& c) {
     static bool bWas = false;
     const bool bPressed = b && !bWas;
     bWas = b;
-    if (!s_skip && s.skipCutscenes && cinematic && bPressed) {
+    const bool gameSkipped = s_gameSkipped;
+    s_gameSkipped = false;
+    if (!s_skip && s.skipCutscenes && cinematic && (bPressed || gameSkipped)) {
         s_skip = true;
-        logf("skip", "skipping to the next gameplay");
+        logf("skip", "skipping to the next gameplay%s", bPressed ? "" : " (the game's own skip of a scene seen before)");
         viSetRate(kSkipHz);
         setDvdBoost(50.0);
     }

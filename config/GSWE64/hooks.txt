@@ -32,6 +32,8 @@ hle     LoseLife
 hle     CraftDestroy
 hle     WeaponInit
 hle     WeaponUpdate
+# Skippable cutscenes: the game's own skip (A, scenes seen before) starts the port's skip too
+hle     SceneSkipAllowed
 hle     CameraSetup
 # Widescreen: CameraSetup's horizontal fov stops at 90 degrees (the cockpit's terrain at 2.13:1)
 hle     CameraHFovAtan
