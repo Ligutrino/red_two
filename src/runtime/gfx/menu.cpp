@@ -694,7 +694,8 @@ void pageDisplay(settings::Settings& s) {
                 "What the game renders at. Window size follows the window; 4K renders 2160 lines whatever the window size."))
         s_changed = s_display = true;
     if (enumRow("Aspect ratio", s.aspect, settings::aspectName,
-                "Widescreen widens the 3D view and fills the screen in cutscenes."))
+                "Widescreen widens the 3D view and fills the screen in cutscenes. At most 21:9: a wider window "
+                "gets bars at the sides."))
         s_changed = s_display = true;
     if (toggleRow("HUD at screen edges", s.hudEdges, "Widescreen: the flight HUD sits at the edges of the screen."))
         s_changed = true;
@@ -1385,10 +1386,29 @@ void toast(const std::string& text) {
     s_toastTb = tbNow();
 }
 
+// The aspect Aurora renders at: the setting's, or the window's (-1) up to settings::kMaxAspect -
+// a wider window gets a fixed 21:9 frame with bars at the sides.
+static float s_appliedAspect = 0.f;
+
+static float displayAspect() {
+    const float a = settings::aspectValue(settings::get().aspect);
+    if (a > 0.f) return std::min(a, settings::kMaxAspect);
+    int w = 0, h = 0;
+    if (SDL_Window* win = aurora_get_window()) SDL_GetWindowSizeInPixels(win, &w, &h);
+    return w > 0 && h > 0 && float(w) / float(h) > settings::kMaxAspect ? settings::kMaxAspect : -1.f;
+}
+
+static void applyDisplayAspect() {
+    const float a = displayAspect();
+    if (a == s_appliedAspect) return;  // (AuroraSetDisplayAspect drains the GX worker)
+    s_appliedAspect = a;
+    AuroraSetDisplayAspect(a);
+}
+
 void applyDisplaySettings() {
     const settings::Settings& s = settings::get();
     VISetFrameBufferScale(settings::resolutionScale(s.resolution));
-    AuroraSetDisplayAspect(settings::aspectValue(s.aspect));
+    applyDisplayAspect();
     // widescreen: letterboxed cinematics fill the screen (4:3 keeps the original bars)
     AuroraSetLetterboxFill(s.aspect != settings::Aspect::R4_3);
     if (SDL_Window* w = aurora_get_window()) {
@@ -1401,12 +1421,12 @@ void applyDisplaySettings() {
 void menuDraw() {
     // widescreen: the game's cameras take the aspect the frame is rendered at (so they also cull
     // for it); 4:3 restores the original
+    applyDisplayAspect();  // match window: a resize may cross the 21:9 limit
     {
         u32 w = 0, h = 0;
         AuroraGetRenderSize(&w, &h);
-        const float a = settings::aspectValue(settings::get().aspect);
-        if (a > 0.f) setGameAspect(a);
-        else if (w && h) setGameAspect(double(w) / double(h));
+        if (s_appliedAspect > 0.f) setGameAspect(s_appliedAspect);
+        else if (w && h) setGameAspect(std::min(double(w) / double(h), double(settings::kMaxAspect)));
     }
     settings::Settings& s = settings::get();
     modsPoll();

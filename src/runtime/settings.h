@@ -8,7 +8,15 @@
 namespace rt::settings {
 
 enum class Resolution : int { Window = 0, X1, X2, X3, X4K, Count };  // internal (EFB) resolution
-enum class Aspect : int { R4_3 = 0, R16_9, R16_10, R21_9, R32_9, Window, Count };
+// settings.ini keeps the numbers of the old list: 0 4:3, 1 16:9, 2 16:10, 3 21:9, 4 (was 32:9:
+// now 21:9), 5 match the window
+enum class Aspect : int { R4_3 = 0, R16_9, R16_10, R21_9, Window, Count };
+
+// The widest aspect rendered (21:9); a wider window gets bars at the sides. Wider views make the
+// game's cameras cull for more of the world and it keeps more in its virtual memory, which ARAM
+// backs (1536 4 KiB slots): the Battle of Hoth intro at 32:9 needed 387+ slots more in its first
+// second and stopped with "FATAL VM ERROR: Out of ARAM memory"; at 21:9 its gameplay uses ~1014.
+inline constexpr float kMaxAspect = 64.f / 27.f;
 
 struct Settings {
     // display

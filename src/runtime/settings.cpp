@@ -24,7 +24,11 @@ void set(const std::string& key, const std::string& value) {
     const int n = atoi(value.c_str());
     if (key == "fullscreen") s.fullscreen = parseBool(value);
     else if (key == "resolution") { if (n >= 0 && n < int(Resolution::Count)) s.resolution = Resolution(n); }
-    else if (key == "aspect") { if (n >= 0 && n < int(Aspect::Count)) s.aspect = Aspect(n); }
+    else if (key == "aspect") {
+        if (n >= 0 && n <= 3) s.aspect = Aspect(n);
+        else if (n == 4) s.aspect = Aspect::R21_9;  // 32:9 (retired: kMaxAspect)
+        else if (n == 5) s.aspect = Aspect::Window;
+    }
     else if (key == "fps") { for (int f : kFpsChoices) if (f == n) s.fps = n; }
     else if (key == "show_fps") s.showFps = parseBool(value);
     else if (key == "hud_edges") s.hudEdges = parseBool(value);
@@ -110,8 +114,8 @@ void save() {
     fprintf(f, "fullscreen=%d\n", s.fullscreen);
     fprintf(f, "# 0 window size, 1 480p, 2 960p, 3 1440p, 4 2160p (4K)\n");
     fprintf(f, "resolution=%d\n", int(s.resolution));
-    fprintf(f, "# 0 4:3, 1 16:9, 2 16:10, 3 21:9, 4 32:9, 5 match the window\n");
-    fprintf(f, "aspect=%d\n", int(s.aspect));
+    fprintf(f, "# 0 4:3, 1 16:9, 2 16:10, 3 21:9, 5 match the window (at most 21:9)\n");
+    fprintf(f, "aspect=%d\n", s.aspect == Aspect::Window ? 5 : int(s.aspect));
     fprintf(f, "fps=%d\n", s.fps);
     fprintf(f, "show_fps=%d\n", s.showFps);
     fprintf(f, "hud_edges=%d\n", s.hudEdges);
@@ -161,7 +165,6 @@ const char* aspectName(Aspect a) {
     case Aspect::R16_9: return "16:9 widescreen";
     case Aspect::R16_10: return "16:10";
     case Aspect::R21_9: return "21:9 ultrawide";
-    case Aspect::R32_9: return "32:9 super ultrawide";
     case Aspect::Window: return "Match window";
     default: return "?";
     }
@@ -182,7 +185,6 @@ float aspectValue(Aspect a) {
     case Aspect::R16_9: return 16.f / 9.f;
     case Aspect::R16_10: return 16.f / 10.f;
     case Aspect::R21_9: return 64.f / 27.f;  // 2560x1080 / 3440x1440 class panels
-    case Aspect::R32_9: return 32.f / 9.f;
     case Aspect::Window: return -1.f;
     default: return 4.f / 3.f;  // the game's own aspect, pillarboxed in a wider window
     }
