@@ -472,6 +472,17 @@ void hle_TargetingPass(Ctx& c) {
     gatherBp(0x7E5C5200);
 }
 
+// Cutscene movies: CutsceneVideoDraw (0x7FD68C54) draws a movie object's quad (the Death Star's
+// explosion at the end of mission 1, the capital ship's in the Factor 5 intro), placed in the 3D
+// scene to cover the game's own view with a margin. Widescreen showed the scene past its edges
+// (7% at each side of the intro's at 2.12:1); the bridge (gfx/gx_bridge.cpp, fillScreen)
+// stretches draws inside this bracket out to the screen's edges.
+void hle_CutsceneVideoDraw(Ctx& c) {
+    gatherBp(0x7E5C5211);
+    f_7FD68C54_orig(c);
+    gatherBp(0x7E5C5210);
+}
+
 // Infinite lives (settings): LoseLife (0x7FD7648C) decrements the lives byte at 0x800962EE
 // (3 ships at a mission start; at 1 it ends the game instead: 0x800962EF = 0x21, mode 6) and
 // returns 1. With the cheat it reports the life lost without taking it.

@@ -750,6 +750,36 @@ void screenSpace2D() {
     fifo::write_u8(want ? 1 : 0);
 }
 
+// --- movies filling the screen -------------------------------------------------------------
+// Cutscene movies (the Death Star's explosion at the end of mission 1, the capital ship's in the
+// Factor 5 intro) are quads in the 3D scene that cover the game's own view with some margin. A
+// wider screen (or, for a letterboxed cinematic, a narrower one) showed the scene past their
+// edges. hle_CutsceneVideoDraw brackets their drawing with BP writes to the unused register the
+// targeting computer uses (another magic value); draws inside go to Aurora with
+// GX_AURORA_SET_FILL_SCREEN: edges that stop inside the screen move out to it. The NDC shift a
+// scissor box offset put into the projection (two-pass frames: sendProjection) goes along, so
+// the frame's edges count, not the pass's.
+constexpr u32 kFillMagic = 0x5C5210;
+bool s_fillWindow = false, s_fillSent = false;
+float s_fillShiftX = 0.f, s_fillShiftY = 0.f;
+
+void fillScreen() {
+    float dx = 0.f, dy = 0.f;
+    if (s_fillWindow && (s_boxOffX || s_boxOffY)) {
+        const float sx = asFloat(s_xfVp[0]), sy = asFloat(s_xfVp[1]);
+        dx = sx != 0.f ? -float(s_boxOffX) / sx : 0.f;
+        dy = sy != 0.f ? -float(s_boxOffY) / sy : 0.f;
+    }
+    if (s_fillWindow == s_fillSent && dx == s_fillShiftX && dy == s_fillShiftY) return;
+    s_fillSent = s_fillWindow;
+    s_fillShiftX = dx;
+    s_fillShiftY = dy;
+    aur(GX_AURORA_SET_FILL_SCREEN);
+    fifo::write_u8(s_fillWindow ? 1 : 0);
+    fifo::write_f32(dx);
+    fifo::write_f32(dy);
+}
+
 // Debugging: R2_GX_SKIP=<first>-<last>:<filter>[;...] drops the draws matching <filter> while
 // the retrace count is in [first, last] (s<first>-<last>: seconds since the start instead; the
 // retrace count runs ahead while a cinematic is skipped, and with the frame rate). Filters: v<VCD low hex> (e.g. v1E00),
@@ -1167,11 +1197,12 @@ void xwingDraw(const u8* p, u32 len) {
 // The crawl's "A long time ago..." card is one perspective quad (640x384 CMPR: blue text on
 // black, clamped) placed to fill the cinematic's own 2.105:1 view edge to edge. Widescreen opens
 // that view, and on displays wider than 2.105 (21:9, 32:9) the starfield drawn before it showed
-// past its sides. Such a quad (four vertices covering the game's view, direct f32 positions, no
-// indexed attributes) gets two extensions drawn after it: from each side edge outward, every
-// vertex carrying that edge's attributes (texture coordinates: the clamped edge column, the
-// card's border). They do not overlap the card, so a fading card blends the same everywhere;
-// where the view is no wider than the screen they lie off-screen.
+// past its sides; on displays below about 3:2 (windows) the view opens taller and it showed above
+// and below. Such a quad (four vertices covering the game's view, direct f32 positions, no indexed
+// attributes) gets four extensions drawn after it: from each edge outward, every vertex carrying
+// that edge's attributes (texture coordinates: the clamped edge column or row, the card's
+// border). They do not overlap the card, so a fading card blends the same everywhere; where the
+// view does not reach past the card they lie off-screen.
 void cardFill(const u8* p, u32 len) {
     if (p[0] != 0x80 || be16(p + 1) != 4 || !s_projKnown || s_xfProj[6] != 0) return;  // one perspective quad
     const u32 lo = s_vcdLo, hi = s_vcdHi, fmt = p[0] & 7, A = s_vatA[fmt];
@@ -1201,34 +1232,39 @@ void cardFill(const u8* p, u32 len) {
     const float minX = std::min({nx[0], nx[1], nx[2], nx[3]}), maxX = std::max({nx[0], nx[1], nx[2], nx[3]});
     const float minY = std::min({ny[0], ny[1], ny[2], ny[3]}), maxY = std::max({ny[0], ny[1], ny[2], ny[3]});
     if (minX > -0.98f || maxX < 0.98f || minY > -0.98f || maxY < 0.98f) return;  // not the whole view
-    // a screen-aligned rectangle: two vertices on each side edge
-    const float tol = 0.02f * (maxX - minX);
-    bool left[4];
+    // a screen-aligned rectangle: two vertices on each side edge, two on the top and bottom
+    const float tolX = 0.02f * (maxX - minX), tolY = 0.02f * (maxY - minY);
+    bool left[4], top[4];
     for (u32 i = 0; i < 4; i++) {
-        left[i] = nx[i] - minX < tol;
-        if (!left[i] && maxX - nx[i] >= tol) return;
+        left[i] = nx[i] - minX < tolX;
+        if (!left[i] && maxX - nx[i] >= tolX) return;
+        top[i] = maxY - ny[i] < tolY;
+        if (!top[i] && ny[i] - minY >= tolY) return;
     }
-    if (left[0] + left[1] + left[2] + left[3] != 2) return;
-    u32 partner[4];  // the vertex on the other side edge in the same row
-    for (u32 i = 0; i < 4; i++) {
-        float best = 1e30f;
-        for (u32 j = 0; j < 4; j++)
-            if (left[j] != left[i] && std::fabs(ny[j] - ny[i]) < best) {
-                best = std::fabs(ny[j] - ny[i]);
-                partner[i] = j;
-            }
-    }
-    constexpr float kOut = 4.f;  // how far out (card widths): past a 32:9 screen's edge
+    u32 corners = 0;  // one vertex at each
+    for (u32 i = 0; i < 4; i++) corners |= 1u << (left[i] * 2 + top[i]);
+    if (corners != 15) return;
+    // the vertex on the other side edge in the same row (h), on the other of top and bottom in
+    // the same column (v)
+    u32 partner[2][4] = {};
+    for (u32 i = 0; i < 4; i++)
+        for (u32 j = 0; j < 4; j++) {
+            if (left[j] != left[i] && top[j] == top[i]) partner[0][i] = j;
+            if (top[j] != top[i] && left[j] == left[i]) partner[1][i] = j;
+        }
+    constexpr float kOut = 4.f;  // how far out (card sizes): past a 32:9 screen's sides
     static std::vector<u8> buf;
     buf.assign(p, p + len);
-    for (int side = 0; side < 2; side++) {  // 0: left extension, 1: right
+    for (int side = 0; side < 4; side++) {  // left, right, top, bottom extensions
+        const bool* edge = side < 2 ? left : top;
+        const u32* other = partner[side / 2];
         for (u32 i = 0; i < 4; i++) {
-            const bool onSide = left[i] == (side == 0);
-            const u32 src = onSide ? i : partner[i];  // the side edge's vertex in this row
+            const bool onSide = edge[i] == (side % 2 == 0);
+            const u32 src = onSide ? i : other[i];  // that edge's vertex in this row / column
             u8* d = buf.data() + 3 + i * vs;
             memcpy(d, p + 3 + src * vs, vs);
             if (onSide) {  // moved outward, away from the opposite edge
-                const u32 o = partner[i];
+                const u32 o = other[i];
                 for (u32 c = 0; c < 3; c++) {
                     const u32 w = asBits(pos[i][c] + (pos[i][c] - pos[o][c]) * kOut);
                     d[4 * c] = u8(w >> 24); d[4 * c + 1] = u8(w >> 16); d[4 * c + 2] = u8(w >> 8); d[4 * c + 3] = u8(w);
@@ -1312,6 +1348,7 @@ void onCommand(const u8* p, u32 len) {
             return;
         if (s_seamPending && !isTileDraw()) seamBlend();  // the background is complete
         screenSpace2D();
+        fillScreen();
         prepareArrays(p);
         prepareTextures();
         // Aurora merges consecutive draws with unchanged state. That broke on this game's
@@ -1376,6 +1413,10 @@ void onCommand(const u8* p, u32 len) {
         if (reg == kScreenSpaceMarker && (raw & 0xFFFFFE) == kScreenSpaceMagic) {
             s_screenSpaceWindow = raw & 1;  // hle_TargetingPass's bracket: not for the GPU (and
             return;                         // a pending BP mask stays for the game's next write)
+        }
+        if (reg == kScreenSpaceMarker && (raw & 0xFFFFFE) == kFillMagic) {
+            s_fillWindow = raw & 1;  // hle_CutsceneVideoDraw's bracket
+            return;
         }
         if (reg == 0xFE) {
             s_bpMask = raw & 0xFFFFFF;
@@ -1737,6 +1778,7 @@ void bridgeSaveState(state::Writer& w) {
     for (const auto& [tmem, ld] : s_tlutLoads) tluts.push_back({tmem, ld.addr, ld.entries});
     w.vec(tluts);
     w.pod(s_screenSpaceWindow);
+    w.pod(s_fillWindow);
 }
 
 void bridgeLoadState(state::Reader& r) {
@@ -1753,6 +1795,7 @@ void bridgeLoadState(state::Reader& r) {
     s_tlutLoads.clear();
     for (const TlutRec& t : tluts) s_tlutLoads[t.tmem] = {t.addr, t.entries};
     r.pod(s_screenSpaceWindow);
+    r.pod(s_fillWindow);
 }
 
 void bridgeAfterLoad() {

@@ -42,6 +42,8 @@ hle     CameraHFovAtan
 hle     MTXPerspective
 # Widescreen: the targeting computer's screen is a 2D quad at corners projected from 3D
 hle     TargetingPass
+# Widescreen: cutscene movies (quads in the 3D scene sized for the game's view) fill the screen
+hle     CutsceneVideoDraw
 # Widescreen: the terrain's span array is sized for the 4:3 view; wider views overflowed it
 hle     HeapAlloc
 # Cheat: perfect mission stats (the results record the screen and the medal use)
