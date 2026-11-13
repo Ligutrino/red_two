@@ -716,6 +716,9 @@ void pageDisplay(settings::Settings& s) {
     if (fpsRow("Frame rate", s.fps, "Above 60 the game runs more frames per second at its normal speed."))
         s_changed = s_display = true;
     if (toggleRow("Show frame rate", s.showFps, "Frames per second in the top-left corner.")) s_changed = true;
+    if (toggleRow("Ubershaders", s.ubershaders,
+                  "A shader seen for the first time is drawn with a generic one while it compiles: no pop-in."))
+        s_changed = s_display = true;
 }
 
 void pageGameplay(settings::Settings& s) {
@@ -1423,6 +1426,9 @@ void applyDisplaySettings() {
     const settings::Settings& s = settings::get();
     VISetFrameBufferScale(settings::resolutionScale(s.resolution));
     applyDisplayAspect();
+    // ubershaders (Aurora patch 0021): R2_UBER=0/1/2 (off, hybrid, every draw: testing) overrides
+    static const char* uberEnv = getenv("R2_UBER");
+    AuroraSetUberShaders(uberEnv ? atoi(uberEnv) : s.ubershaders ? 1 : 0);
     // widescreen: letterboxed cinematics fill the screen (4:3 keeps the original bars)
     AuroraSetLetterboxFill(s.aspect != settings::Aspect::R4_3);
     if (SDL_Window* w = aurora_get_window()) {

@@ -27,6 +27,9 @@ struct Settings {
     bool tileMenus = true;  // widescreen: menu backgrounds continue into the sides
     int fps = 60;  // 60, 90, 120 or 144: the emulated retrace rate
     bool showFps = false;
+    // While a shader compiles, a generic one (Aurora's ubershader) draws the object instead of it
+    // being skipped (Dolphin's hybrid ubershaders)
+    bool ubershaders = true;
     // audio
     int volume = 100;            // master volume, 0..100 (output gain (volume/100)^2)
     bool backgroundAudio = true;  // keep playing while the window is in the background

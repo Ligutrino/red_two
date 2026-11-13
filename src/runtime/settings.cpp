@@ -31,6 +31,7 @@ void set(const std::string& key, const std::string& value) {
     }
     else if (key == "fps") { for (int f : kFpsChoices) if (f == n) s.fps = n; }
     else if (key == "show_fps") s.showFps = parseBool(value);
+    else if (key == "ubershaders") s.ubershaders = parseBool(value);
     else if (key == "hud_edges") s.hudEdges = parseBool(value);
     else if (key == "tile_menus") s.tileMenus = parseBool(value);
     else if (key == "volume") s.volume = n < 0 ? 0 : n > 100 ? 100 : n;
@@ -120,6 +121,8 @@ void save() {
     fprintf(f, "aspect=%d\n", s.aspect == Aspect::Window ? 5 : int(s.aspect));
     fprintf(f, "fps=%d\n", s.fps);
     fprintf(f, "show_fps=%d\n", s.showFps);
+    fprintf(f, "# a generic shader draws objects whose own shader is still compiling (no pop-in)\n");
+    fprintf(f, "ubershaders=%d\n", s.ubershaders);
     fprintf(f, "hud_edges=%d\n", s.hudEdges);
     fprintf(f, "tile_menus=%d\n", s.tileMenus);
     fprintf(f, "# master volume 0..100\n");

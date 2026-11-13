@@ -1714,7 +1714,7 @@ bool init(int argc, char** argv) {
                 sendToBack(hwnd);
         }
     }
-    applyDisplaySettings();
+    applyDisplaySettings();  // (also the ubershader mode)
     mods::texturesInit();  // texture packs (Dolphin's format) into Aurora's replacement registry
     buttonIconsUpdate();   // Xbox button prompts (button_icons.cpp)
     static const char* backends[] = {"auto", "D3D11", "D3D12", "Metal", "Vulkan", "OpenGL", "OpenGL ES", "WebGPU", "null"};
@@ -1775,11 +1775,12 @@ u64 frames() { return s_frames; }
 std::string stats() {
     const AuroraStats* st = aurora_get_stats();
     if (!st) return {};
-    char b[256];
+    char b[320];
     snprintf(b, sizeof b,
-             "aurora: %u draws (%u merged), pipelines %u queued %u created, %u KiB verts, %u KiB tex upload; "
-             "arrays sent: %llu (%llu MiB)",
-             st->drawCallCount, st->mergedDrawCallCount, st->queuedPipelines, st->createdPipelines, st->lastVertSize / 1024,
+             "aurora: %u draws (%u merged), pipelines %u queued %u created, %u skipped %u uber draws, %u KiB verts, "
+             "%u KiB tex upload; arrays sent: %llu (%llu MiB)",
+             st->drawCallCount, st->mergedDrawCallCount, st->queuedPipelines, st->createdPipelines, st->skippedDraws,
+             st->uberDraws, st->lastVertSize / 1024,
              st->lastTextureUploadSize / 1024, (unsigned long long)s_arraySends, (unsigned long long)(s_arrayBytes >> 20));
     s_arraySends = s_arrayBytes = 0;
     std::string out = b;
