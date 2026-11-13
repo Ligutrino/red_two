@@ -219,6 +219,16 @@ bool s_navFresh = true;  // just opened: buttons already held are not presses
 bool s_usingPad = false; // the last input came from a controller (button hints)
 
 void readPads(bool held[NavCount]) {
+    static bool last[NavCount] = {};  // while the input thread updates the controllers (a device scan)
+    input::JoystickAccess joy;
+    if (!joy) {
+        for (int k = 0; k < NavCount; k++) held[k] |= last[k];
+        return;
+    }
+    struct Keep {  // what this read found, for the frames a scan blocks reading
+        bool* held;
+        ~Keep() { std::copy(held, held + NavCount, last); }
+    } keep{held};
     int n = 0;
     SDL_JoystickID* ids = SDL_GetGamepads(&n);
     if (!ids) return;
@@ -1435,8 +1445,11 @@ void menuDraw() {
         static u64 lastIconsTb = 0;
         const u64 now = tbNow();
         if (now - lastIconsTb >= kTbClock / 2) {
-            lastIconsTb = now;
-            buttonIconsUpdate();
+            // (reads controller names from SDL: not while the input thread updates the controllers)
+            if (input::JoystickAccess joy; joy) {
+                lastIconsTb = now;
+                buttonIconsUpdate();
+            }
         }
     }
     // volume: (volume / 100)^2 roughly follows loudness; silent in the background if asked

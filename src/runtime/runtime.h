@@ -133,6 +133,19 @@ namespace input {
 void init(bool pads);  // pads: Aurora PAD (after the window exists); false = R2_INPUT script only
 void poll();  // once per frame: Aurora pads/keyboard -> SI controller state
 void rumble(int chan, u32 cmd);  // SI motor bits: 0 stop, 1 rumble, 2 hard stop
+// The game thread may call SDL's controller API while this is held. Not held: the input thread
+// is updating the controllers, maybe a device scan of seconds - use the previous state instead.
+class JoystickAccess {
+public:
+    JoystickAccess();
+    ~JoystickAccess();
+    JoystickAccess(const JoystickAccess&) = delete;
+    JoystickAccess& operator=(const JoystickAccess&) = delete;
+    explicit operator bool() const { return m_held; }
+
+private:
+    bool m_held = false;
+};
 }  // namespace input
 
 }  // namespace rt

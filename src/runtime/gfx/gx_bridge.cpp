@@ -1673,6 +1673,9 @@ bool init(int argc, char** argv) {
         SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
         SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_RAISED, "0");
     }
+    // Controllers are updated on the input thread (input.cpp): SDL's device scans take seconds
+    // on some machines, and the event pump would run them on the game's thread.
+    SDL_SetHint(SDL_HINT_AUTO_UPDATE_JOYSTICKS, "0");
 #ifdef R2_HAS_ICON
     // the icon built into the exe (res/red_two.rc) for the window and taskbar too
     SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON, "1");

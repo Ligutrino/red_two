@@ -1,10 +1,17 @@
 // Controllers: Aurora reads gamepads (SDL3, GameCube adapters) and the keyboard; the result
 // feeds the SI model (hw/hw.cpp), which answers the game's own controller polling.
+#include <windows.h>
+
+#include <SDL3/SDL_events.h>
+#include <SDL3/SDL_joystick.h>
 #include <aurora/pad.hpp>
 #include <dolphin/pad.h>
 
 #include <cstdlib>
+#include <cstring>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "hw/gx_fifo.h"
@@ -87,34 +94,118 @@ void defaultKeyboard() {
     key(c.right, SDL_SCANCODE_H);
     aurora::pad::set_default_keyboard_bindings(0, std::move(keys));
 }
+
+// --- controller updates off the game thread ---------------------------------------------------
+// SDL rescans its controllers inside SDL_UpdateJoysticks when Windows reports a device change:
+// DirectInput, SDL's HIDAPI driver and its raw input driver each open every HID device and ask
+// it for its names (on the user's machine 52 interfaces, ~0.5 s a pass: a Steam Controller
+// puck's 13 at 18 ms each, wireless receivers, RGB controllers), holding SDL's joystick lock.
+// SDL's event pump ran that on the game's thread: frames of 3-4 s at random moments, mid-cutscene
+// too (Battle of Hoth; the profile showed hid.dll under dinput8.dll and SDL3.dll). The input
+// thread now updates the controllers (SDL_HINT_AUTO_UPDATE_JOYSTICKS is off, gx_bridge.cpp)
+// under s_joyMutex, and the game thread's own SDL controller calls (pads, rumble, hotkeys, menu)
+// only try that mutex (JoystickAccess): while a scan runs they keep the previous state. Aurora's
+// controller state itself comes from SDL events, which the window's event pump still delivers.
+std::mutex s_joyMutex;
+
+void joystickThread() {
+    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (!timer) timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+    LARGE_INTEGER due{};
+    due.QuadPart = -20000;  // 2 ms (100 ns units), then every 2 ms: 500 Hz
+    SetWaitableTimer(timer, &due, 2, nullptr, nullptr, FALSE);
+    u64 lastLog = 0;
+    for (;;) {
+        WaitForSingleObject(timer, INFINITE);
+        // A controller came or went: Aurora opens or closes it on the game thread (SDL calls that
+        // wait for the joystick lock), so no new scan starts before it has.
+        if (SDL_PeepEvents(nullptr, 0, SDL_PEEKEVENT, SDL_EVENT_GAMEPAD_ADDED, SDL_EVENT_GAMEPAD_REMAPPED) > 0) continue;
+        const u64 t0 = tbNow();
+        {
+            std::lock_guard lock(s_joyMutex);
+            SDL_UpdateJoysticks();
+        }
+        const u64 t1 = tbNow();
+        if (t1 - t0 > kTbClock / 10 && t1 - lastLog > kTbClock) {
+            lastLog = t1;
+            logf("input", "controller scan: %.0f ms on the input thread (the game kept running)",
+                 double(t1 - t0) * 1000.0 / double(kTbClock));
+        }
+    }
+}
+
+// R2_JOY_SCAN_TEST=<seconds>: from then on, every 5 s the input thread holds SDL's joystick lock
+// for 3 s, as a slow device scan does (the game thread must keep its frame rate)
+void scanTest() {
+    const char* e = getenv("R2_JOY_SCAN_TEST");
+    if (!e) return;
+    const double start = atof(e);
+    std::thread([start] {
+        Sleep(DWORD(start * 1000));
+        for (int i = 0; i < 6; i++) {
+            {
+                std::lock_guard lock(s_joyMutex);
+                SDL_LockJoysticks();
+                logf("input", "scan test: joystick lock held for 3 s");
+                Sleep(3000);
+                SDL_UnlockJoysticks();
+            }
+            Sleep(2000);
+        }
+    }).detach();
+}
+
+PADStatus s_lastPads[PAD_CHANMAX] = {};  // what PADRead gave last (reused while a scan runs)
+u32 s_rumbleWant[PAD_CHANMAX] = {}, s_rumbleSent[PAD_CHANMAX] = {};
+
+void applyRumble() {  // JoystickAccess held
+    for (u32 i = 0; i < PAD_CHANMAX; i++)
+        if (s_rumbleWant[i] != s_rumbleSent[i]) {
+            s_rumbleSent[i] = s_rumbleWant[i];
+            PADControlMotor(i, s_rumbleWant[i]);
+        }
+}
 }  // namespace
+
+JoystickAccess::JoystickAccess() : m_held(s_joyMutex.try_lock()) {}
+JoystickAccess::~JoystickAccess() {
+    if (m_held) s_joyMutex.unlock();
+}
 
 bool s_pads = false;  // Aurora PAD available (not with R2_NO_GFX)
 
 void init(bool pads) {
     s_pads = pads;
+    for (auto& e : s_lastPads) e.err = PAD_ERR_NO_CONTROLLER;
     if (pads) {
         defaultKeyboard();
         PADInit();
+        std::thread(joystickThread).detach();
+        scanTest();
     }
     if (const char* s = getenv("R2_INPUT")) parseScript(s);
     s_ready = true;
 }
 
 void rumble(int chan, u32 cmd) {
-    static u32 last[4] = {};
-    if (!s_pads || chan < 0 || chan > 3 || last[chan] == cmd) return;
-    last[chan] = cmd;
-    PADControlMotor(u32(chan), cmd);
+    if (!s_pads || chan < 0 || chan > 3) return;
+    s_rumbleWant[chan] = cmd;
+    if (JoystickAccess joy; joy) applyRumble();  // else at the next poll
 }
 
 void poll() {
     if (!s_ready) return;
     s_vblank++;
     PADStatus st[PAD_CHANMAX] = {};
-    if (s_pads) PADRead(st);
-    else
+    if (!s_pads) {
         for (auto& e : st) e.err = PAD_ERR_NO_CONTROLLER;
+    } else if (JoystickAccess joy; joy) {
+        PADRead(st);
+        memcpy(s_lastPads, st, sizeof st);
+        applyRumble();
+    } else {
+        memcpy(st, s_lastPads, sizeof st);
+    }
     // a hotkey's modifier (Back) is down, or a hotkey just fired: its buttons are not the game's
     if (hotkeys::muteGame())
         for (auto& e : st) {

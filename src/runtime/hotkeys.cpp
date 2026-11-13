@@ -91,10 +91,13 @@ bool contains(const Set& held, const Set& combo) {
 }
 
 Set heldPad() {
+    static Set last;  // while the input thread updates the controllers (a device scan can take seconds)
+    input::JoystickAccess joy;
+    if (!joy) return last;
     Set s;
     int n = 0;
     SDL_JoystickID* ids = SDL_GetGamepads(&n);
-    if (!ids) return s;
+    if (!ids) return last = s;
     for (int i = 0; i < n; i++) {
         SDL_Gamepad* g = SDL_GetGamepadFromID(ids[i]);
         if (!g) continue;
@@ -106,7 +109,7 @@ Set heldPad() {
     SDL_free(ids);
     std::sort(s.begin(), s.end());
     s.erase(std::unique(s.begin(), s.end()), s.end());
-    return s;
+    return last = s;
 }
 
 Set heldKeys() {

@@ -38,8 +38,18 @@ const Sym& resolve(u64 rip) {
         s.name = si->Name;
         s.start = rip - disp;
     } else {
-        char b[32];
-        snprintf(b, sizeof b, "?%llx", (unsigned long long)rip);
+        // no symbols (a system or driver DLL): its module and offset
+        char b[MAX_PATH + 32];
+        HMODULE mod = nullptr;
+        char path[MAX_PATH] = "";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(rip), &mod) &&
+            GetModuleFileNameA(mod, path, sizeof path)) {
+            const char* base = strrchr(path, '\\');
+            snprintf(b, sizeof b, "%s+%llx", base ? base + 1 : path, (unsigned long long)(rip - u64(mod)));
+        } else {
+            snprintf(b, sizeof b, "?%llx", (unsigned long long)rip);
+        }
         s.name = b;
     }
     return byRip.emplace(rip, std::move(s)).first->second;
@@ -52,12 +62,14 @@ bool isLeafHelper(const std::string& n) {
            n.rfind("NtWait", 0) == 0 || n.rfind("ZwWait", 0) == 0 || n.rfind("WaitFor", 0) == 0 ||
            n.rfind("SleepConditionVariable", 0) == 0 || n.rfind("RtlSleepConditionVariable", 0) == 0 ||
            n.find("SRWLock") != std::string::npos || n.rfind("_NLG", 0) == 0 || n.rfind("std::_Atomic", 0) == 0 ||
-           n == "strchr" || n == "RtlRaiseStatus" || n.rfind("NtAlert", 0) == 0;
+           n == "strchr" || n == "RtlRaiseStatus" || n.rfind("NtAlert", 0) == 0 ||
+           // system calls (device I/O, registry, files): who made them
+           n.rfind("Nt", 0) == 0 || n.rfind("Zw", 0) == 0 || n == "DeviceIoControl";
 }
 
 std::unordered_map<u64, std::unordered_map<u64, u32>> s_callers;  // rip -> return address -> hits
 struct Chain {
-    u64 f[4];
+    u64 f[6];
 };
 std::unordered_map<u64, std::vector<Chain>> s_chains;  // rip -> caller chains (helpers only)
 
@@ -75,7 +87,7 @@ void report(const std::unordered_map<u64, u32>& hits, u64 total, int secs) {
                         const std::string& fn = resolve(f).name;
                         if (isLeafHelper(fn)) continue;
                         label += " <- " + fn;
-                        if (++shown == 3) break;
+                        if (++shown == 4) break;
                     }
                     byName[label]++;
                 }
@@ -164,7 +176,7 @@ void profilerStart() {
                 hits[ctx.Rip]++;
                 // the first caller outside the helper (memmove's own frames are skipped in report)
                 s_callers[ctx.Rip][chain[0]]++;
-                s_chains[ctx.Rip].push_back({chain[0], chain[1], chain[2], chain[3]});
+                s_chains[ctx.Rip].push_back({chain[0], chain[1], chain[2], chain[3], chain[4], chain[5]});
                 total++;
             }
             if (GetTickCount64() >= next) {
