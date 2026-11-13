@@ -16,6 +16,7 @@
 
 #include "../mods.h"
 #include "../runtime.h"
+#include "../settings.h"
 #include "gx_fifo.h"
 #include "musyx_dsp.h"
 
@@ -285,12 +286,12 @@ void diStart() {
     switch (cmd) {
     case 0xA8:
         if ((cmd0 & 0xC0) == 0x40) s_diOp.len = 0x20;  // read disc ID
-        {   // transfer time: R2_DVD_SPEED=<MB/s> (the drive's ~3 MB/s by default)
-            static const double mbps = [] {
+        {   // transfer time: R2_DVD_SPEED=<MB/s>, else the drive's ~3 MB/s or 200 (fast loading)
+            static const double forced = [] {
                 const char* v = getenv("R2_DVD_SPEED");
-                const double x = v ? atof(v) : 0.0;
-                return x > 0 ? x : 3.0;
+                return v ? atof(v) : 0.0;
             }();
+            const double mbps = forced > 0 ? forced : settings::get().fastDisc ? 200.0 : 3.0;
             latencyTb += u64(double(s_diOp.len) * double(kTbClock) / (mbps * 1024.0 * 1024.0));
             latencyTb = u64(double(latencyTb) / s_dvdBoost);
         }

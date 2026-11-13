@@ -36,6 +36,7 @@ void set(const std::string& key, const std::string& value) {
     else if (key == "volume") s.volume = n < 0 ? 0 : n > 100 ? 100 : n;
     else if (key == "background_audio") s.backgroundAudio = parseBool(value);
     else if (key == "skip_logos") s.skipLogos = parseBool(value);
+    else if (key == "fast_disc") s.fastDisc = parseBool(value);
     else if (key == "skip_cutscenes") s.skipCutscenes = parseBool(value);
     else if (key == "invincible") s.invincible = parseBool(value);
     else if (key == "infinite_lives") s.infiniteLives = parseBool(value);
@@ -75,6 +76,7 @@ Settings& get() { return s_settings; }
 
 void load() {
     const bool automated = envFlag("R2_BACKGROUND") || envFlag("R2_HEADLESS") || getenv("R2_INPUT");
+    if (automated) s_settings.fastDisc = false;  // input scripts are timed for the drive's speed
     if (!automated) {
         if (char* dir = SDL_GetPrefPath(nullptr, "Red Two")) {
             s_path = std::string(dir) + "settings.ini";
@@ -125,6 +127,8 @@ void save() {
     fprintf(f, "background_audio=%d\n", s.backgroundAudio);
     fprintf(f, "skip_logos=%d\n", s.skipLogos);
     fprintf(f, "skip_cutscenes=%d\n", s.skipCutscenes);
+    fprintf(f, "# disc reads at SSD speed rather than the GameCube drive's 3 MB/s (shorter loading)\n");
+    fprintf(f, "fast_disc=%d\n", s.fastDisc);
     fprintf(f, "invincible=%d\n", s.invincible);
     fprintf(f, "infinite_lives=%d\n", s.infiniteLives);
     fprintf(f, "infinite_ammo=%d\n", s.infiniteAmmo);

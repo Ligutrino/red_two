@@ -33,6 +33,10 @@ struct Settings {
     // game
     bool skipLogos = false;      // boot straight past the legal screen, intro and logos
     bool skipCutscenes = false;  // B (or Start) skips the opening crawl and in-game cutscenes
+    // Disc reads at 200 MB/s instead of the drive's 3 MB/s (Dolphin's "Speed up Disc Transfer
+    // Rate"): the hangar + Battle of Hoth load read ~50 MiB, ~16 s of it waiting on the drive.
+    // Automated runs default to the drive's speed (their input scripts are timed for it).
+    bool fastDisc = true;
     // cheats
     bool invincible = false;
     bool infiniteLives = false;

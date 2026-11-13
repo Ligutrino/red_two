@@ -719,6 +719,10 @@ void pageDisplay(settings::Settings& s) {
 }
 
 void pageGameplay(settings::Settings& s) {
+    heading("LOADING");
+    if (toggleRow("Fast loading", s.fastDisc,
+                  "Disc reads at SSD speed instead of the GameCube drive's 3 MB/s: a mission loads 10-15 s sooner."))
+        s_changed = true;
     heading("CINEMATICS");
     if (toggleRow("Skip intro logos", s.skipLogos, "Reach the title screen in seconds.")) s_changed = true;
     if (toggleRow("Skippable cutscenes", s.skipCutscenes,
