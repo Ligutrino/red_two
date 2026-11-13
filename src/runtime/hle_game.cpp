@@ -135,8 +135,13 @@ void hle_GameFrameDelta(Ctx& c) {
     keepAmmo();
     craftDiffProbe();
     resultsTest(c);
-    // widescreen: the flight HUD goes to the screen edges (not the menus: their layout is 4:3)
-    gfx::setHudAnchoring(s.hudEdges && s.aspect != settings::Aspect::R4_3 && playerCraft() && !cinematic);
+    // widescreen: the flight HUD goes to the screen edges (not the menus: their layout is 4:3).
+    // Nor the pause screen, drawn while the craft exists: its objectives' check marks and dots
+    // sit left of the centered text and were moved out to the left (by the 4:3 margin, 240 px
+    // at 1080p). GameState 0x7FDE8668 (setter 0x7FC03CD8): 0 in play, 2 paused (0x7FCD95D4,
+    // back to 0 at 0x7FCD96B8), 3 in front-end loops; found diffing dumps flying / paused.
+    const bool inPlay = rd32(0x7FDE8668) == 0;
+    gfx::setHudAnchoring(s.hudEdges && s.aspect != settings::Aspect::R4_3 && playerCraft() && !cinematic && inPlay);
     // menu screens only (no player craft; not the boot screen's intro and logos, whose 2D draws
     // also look like a run of panels, nor letterboxed cinematics): the background's panels
     // repeat into the sides
