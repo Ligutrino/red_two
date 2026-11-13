@@ -17,6 +17,8 @@
 #include <aurora/event.h>
 #include <aurora/gfx.h>
 #include <aurora/gfx.hpp>
+#include <dolphin/gx/GXStruct.h>
+#include <aurora/texture.hpp>
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_properties.h>
@@ -145,24 +147,34 @@ void pollEvents() {
 // Aurora skips a draw until its pipeline exists). Aurora queues them all when it initializes
 // (rebuild_pipeline_cache, in the order the game first used them); with Dawn's blob cache that
 // takes ~2 s, after a graphics driver update each one compiles again (~25 ms on Aurora's one
-// worker: ~55 s for 2,100). R2_NO_PRECOMPILE=1 starts the game at once.
+// worker: ~55 s for 2,100; patch 0020's 8 workers: ~10 s). The texture packs' prefetch (mods.cpp,
+// setting prefetch_textures) runs meanwhile and is waited for too. R2_NO_PRECOMPILE=1 starts the
+// game at once.
 void precompileShaders() {
     const AuroraStats* st = aurora_get_stats();
-    if (!st || envFlag("R2_NO_PRECOMPILE") || st->queuedPipelines == 0) return;
+    if (!st || envFlag("R2_NO_PRECOMPILE")) return;
     const u64 t0 = tbNow();
     u32 total = 0;
-    while (const u32 queued = st->queuedPipelines) {
+    bool waited = false;
+    for (;;) {
+        const u32 queued = st->queuedPipelines;
+        const auto tex = aurora::texture::prefetch_status();
+        if (queued == 0 && tex.done >= tex.total) break;
+        waited = true;
         const u32 done = st->createdPipelines;
         total = std::max(total, done + queued);
         pollEvents();
         if (aurora_begin_frame()) {
-            drawShaderProgress(done, total);
+            drawShaderProgress(done, total, tex.done, tex.total, tex.bytes);
             aurora_end_frame();
         }
         SDL_Delay(16);
     }
-    logf("gfx", "shaders: %u pipelines built before the game started (%.1f s)", st->createdPipelines,
-         double(tbNow() - t0) / double(kTbClock));
+    if (!waited) return;
+    const auto tex = aurora::texture::prefetch_status();
+    logf("gfx", "before the game started (%.1f s): %u pipelines built, %llu textures prefetched (%.1f GiB%s)",
+         double(tbNow() - t0) / double(kTbClock), st->createdPipelines, (unsigned long long)tex.total,
+         double(tex.bytes) / double(1ull << 30), tex.budgetFull ? ", memory budget reached" : "");
 }
 
 void testQuad();

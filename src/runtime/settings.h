@@ -47,6 +47,7 @@ struct Settings {
     bool perfectStats = false;  // mission results: 0:01, every enemy, 100%, nothing lost (hle_game.cpp)
     // mods
     bool customTextures = true;  // texture packs in the textures folder (Dolphin's format; mods.cpp)
+    bool prefetchTextures = true;  // the packs loaded into memory up front (Dolphin's prefetch)
     // controls
     bool xboxButtons = true;  // on-screen button prompts as on an Xbox controller (gfx/button_icons.cpp)
     // save states (savestate.cpp): the slot the hotkeys use, and the hotkeys (hotkeys.cpp), each a

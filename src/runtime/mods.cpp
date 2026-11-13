@@ -6,6 +6,8 @@
 // texture's guest memory (gx_bridge.cpp, LOAD_TEXOBJ), so the hashes match Dolphin's.
 #include "mods.h"
 
+#include <windows.h>
+
 #include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_stdinc.h>
 #include <dolphin/gx/GXStruct.h>
@@ -77,6 +79,7 @@ std::string texturesRoot() {
 
 void unload() {
     for (auto& g : s_groups) aurora::texture::unregister_replacements(g);
+    aurora::texture::clear_prefetched_replacements();
     s_groups.clear();
     s_packs.clear();
 }
@@ -91,6 +94,16 @@ void load() {
         logf("mods", "texture pack %s: %zu textures", dir.c_str(), info.textures);
         s_groups.push_back(std::move(group));
         s_packs.push_back(std::move(info));
+    }
+    // Prefetch (Dolphin's "Prefetch Custom Textures", the player's setting there too): the packs'
+    // textures read into memory by Aurora's texture workers, up to half the RAM as Dolphin does;
+    // a texture then appears sharp the first time it is used (no preview while it loads from disk).
+    // The game waits for it at startup (gx_bridge.cpp precompileShaders).
+    if (settings::get().prefetchTextures && !s_packs.empty()) {
+        MEMORYSTATUSEX ms{};
+        ms.dwLength = sizeof ms;
+        const u64 budget = GlobalMemoryStatusEx(&ms) ? ms.ullTotalPhys / 2 : (u64(4) << 30);
+        aurora::texture::prefetch_replacements(budget);
     }
 }
 

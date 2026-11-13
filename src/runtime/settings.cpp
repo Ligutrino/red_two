@@ -44,6 +44,7 @@ void set(const std::string& key, const std::string& value) {
     else if (key == "infinite_ammo") s.infiniteAmmo = parseBool(value);
     else if (key == "perfect_stats") s.perfectStats = parseBool(value);
     else if (key == "custom_textures") s.customTextures = parseBool(value);
+    else if (key == "prefetch_textures") s.prefetchTextures = parseBool(value);
     else if (key == "xbox_buttons") s.xboxButtons = parseBool(value);
     else if (key == "state_slot") s.stateSlot = n < 1 ? 1 : n > 8 ? 8 : n;
     else {
@@ -138,6 +139,8 @@ void save() {
     fprintf(f, "perfect_stats=%d\n", s.perfectStats);
     fprintf(f, "# texture packs in the textures folder next to this file (Dolphin's format)\n");
     fprintf(f, "custom_textures=%d\n", s.customTextures);
+    fprintf(f, "# texture packs loaded into memory before the game starts (up to half the RAM)\n");
+    fprintf(f, "prefetch_textures=%d\n", s.prefetchTextures);
     fprintf(f, "# on-screen button prompts: 1 as on an Xbox controller, 0 GameCube\n");
     fprintf(f, "xbox_buttons=%d\n", s.xboxButtons);
     fprintf(f, "# save states: the slot (1-8) and the hotkeys, buttons or keys held together (SDL names, \" + \" between)\n");

@@ -808,6 +808,11 @@ void pageMods(settings::Settings& s) {
             mods::setTexturesEnabled(s.customTextures);
         }
     }
+    if (toggleRow("Prefetch textures", s.prefetchTextures,
+                  "Loads the texture packs into memory before the game starts (up to half the RAM, as Dolphin): "
+                  "textures appear sharp the first time. Takes effect at the next start.")) {
+        s_changed = true;
+    }
     if (buttonRow("Textures folder", "OPEN", "Opens Red Two's textures folder: packs go in a GSWE64 folder inside, as in Dolphin.")) {
         std::error_code ec;
         std::filesystem::create_directories(std::filesystem::path(std::u8string(mods::texturesDir().begin(), mods::texturesDir().end())), ec);
@@ -1440,31 +1445,44 @@ void applyDisplaySettings() {
 
 // Before the game starts, every pipeline in the cache is built (gx_bridge.cpp precompileShaders);
 // frames of its own show how far it got.
-void drawShaderProgress(u32 done, u32 total) {
+void drawShaderProgress(u32 done, u32 total, u64 texDone, u64 texTotal, u64 texBytes) {
     if (!GImGui || !GImGui->WithinFrameScope) return;  // (no UI frame before the first XFB exists)
     const ImVec2 disp = ImGui::GetIO().DisplaySize;
     const float ui = std::clamp(disp.y / 1080.f, 0.6f, 3.f);
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     dl->AddRectFilled(ImVec2(0, 0), disp, IM_COL32(0, 0, 0, 255));
     const float cx = disp.x * 0.5f, cy = disp.y * 0.5f;
-    const char* title = "PREPARING SHADERS";
+    const bool textures = texTotal != 0;
+    const char* title = textures ? "PREPARING SHADERS AND TEXTURES" : "PREPARING SHADERS";
     const float tpx = 38.f * ui, track = 5.f * ui;
-    drawText(dl, s_fontBig, tpx, ImVec2(cx - textWidth(s_fontBig, tpx, title, track) * 0.5f, cy - 80.f * ui), kGold, title,
-             track);
+    const float top = textures ? cy - 120.f * ui : cy - 80.f * ui;
+    drawText(dl, s_fontBig, tpx, ImVec2(cx - textWidth(s_fontBig, tpx, title, track) * 0.5f, top), kGold, title, track);
     const float w = std::min(disp.x * 0.5f, 720.f * ui), h = 8.f * ui;
-    const ImVec2 a(cx - w * 0.5f, cy - h * 0.5f), b(cx + w * 0.5f, cy + h * 0.5f);
-    dl->AddRectFilled(a, b, IM_COL32(30, 52, 86, 255), h * 0.5f);
-    const float f = total ? std::clamp(float(done) / float(total), 0.f, 1.f) : 1.f;
-    if (f > 0.f) dl->AddRectFilled(a, ImVec2(a.x + w * f, b.y), kAmber, h * 0.5f);
-    char line[64];
-    snprintf(line, sizeof line, "%u / %u", done, total);
-    const float px = 24.f * ui;
-    drawText(dl, s_font, px, ImVec2(cx - textWidth(s_font, px, line) * 0.5f, b.y + 18.f * ui), kText, line);
-    const char* note = "Every shader the game has used on this PC is compiled before it starts.";
-    const char* note2 = "This takes long only after a graphics driver update.";
+    const float px = 22.f * ui;
+    // one bar with its caption under it
+    const auto bar = [&](float y, float f, const char* caption) {
+        const ImVec2 a(cx - w * 0.5f, y - h * 0.5f), b(cx + w * 0.5f, y + h * 0.5f);
+        dl->AddRectFilled(a, b, IM_COL32(30, 52, 86, 255), h * 0.5f);
+        f = std::clamp(f, 0.f, 1.f);
+        if (f > 0.f) dl->AddRectFilled(a, ImVec2(a.x + w * f, b.y), kAmber, h * 0.5f);
+        drawText(dl, s_font, px, ImVec2(cx - textWidth(s_font, px, caption) * 0.5f, b.y + 14.f * ui), kText, caption);
+        return b.y;
+    };
+    char line[96];
+    snprintf(line, sizeof line, "Shaders  %u / %u", done, total);
+    float y = textures ? cy - 40.f * ui : cy;
+    float below = bar(y, total ? float(done) / float(total) : 1.f, line);
+    if (textures) {
+        snprintf(line, sizeof line, "Textures  %llu / %llu  (%.1f GiB)", (unsigned long long)texDone,
+                 (unsigned long long)texTotal, double(texBytes) / double(1ull << 30));
+        below = bar(cy + 50.f * ui, float(texDone) / float(texTotal), line);
+    }
+    const char* note = textures ? "Shaders the game has used on this PC compile and the texture pack loads into memory."
+                                : "Every shader the game has used on this PC is compiled before it starts.";
+    const char* note2 = "Shaders take long only after a graphics driver update.";
     const float npx = 19.f * ui;
-    drawText(dl, s_font, npx, ImVec2(cx - textWidth(s_font, npx, note) * 0.5f, b.y + 70.f * ui), kDim, note);
-    drawText(dl, s_font, npx, ImVec2(cx - textWidth(s_font, npx, note2) * 0.5f, b.y + 96.f * ui), kDim, note2);
+    drawText(dl, s_font, npx, ImVec2(cx - textWidth(s_font, npx, note) * 0.5f, below + 66.f * ui), kDim, note);
+    drawText(dl, s_font, npx, ImVec2(cx - textWidth(s_font, npx, note2) * 0.5f, below + 92.f * ui), kDim, note2);
 }
 
 void menuDraw() {
