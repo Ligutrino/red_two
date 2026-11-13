@@ -20,6 +20,7 @@
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_properties.h>
+#include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_video.h>
 #include <xxhash.h>
 #include <dolphin/gx/GXAurora.h>
@@ -137,6 +138,31 @@ void pollEvents() {
             }
         }
     }
+}
+
+// Every pipeline in the cache - each one the game has drawn with on this PC - is built before
+// the game starts (the player's choice: nothing seen before pops in while its shader compiles;
+// Aurora skips a draw until its pipeline exists). Aurora queues them all when it initializes
+// (rebuild_pipeline_cache, in the order the game first used them); with Dawn's blob cache that
+// takes ~2 s, after a graphics driver update each one compiles again (~25 ms on Aurora's one
+// worker: ~55 s for 2,100). R2_NO_PRECOMPILE=1 starts the game at once.
+void precompileShaders() {
+    const AuroraStats* st = aurora_get_stats();
+    if (!st || envFlag("R2_NO_PRECOMPILE") || st->queuedPipelines == 0) return;
+    const u64 t0 = tbNow();
+    u32 total = 0;
+    while (const u32 queued = st->queuedPipelines) {
+        const u32 done = st->createdPipelines;
+        total = std::max(total, done + queued);
+        pollEvents();
+        if (aurora_begin_frame()) {
+            drawShaderProgress(done, total);
+            aurora_end_frame();
+        }
+        SDL_Delay(16);
+    }
+    logf("gfx", "shaders: %u pipelines built before the game started (%.1f s)", st->createdPipelines,
+         double(tbNow() - t0) / double(kTbClock));
 }
 
 void testQuad();
@@ -1693,6 +1719,7 @@ bool init(int argc, char** argv) {
     buttonIconsUpdate();   // Xbox button prompts (button_icons.cpp)
     static const char* backends[] = {"auto", "D3D11", "D3D12", "Metal", "Vulkan", "OpenGL", "OpenGL ES", "WebGPU", "null"};
     logf("gfx", "Aurora up: %s backend, window %ux%u", backends[info.backend], info.windowSize.width, info.windowSize.height);
+    precompileShaders();
     s_enabled = true;
     gxSetSink(onCommand);
     gxSetSyncHook(gpSync);

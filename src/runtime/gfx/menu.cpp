@@ -1428,6 +1428,35 @@ void applyDisplaySettings() {
     viSetRate(s.fps);
 }
 
+// Before the game starts, every pipeline in the cache is built (gx_bridge.cpp precompileShaders);
+// frames of its own show how far it got.
+void drawShaderProgress(u32 done, u32 total) {
+    if (!GImGui || !GImGui->WithinFrameScope) return;  // (no UI frame before the first XFB exists)
+    const ImVec2 disp = ImGui::GetIO().DisplaySize;
+    const float ui = std::clamp(disp.y / 1080.f, 0.6f, 3.f);
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    dl->AddRectFilled(ImVec2(0, 0), disp, IM_COL32(0, 0, 0, 255));
+    const float cx = disp.x * 0.5f, cy = disp.y * 0.5f;
+    const char* title = "PREPARING SHADERS";
+    const float tpx = 38.f * ui, track = 5.f * ui;
+    drawText(dl, s_fontBig, tpx, ImVec2(cx - textWidth(s_fontBig, tpx, title, track) * 0.5f, cy - 80.f * ui), kGold, title,
+             track);
+    const float w = std::min(disp.x * 0.5f, 720.f * ui), h = 8.f * ui;
+    const ImVec2 a(cx - w * 0.5f, cy - h * 0.5f), b(cx + w * 0.5f, cy + h * 0.5f);
+    dl->AddRectFilled(a, b, IM_COL32(30, 52, 86, 255), h * 0.5f);
+    const float f = total ? std::clamp(float(done) / float(total), 0.f, 1.f) : 1.f;
+    if (f > 0.f) dl->AddRectFilled(a, ImVec2(a.x + w * f, b.y), kAmber, h * 0.5f);
+    char line[64];
+    snprintf(line, sizeof line, "%u / %u", done, total);
+    const float px = 24.f * ui;
+    drawText(dl, s_font, px, ImVec2(cx - textWidth(s_font, px, line) * 0.5f, b.y + 18.f * ui), kText, line);
+    const char* note = "Every shader the game has used on this PC is compiled before it starts.";
+    const char* note2 = "This takes long only after a graphics driver update.";
+    const float npx = 19.f * ui;
+    drawText(dl, s_font, npx, ImVec2(cx - textWidth(s_font, npx, note) * 0.5f, b.y + 70.f * ui), kDim, note);
+    drawText(dl, s_font, npx, ImVec2(cx - textWidth(s_font, npx, note2) * 0.5f, b.y + 96.f * ui), kDim, note2);
+}
+
 void menuDraw() {
     // widescreen: the game's cameras take the aspect the frame is rendered at (so they also cull
     // for it); 4:3 restores the original
