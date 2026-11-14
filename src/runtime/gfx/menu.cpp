@@ -725,6 +725,8 @@ void pageDisplay(settings::Settings& s) {
         s_changed = s_display = true;
 }
 
+bool s_confirmQuit = false;  // quitting asks for a second press
+
 void pageGameplay(settings::Settings& s) {
     heading("LOADING");
     if (toggleRow("Fast loading", s.fastDisc,
@@ -735,6 +737,21 @@ void pageGameplay(settings::Settings& s) {
     if (toggleRow("Skippable cutscenes", s.skipCutscenes,
                   "Press B during the opening crawl or a cutscene to skip to the gameplay."))
         s_changed = true;
+    heading("EXIT");
+    const int row = s_row;
+    const bool pressed = buttonRow("Quit to desktop", s_confirmQuit ? "PRESS AGAIN: QUIT" : "QUIT",
+                                   "Close Red Two. What the game saved to its memory card and your save states are kept; "
+                                   "a mission in progress is not.",
+                                   s_confirmQuit ? kAmber : kText);
+    if (s_rowSel[s_section] != row) s_confirmQuit = false;
+    if (pressed) {
+        if (!s_confirmQuit) {
+            s_confirmQuit = true;
+        } else {
+            logf("menu", "quit to desktop");
+            quitToDesktop();
+        }
+    }
 }
 
 void pageAudio(settings::Settings& s) {
@@ -1044,6 +1061,7 @@ void switchSection(int i) {
     if (i == s_section) return;
     s_section = i;
     s_scrollToSel = true;
+    s_confirmQuit = false;
     s_pendingCapture = -1;
     s_pendingHotkey = -1;
     hotkeys::captureCancel();
@@ -1322,6 +1340,7 @@ void setOpen(bool open) {
     if (!open) cancelCapture();
     if (open) s_dolphinScanned = false;  // Dolphin's files may have changed meanwhile
     s_confirmSave = false;
+    s_confirmQuit = false;
     s_open = open;
     s_focus = open;
     s_navFresh = true;

@@ -3,7 +3,9 @@
 #include <windows.h>
 
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_joystick.h>
+#include <aurora/input.hpp>
 #include <aurora/pad.hpp>
 #include <dolphin/pad.h>
 
@@ -165,6 +167,62 @@ void applyRumble() {  // JoystickAccess held
             PADControlMotor(i, s_rumbleWant[i]);
         }
 }
+
+// Port 1 follows the controller in use: one on no port that has a button pressed (or a trigger
+// or stick pushed most of the way) takes port 1 over. Aurora's automatic assignment gives port 1
+// to the first controller it saw, and the order in which SDL finds them (XInput, Bluetooth, USB
+// receivers, Steam's virtual pads) is arbitrary: the user's 8BitDo on its USB receiver did nothing
+// next to an Elite 2. The takeover pins port 1 to that controller in Aurora; a pin left in
+// input.json (the menu saves the profiles) is undone at the next start, and a pin whose
+// controller went away goes back to automatic.
+void followActiveController() {  // JoystickAccess held
+    const aurora::input::SourceId current = aurora::pad::port_controller(0);
+    if (!current && aurora::pad::port_preference(0).state == aurora::pad::PortAssignment::Controller) aurora::pad::set_port_auto(0);
+    static std::vector<std::pair<SDL_JoystickID, bool>> s_active;  // per gamepad: in use at the last poll
+    decltype(s_active) now;
+    int n = 0;
+    SDL_JoystickID* ids = SDL_GetGamepads(&n);
+    if (!ids) return;
+    for (int i = 0; i < n; i++) {
+        SDL_Gamepad* g = SDL_GetGamepadFromID(ids[i]);
+        const aurora::input::SourceId src = g ? aurora::input::source_for_gamepad(ids[i]) : 0;
+        if (!src) continue;
+        bool active = false;
+        for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT && !active; b++) active = SDL_GetGamepadButton(g, SDL_GamepadButton(b));
+        for (SDL_GamepadAxis a : {SDL_GAMEPAD_AXIS_LEFT_TRIGGER, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER})
+            active |= SDL_GetGamepadAxis(g, a) > 16000;
+        for (SDL_GamepadAxis a : {SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY, SDL_GAMEPAD_AXIS_RIGHTX, SDL_GAMEPAD_AXIS_RIGHTY})
+            active |= std::abs(int(SDL_GetGamepadAxis(g, a))) > 24000;
+        // a controller seen for the first time counts as in use: one connecting with a button held
+        // (or a stick resting off-centre) takes nothing over until it is let go and used again
+        bool was = true;
+        for (const auto& [id, act] : s_active)
+            if (id == ids[i]) was = act;
+        now.emplace_back(ids[i], active);
+        if (!active || was || src == current) continue;
+        bool otherPort = false;
+        for (u32 p = 1; p < 4; p++) otherPort |= aurora::pad::port_controller(p) == src;
+        if (otherPort || !aurora::pad::set_port_controller(0, src)) continue;
+        logf("input", "port 1: '%s' (vid %04x, pid %04x) took over, a button was pressed", SDL_GetGamepadName(g),
+             SDL_GetGamepadVendor(g), SDL_GetGamepadProduct(g));
+    }
+    SDL_free(ids);
+    s_active = std::move(now);
+}
+
+// the session log says which controller port 1 has whenever that changes (automatic or taken over)
+void logPort1() {  // JoystickAccess held
+    static aurora::input::SourceId s_logged = 0;
+    const auto src = aurora::pad::port_controller(0);
+    if (src == s_logged) return;
+    s_logged = src;
+    SDL_Gamepad* g = src ? SDL_GetGamepadFromID(aurora::input::gamepad_for_source(src)) : nullptr;
+    if (g)
+        logf("input", "port 1 controller: '%s' (vid %04x, pid %04x)", SDL_GetGamepadName(g), SDL_GetGamepadVendor(g),
+             SDL_GetGamepadProduct(g));
+    else
+        logf("input", "port 1 controller: none (keyboard only)");
+}
 }  // namespace
 
 JoystickAccess::JoystickAccess() : m_held(s_joyMutex.try_lock()) {}
@@ -180,6 +238,19 @@ void init(bool pads) {
     if (pads) {
         defaultKeyboard();
         PADInit();
+        // a port 1 pin is followActiveController's, from the last session: start automatic
+        if (aurora::pad::port_preference(0).state == aurora::pad::PortAssignment::Controller)
+            aurora::pad::set_port_auto(0);
+        // The mouse pointer hides after 2 s without mouse input (Aurora's AutoHide; any movement,
+        // click or wheel shows it again), windowed or fullscreen. A passive input layer under the
+        // game's states that preference; ImGui's layer above keeps the pointer while the menu
+        // has the mouse.
+        (void)aurora::input::register_layer({
+            .label = "red_two.pointer",
+            .priority = aurora::input::kGameLayerPriority - 1,
+            .onEvent = [](const aurora::input::InputEvent&, void*) { return aurora::input::EventResult::Pass; },
+            .pointerMode = [](void*) { return aurora::input::PointerMode::AutoHide; },
+        });
         std::thread(joystickThread).detach();
         scanTest();
     }
@@ -200,6 +271,8 @@ void poll() {
     if (!s_pads) {
         for (auto& e : st) e.err = PAD_ERR_NO_CONTROLLER;
     } else if (JoystickAccess joy; joy) {
+        followActiveController();
+        logPort1();
         PADRead(st);
         memcpy(s_lastPads, st, sizeof st);
         applyRumble();

@@ -71,6 +71,12 @@ void quit(int code) {
     TerminateProcess(GetCurrentProcess(), UINT(code));
 }
 
+void quitToDesktop() {
+    state::finishWrites();  // a save state still being written
+    cardFlushNow();         // (written once a retrace: the last one's writes may be pending)
+    quit(0);
+}
+
 // After a save import: the game read its save at boot, so a new instance (same program, same
 // arguments, same working folder) takes over and this one quits.
 void restartGame() {

@@ -636,6 +636,8 @@ void cardDetach(int slot) {
     }
 }
 
+void cardFlushNow() { cardFlushAll(); }
+
 namespace {
 
 // A formatted card's header serial is the console's flash ID scrambled by a generator seeded

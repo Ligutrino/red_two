@@ -124,7 +124,11 @@ bool viLocateCopy(u32 dest, u32 strideBytes, u32& line, u32& lines);
 std::string cardImagePath(int slot);                       // the image file of slot A
 bool cardCurrentImage(int slot, std::vector<u8>& out);     // the inserted card (false: none yet)
 void cardDetach(int slot);  // the file was replaced: keep the game's later writes in memory only
+void cardFlushNow();        // card writes not yet in the image file go there now (before quitting)
 void restartGame();         // main.cpp: start a new instance with the same arguments, then quit
+// main.cpp: the window was closed or the menu's quit chosen: a save state being written and the
+// memory card's last writes reach their files, then the process ends
+[[noreturn]] void quitToDesktop();
 
 namespace gfx {
 bool menuOpen();  // gfx/menu.cpp: the settings menu has the controls (the game sees idle pads)

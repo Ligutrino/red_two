@@ -37,6 +37,7 @@
 #include <string>
 #include <initializer_list>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "../../../extern/aurora/lib/gx/fifo.hpp"
 
@@ -125,8 +126,7 @@ void pollEvents() {
     for (; e && e->type != AURORA_NONE; ++e) {
         if (e->type == AURORA_EXIT) {
             logf("gfx", "window closed");
-            state::finishWrites();  // a save state still being written
-            quit(0);
+            quitToDesktop();
         }
         if (e->type == AURORA_SDL_EVENT) menuEvent(&e->sdl);
         // F11 or Alt+Enter: toggle fullscreen
@@ -451,7 +451,37 @@ struct TexInfo {
 };
 std::unordered_map<u64, TexInfo> s_texInfo;
 u32 s_nextTexId = 1;
-std::unordered_map<u32, u32> s_copyDests;  // EFB copy destinations (contents live on the GPU)
+// bits a texel takes in memory: texture formats (GX_TF_*) and EFB copy formats (copyFormat)
+u32 texelBits(u32 fmt) {
+    switch (fmt) {
+    case 0x00: case 0x08: case 0x0E: case 0x20: case 0x30: return 4;  // I4 C4 CMPR, R4 Z4
+    case 0x01: case 0x02: case 0x09: case 0x11: case 0x22: case 0x27: case 0x28: case 0x29: case 0x2A: case 0x39:
+    case 0x3A: return 8;  // I8 IA4 C8, Z8 RA4 A8 R8 G8 B8 Z8M Z8L
+    case 0x06: case 0x16: case 0x26: return 32;  // RGBA8, Z24X8 YUVA8
+    default: return 16;
+    }
+}
+
+// EFB copy destinations. Their contents live on the GPU (Aurora's copy textures, keyed by the
+// destination's host pointer), not in guest memory, and Aurora samples the copy for any texture
+// at that address - also after the game put other textures there: the Millennium Falcon's
+// cockpit (The Asteroid Field) drew scraps of a rendered frame, or nothing, after the space slug
+// cinematic. What the memory held at the copy is hashed; a texture read from there once it
+// changed, with another size or texel depth than the copy, is what the game loaded there: the
+// copy is dropped and the address is an ordinary texture again (Dolphin's texture cache drops
+// its EFB copies the same way). Memory changes alone are not enough: guest memory does not
+// hold what the hardware's copies would have written there (display copies never reach it),
+// and leaving SELECT GAME the game draws a 640x452 texture at the second XFB's address, where
+// it made a 640x450 copy at boot before filling memory with junk (that junk showed, full
+// screen). Display copy destinations therefore always keep their copy.
+struct CopyDest {
+    u32 bytes = 0;         // the largest copy made there, in memory
+    u32 w = 0, h = 0, bits = 0;  // the last copy: texels and bits a texel
+    u64 hash = 0;          // of those bytes in guest memory, at the last copy
+    u64 checked = ~0ull;   // frame of the last comparison
+};
+std::unordered_map<u32, CopyDest> s_copyDests;
+std::unordered_set<u32> s_dispDests;  // display copy (XFB) destinations: their memory says nothing
 
 u32 textureBytes(u32 fmt, u32 w, u32 h, u32 levels) {
     u32 bw = 4, bh = 4, bytes = 32;
@@ -512,6 +542,26 @@ void prepareTextures() {
         const u32 w = (image0 & 0x3FF) + 1, h = ((image0 >> 10) & 0x3FF) + 1;
         u8* host = physPtr(addr, 32);
         if (!host) continue;
+        if (const auto it = s_copyDests.find(addr); it != s_copyDests.end() && it->second.checked != s_frames) {
+            it->second.checked = s_frames;
+            const u8* mem = physPtr(addr, it->second.bytes);
+            const u64 hsh = mem ? XXH3_64bits(mem, it->second.bytes) : it->second.hash;
+            if (hsh != it->second.hash) {  // see CopyDest
+                CopyDest& c = it->second;
+                const bool same = (w == c.w && h == c.h && texelBits(fmt) == c.bits) || s_dispDests.count(addr);
+                static u32 logs = 0;
+                if (logs < 50 && ++logs)
+                    logf("gfx", "texture at %08X (%ux%u, %u bits): memory changed since an EFB copy (%ux%u, %u bits) went there: %s",
+                         addr, w, h, texelBits(fmt), c.w, c.h, c.bits, same ? "still the copy" : "copy dropped");
+                if (same) {
+                    c.hash = hsh;
+                } else {
+                    s_copyDests.erase(it);
+                    aur(GX_AURORA_DESTROY_COPY_TEX);
+                    fifo::write_u64(reinterpret_cast<u64>(host));
+                }
+            }
+        }
         const u32 mode0 = s_bp[base + 0x00], mode1 = s_bp[base + 0x04];
         const u32 minFilter = (mode0 >> 5) & 7;
         const bool mips = (minFilter == 1 || minFilter == 2 || minFilter == 5 || minFilter == 6) && ((mode1 >> 8) & 0xFF) > 0;
@@ -608,11 +658,19 @@ u32 copyFormat(u32 cp) {
     }
 }
 
+// bytes an EFB copy of w x h texels takes in memory, by its texture format (copyFormat)
+u32 copyBytes(u32 fmt, u32 w, u32 h) {
+    const u32 bits = texelBits(fmt);
+    const u32 bw = bits <= 8 ? 8 : 4, bh = bits == 4 ? 8 : 4, bytes = bits == 32 ? 64 : 32;
+    return ((w + bw - 1) / bw) * ((h + bh - 1) / bh) * bytes;
+}
+
 void prepareCopy(u32 cp) {
     const u32 tl = s_bp[0x49], wh = s_bp[0x4A];
     const u32 left = tl & 0x3FF, top = (tl >> 10) & 0x3FF;
     const u32 w = (wh & 0x3FF) + 1, h = ((wh >> 10) & 0x3FF) + 1;
     if (cp & (1u << 14)) {  // to the XFB
+        s_dispDests.insert((s_bp[0x4B] & 0xFFFFFF) << 5);  // (see CopyDest)
         aur(GX_AURORA_LOAD_DISP_COPY_SRC);
         fifo::write_u32(left);
         fifo::write_u32(top);
@@ -624,7 +682,18 @@ void prepareCopy(u32 cp) {
     const u32 dw = half ? (w + 1) / 2 : w, dh = half ? (h + 1) / 2 : h;
     const u32 dest = (s_bp[0x4B] & 0xFFFFFF) << 5;
     u8* host = physPtr(dest, 32);
-    s_copyDests[dest] = 1;
+    {
+        CopyDest& d = s_copyDests[dest];
+        const u32 fmt = copyFormat(cp);
+        d.w = dw;
+        d.h = dh;
+        d.bits = texelBits(fmt);
+        d.bytes = std::max(d.bytes, copyBytes(fmt, dw, dh));
+        const u8* mem = physPtr(dest, d.bytes);
+        if (!mem) mem = physPtr(dest, d.bytes = copyBytes(fmt, dw, dh));
+        d.hash = mem ? XXH3_64bits(mem, d.bytes) : 0;
+        d.checked = s_frames;
+    }
     aur(GX_AURORA_LOAD_COPY_SRC);
     fifo::write_u32(left);
     fifo::write_u32(top);
