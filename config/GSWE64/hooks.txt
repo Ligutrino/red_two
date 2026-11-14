@@ -54,3 +54,5 @@ hle     HeightTerrainTiles
 hle     MissionResults
 # The game's own dither (a screen-space texture sized for 640x480): a coarse grid at higher resolutions
 hle     DitherStrength
+# Prisons of the Maw: the two dialogue gates before the force field reach the sky (the user flew over one)
+hle     AreaTriggerUpdate

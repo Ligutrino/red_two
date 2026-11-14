@@ -473,6 +473,51 @@ void hle_HeightTerrainTiles(Ctx& c) {
     }
 }
 
+// AreaTriggerUpdate (0x7FC23008; object r3, position r4) runs after an object with a trigger list
+// moves (the player's craft after each step, 0x7FC36168). The list (+0x34) holds object indices
+// (low half, from 1, into [[0x7FDECF10] + 0x54]; bit 31 = inside; 0xFFFFFFFF ends it). An area
+// trigger is a level record read in place: half 0x001F, byte +2 the shape (6 box, 7 cylinder of
+// radius +0x1C), id +4, min corner +0x10 and size +0x28 (x, y, z); +0x3C an event bit and
+// +0x40/+0x44 a counter threshold that must hold first, +0x48 nonzero = height ignored, +0x4C the
+// actions on entering (event bit, value, counter, amount, script offset from the record), +0x60
+// those on leaving. Prisons of the Maw lays two gates across the approach to the prison's force
+// field, x -2000..3000, y 4300..7300, 100 deep: 0x82 at z 4900 (counter 21: two voice lines) and
+// 0x7C at z -100 (counter 15: the force field lines, then "You should switch to ion cannons").
+// The user flew over 0x7C at y ~7500 and never heard them; asked for "a wall the player flies
+// through", both get the game's own ignore-height flag (that mission's 0x7D has it): full height,
+// the width and depth as they were.
+static void mawGateWalls(u32 list) {
+    struct Gate { u32 id, minZ, counter; };
+    static constexpr Gate kGates[] = {{0x7C, 0xC2C80000u /* -100 */, 0x0004000Fu},
+                                      {0x82, 0x45992000u /* 4900 */, 0x00040015u}};
+    u32 table = 0;
+    for (u32 i = 0; i < 4096; i++) {
+        const u32 w = rd32(list + i * 4);
+        if (w == 0xFFFFFFFFu) break;
+        const u32 index = w & 0xFFFF;
+        if (!index) continue;
+        if (!table) table = rd32(rd32(0x7FDECF10) + 0x54);  // read as the game does, for a list with entries
+        const u32 rec = rd32(table + (index - 1) * 4);
+        if (rd32(rec) != 0x001F0600u || rd32(rec + 0x48) != 0) continue;
+        const u32 id = rd32(rec + 4) >> 16;
+        for (const Gate& g : kGates) {
+            if (id != g.id || rd32(rec + 0x18) != g.minZ || rd32(rec + 0x54) != g.counter) continue;
+            if (rd32(rec + 0x10) != 0xC4FA0000u || rd32(rec + 0x14) != 0x45866000u ||  // -2000, 4300
+                rd32(rec + 0x28) != 0x459C4000u || rd32(rec + 0x2C) != 0x453B8000u ||  // 5000, 3000
+                rd32(rec + 0x30) != 0x42C80000u)                                        // 100
+                continue;
+            wr32(rec + 0x48, 1);
+            logf("game", "Prisons of the Maw: gate %X (counter %u) reaches from the ground to the sky (record %08X)",
+                 id, g.counter & 0xFFFF, rec);
+        }
+    }
+}
+
+void hle_AreaTriggerUpdate(Ctx& c) {
+    if (const u32 list = rd32(c.r[3] + 0x34)) mawGateWalls(list);
+    f_7FC23008_orig(c);
+}
+
 // Perfect mission stats (settings). The mission's running stats live at 0x7FDF04F0 (StatsReset
 // 0x7FC464B0 at a mission's start): +0x00/+0x04 shots fired (lasers / other), +0x0C hits, +0x10
 // enemies that appeared, +0x14 enemies the player destroyed, +0x18 friendlies, +0x1C friendlies
