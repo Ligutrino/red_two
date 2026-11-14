@@ -32,7 +32,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <filesystem>
+#include <future>
 #include <string>
 #include <vector>
 
@@ -778,9 +780,37 @@ void pageCheats(settings::Settings& s) {
 }
 
 // --- mods: texture packs, codes, importing from Dolphin -------------------------------------
-mods::DolphinScan s_dolphin;       // what Dolphin has for this game (scanned when the page shows)
-bool s_dolphinScanned = false;
+mods::DolphinScan s_dolphin;       // what Dolphin has for this game (the last scan's findings)
+bool s_dolphinHave = false;        // a scan has finished
+bool s_dolphinStale = true;        // scan again when the page shows next (menu opened, import done)
+std::future<mods::DolphinScan> s_dolphinJob;
 bool s_confirmSave = false;        // the save import asks for a second press
+
+// Scanning Dolphin reads its folders, its texture packs file by file (and Red Two's copy of
+// them): 1.4 s for the user's 6 GB pack, and on the game thread the game showed no frame
+// meanwhile whenever the menu opened on the MODS page. A thread of its own scans now; the page
+// shows the last scan's findings, or "looking", until it is done.
+void dolphinScanPoll() {
+    if (s_dolphinJob.valid() && s_dolphinJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        s_dolphin = s_dolphinJob.get();
+        s_dolphinHave = true;
+    }
+    if (s_dolphinStale && !s_dolphinJob.valid()) {
+        s_dolphinStale = false;
+        s_dolphinJob = std::async(std::launch::async, [] {
+            const u64 t0 = tbNow();
+            mods::DolphinScan s;
+            try {
+                s = mods::scanDolphin();
+            } catch (const std::exception& e) {
+                logf("menu", "Dolphin scan failed: %s", e.what());
+            }
+            logf("menu", "Dolphin scan: %.0f ms, %s, %zu saves, %zu texture packs, %zu codes", double(tbNow() - t0) * 1000.0 / double(kTbClock),
+                 s.found ? "found" : "not found", s.saves.size(), s.packs.size(), s.codes.size());
+            return s;
+        });
+    }
+}
 std::string s_modsStatus;          // the last import's outcome
 
 std::string gigabytes(uint64_t b) {
@@ -806,14 +836,11 @@ void modsPoll() {
     if (!copy.done.exchange(false)) return;
     s_modsStatus = copy.message;
     if (!copy.failed) mods::reloadTextures();
-    s_dolphinScanned = false;  // (now up to date)
+    s_dolphinStale = true;  // (now up to date)
 }
 
 void pageMods(settings::Settings& s) {
-    if (!s_dolphinScanned) {
-        s_dolphin = mods::scanDolphin();
-        s_dolphinScanned = true;
-    }
+    dolphinScanPoll();
     modsPoll();
     const mods::CopyProgress& copy = mods::packCopy();
 
@@ -860,6 +887,10 @@ void pageMods(settings::Settings& s) {
     }
 
     heading("IMPORT FROM DOLPHIN");
+    if (!s_dolphinHave) {
+        ImGui::TextDisabled("Looking for Dolphin...");
+        return;
+    }
     if (!s_dolphin.found) {
         ImGui::TextDisabled("Dolphin was not found on this PC.");
         return;
@@ -1338,7 +1369,7 @@ void padSelfTest() {
 
 void setOpen(bool open) {
     if (!open) cancelCapture();
-    if (open) s_dolphinScanned = false;  // Dolphin's files may have changed meanwhile
+    if (open) s_dolphinStale = true;  // Dolphin's files may have changed meanwhile
     s_confirmSave = false;
     s_confirmQuit = false;
     s_open = open;
