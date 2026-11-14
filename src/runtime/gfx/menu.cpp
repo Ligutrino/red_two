@@ -712,6 +712,10 @@ void pageDisplay(settings::Settings& s) {
     if (toggleRow("Fill menu backgrounds", s.tileMenus,
                   "Widescreen: the menus' panel backgrounds repeat into the sides of the screen."))
         s_changed = true;
+    if (toggleRow("Dither pattern", s.gameDither,
+                  "The game blends a dither pattern over the picture, made for the GameCube's 640x480. At higher "
+                  "resolutions it shows as a grid (Hoth's sky). Off, like Dolphin's \"Disable Dithering\" code."))
+        s_changed = true;
     heading("PERFORMANCE");
     if (fpsRow("Frame rate", s.fps, "Above 60 the game runs more frames per second at its normal speed."))
         s_changed = s_display = true;

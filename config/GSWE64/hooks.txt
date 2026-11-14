@@ -46,5 +46,11 @@ hle     TargetingPass
 hle     CutsceneVideoDraw
 # Widescreen: the terrain's span array is sized for the 4:3 view; wider views overflowed it
 hle     HeapAlloc
+# Widescreen: the heightmap terrain's (Hoth) span table and the arrays laid out after it, by row count
+hle     TerrainRows
+hle     HeightTerrainSpans
+hle     HeightTerrainTiles
 # Cheat: perfect mission stats (the results record the screen and the medal use)
 hle     MissionResults
+# The game's own dither (a screen-space texture sized for 640x480): a coarse grid at higher resolutions
+hle     DitherStrength

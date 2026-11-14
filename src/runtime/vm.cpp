@@ -81,12 +81,33 @@ bool ppAllows(u32 sr, u32 pp, bool write) {
 constexpr u32 kPagerPtr = 0x80095D00;
 constexpr u32 kFrameSize = 716;
 
+// The pager's swap state (r13 = 0x8009ADA0): slot array (12-byte records: u16 next, prev,
+// flags (state in the top 4 bits), u32 virtual page), the virtual page -> slot map (u16 per
+// page from 0x7F000000, 0xFFFF = none) and the list counts. Every page the game touches takes
+// a slot when it is paged in (0x8000831C) and keeps it until VMFreeRange (0x80008B9C, from
+// HeapFree of the VM heap) releases it; when the free list and the two reclaimable lists are
+// empty the game stops: "FATAL VM ERROR: Out of ARAM memory" (0x800082D4).
+constexpr u32 kSlotArrayPtr = 0x80095CD0, kSlotMapPtr = 0x80095CE4, kSlots = 1536, kGsysVmBase = 0x7F000000;
+int s_aramLog = -1;  // R2_VM_SLOTS: 1 new pages + slot counts every 2 s
+
+void noteNewPage(Ctx& c) {
+    const u32 a = c.dar, map = rd32(kSlotMapPtr);
+    if (!map || a < kGsysVmBase) return;
+    if (rd16(map + ((a - kGsysVmBase) >> 12) * 2) != 0xFFFF) return;  // has a slot: paged in again
+    std::string chain = guestBacktrace();
+    if (!chain.empty() && chain.back() == '\n') chain.pop_back();
+    logf("vmslot", "new page %08X (%s %08X) in %s; %s", a & ~0xFFFu, c.dsisr & 0x02000000u ? "write" : "read", a,
+         describeAddr(c.curFn).c_str(), chain.c_str());
+}
+
 void pageFault(Ctx& c) {
     const u32 pager = rd32(kPagerPtr);
     if (!pager) {
         deliverException(c, 2, c.curFn);  // not installed yet: the OS reports it
         return;
     }
+    if (s_aramLog < 0) s_aramLog = getenv("R2_VM_SLOTS") ? atoi(getenv("R2_VM_SLOTS")) : 0;
+    if (s_aramLog) noteNewPage(c);
     const Ctx saved = c;
     const u32 sp = c.r[1] - kFrameSize;
     const u32 frame = sp + 8;
@@ -112,6 +133,32 @@ void pageFault(Ctx& c) {
     c.curFn = curFn;
 }
 }  // namespace
+
+// R2_VM_SLOTS: the pager's slots by state and, for slots holding a page, by 1 MiB of the VM
+// (0x7F0..0x7FF), with the 64 KiB regions that changed since the last report.
+void vmAramReport() {
+    if (s_aramLog <= 0) return;
+    const u32 arr = rd32(kSlotArrayPtr);
+    if (!arr) return;
+    u32 byState[16] = {}, byMiB[16] = {};
+    static u32 last64[256], cur64[256];
+    memset(cur64, 0, sizeof cur64);
+    for (u32 i = 0; i < kSlots; i++) {
+        const u32 st = rd16(arr + i * 12 + 4) >> 12, va = rd32(arr + i * 12 + 8);
+        byState[st]++;
+        if (st && va >= kGsysVmBase) byMiB[(va - kGsysVmBase) >> 20]++, cur64[(va - kGsysVmBase) >> 16]++;
+    }
+    std::string mib, diff;
+    char b[48];
+    for (u32 i = 0; i < 16; i++)
+        if (byMiB[i]) snprintf(b, sizeof b, " %X:%u", 0x7F0 + i, byMiB[i]), mib += b;
+    for (u32 i = 0; i < 256; i++)
+        if (cur64[i] != last64[i])
+            snprintf(b, sizeof b, " %04X:%+d", 0x7F00 + i, int(cur64[i]) - int(last64[i])), diff += b;
+    memcpy(last64, cur64, sizeof last64);
+    logf("vmslot", "slots: free %u, reclaimable %u/%u, held %u, written %u | by MiB:%s | changed:%s", byState[0],
+         byState[0xC], byState[0x8], byState[0xF], byState[0x4], mib.c_str(), diff.empty() ? " none" : diff.c_str());
+}
 
 void vmFlushAll() {
     memset(g_vmRead, 0, sizeof g_vmRead);

@@ -25,6 +25,9 @@ struct Settings {
     Aspect aspect = Aspect::R4_3;
     bool hudEdges = true;  // widescreen: the flight HUD at the screen edges
     bool tileMenus = true;  // widescreen: menu backgrounds continue into the sides
+    // The game's own dither: a screen-space texture blended over every frame, sized for 640x480;
+    // above that it shows as a coarse grid (the Hoth sky). Off like Dolphin's "Disable Dithering" code.
+    bool gameDither = false;
     int fps = 60;  // 60, 90, 120 or 144: the emulated retrace rate
     bool showFps = false;
     // While a shader compiles, a generic one (Aurora's ubershader) draws the object instead of it

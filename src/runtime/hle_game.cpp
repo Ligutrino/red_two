@@ -253,12 +253,14 @@ constexpr double kTerrainMargin = 1.2;
 // out in a sawtooth, at 32:9 all but a wedge in the middle. While hle_CameraSetup sets up a widened volume in a mission the full atan
 // (0x8005348C, the SDK's) is taken, up to 70 degrees (140 wide): the terrain span array (4x its
 // rows, hle_HeapAlloc) holds a footprint twice the far corners' distance across, which stays
-// under ~250 of its 284 rows there.
+// under ~250 of its 284 rows there. The heightmap terrain (Hoth) sizes its own table the same
+// way and overflowed it in the cockpit at 21:9: hle_TerrainRows.
 static bool s_wideVolume = false;
 constexpr double kMaxHalfTan = 2.7474774;  // tan(70 degrees)
 
 void hle_CameraHFovAtan(Ctx& c) {
-    if (s_wideVolume && std::abs(c.f[1]) > 1.0) {
+    static const bool keepCap = envFlag("R2_HFOV_CAP");  // tests: the game's 90-degree cap
+    if (s_wideVolume && !keepCap && std::abs(c.f[1]) > 1.0) {
         c.f[1] = std::clamp(c.f[1], -kMaxHalfTan, kMaxHalfTan);
         f_8005348C(c);
         return;
@@ -391,12 +393,84 @@ void hle_CameraSetup(Ctx& c) {
 // into the next heap block's header (the tile records, 0x80095FA4), and the game crashed in
 // HeapFree when the mission ended (or later). That one allocation (this return address) gets
 // four times the room, enough for 32:9 with the margin.
+// The heightmap terrain's visible-tile list (HeightTerrainLists 0x7FD8AA18, this return address)
+// gets four times its 0xC000 bytes too: hle_HeightTerrainTiles.
+constexpr u32 kTileListRet = 0x7FD8AA58u, kTileListBytes = 0xC000, kTileListScale = 4;
+static u32 s_tileListRecords = kTileListBytes / 12;
+
 void hle_HeapAlloc(Ctx& c) {
-    if (c.lr == 0x7FD893E8u) [[unlikely]] {
+    const u32 lr = c.lr;
+    if (lr == 0x7FD893E8u) [[unlikely]] {
         logf("wide", "terrain span array: room for %u rows instead of %u", c.r[3], c.r[3] / 4);
         c.r[3] *= 4;
+    } else if (lr == kTileListRet && c.r[3] == kTileListBytes) [[unlikely]] {
+        c.r[3] *= kTileListScale;
+        s_tileListRecords = c.r[3] / 12;
     }
     f_800070C4_orig(c);
+    if (lr == kTileListRet) [[unlikely]]
+        logf("wide", "heightmap terrain: room for %u visible tiles instead of %u (at %08X)", s_tileListRecords,
+             kTileListBytes / 12, c.r[3]);
+}
+
+// The heightmap terrain (Hoth and the other ground missions; state 0x7FDF5E60) has the same
+// kind of span table, sized by TerrainRows (0x7FC92B7C: the footprint of a view 41 degrees to
+// each side, at the mission's view distance) - but HeightTerrainSetup (0x7FD8A240) allocates it
+// in one block with arrays laid out after it by that row count (+0x248 = table + rows * 4, then
+// 86-byte records), so its row count itself gets four times the rows. The widened cockpit view
+// (21:9: 112 degrees with the margin, past the game's 90-degree cap: hle_CameraHFovAtan) spans
+// more rows than the game's count: HeightTerrainSpans (0x7FCBD92C, no bound) wrote past the
+// table into those arrays, and the walk over the heightmap (0x7FCBE5F0) then met an inverted
+// span (left > right): a row ends only when the column equals its end, so it slid down from
+// MEM1 through the whole VM, every page it touched taking one of the pager's 1536 ARAM slots:
+// "FATAL VM ERROR: Out of ARAM memory" seconds into a fight (or a call through a pointer the
+// overflow had overwritten: 0x4D657461, "Meta"). The Death Star's TerrainSetup (0x7FD893BC)
+// keeps its count (its table is a block of its own: hle_HeapAlloc).
+void hle_TerrainRows(Ctx& c) {
+    const u32 lr = c.lr;
+    f_7FC92B7C_orig(c);
+    if (lr == 0x7FD8A308u) {
+        logf("wide", "heightmap terrain: room for %u rows instead of %u", c.r[3] * 4, c.r[3]);
+        c.r[3] *= 4;
+    }
+}
+
+// HeightTerrainSpans (0x7FCBD92C): uses rows 0..[+0x23C] of the span table ([+0x240] rows).
+// Logs the most used so far (every 8 more) and, once, a footprint the table cannot hold.
+static u32 s_heightRowsMax = 0;
+void hle_HeightTerrainSpans(Ctx& c) {
+    f_7FCBD92C_orig(c);
+    constexpr u32 kState = 0x7FDF5E60;
+    const u32 used = rd32(kState + 0x23C) + 1, rows = rd32(kState + 0x240);
+    if (used >= s_heightRowsMax + 8 || (used > rows && s_heightRowsMax <= rows)) {
+        logf("wide", "heightmap terrain: %u of %u span rows used%s", used, rows,
+             used > rows ? " - PAST THE TABLE (memory after it overwritten)" : "");
+        s_heightRowsMax = used;
+    }
+}
+
+// HeightTerrainTiles (0x7FCC0A00): every tile inside the spans goes into the +0xC0 list (12-byte
+// records, u16 indices from 1, chained per material through the buckets at +0xBC: u16 head, tail,
+// 6 bytes each, 384 of them, cleared each frame), with no capacity check, and is then drawn
+// through the jump table 0x7FDCB5A8 by its record's level byte. The game's 0xC000 bytes hold
+// 4096; the widened cockpit at 21:9 saw more, the list ran on into the next heap block, and a
+// record read back as garbage called 0x4D657461 or 0x30000000 (0x7FCC09E0). hle_HeapAlloc gives
+// it four times the room (16384 records; the indices stay u16). The largest bucket tail after the
+// call is the number of records used: the most so far is logged (every 512 more), and once a
+// count the list cannot hold.
+static u32 s_tilesMax = 0;
+void hle_HeightTerrainTiles(Ctx& c) {
+    f_7FCC0A00_orig(c);
+    constexpr u32 kState = 0x7FDF5E60;
+    const u32 buckets = rd32(kState + 0xBC);
+    if (!buckets) return;
+    u32 used = 0;
+    for (u32 i = 0; i < 0x900 / 6; i++) used = std::max(used, rd16(buckets + i * 6 + 2));
+    if (used >= s_tilesMax + 512 || (used > s_tileListRecords && s_tilesMax <= s_tileListRecords)) {
+        logf("wide", "heightmap terrain: %u of %u visible tile records used%s", used, s_tileListRecords,
+             used > s_tileListRecords ? " - PAST THE LIST (memory after it overwritten)" : "");
+        s_tilesMax = used;
+    }
 }
 
 // Perfect mission stats (settings). The mission's running stats live at 0x7FDF04F0 (StatsReset
@@ -410,6 +484,17 @@ void hle_HeapAlloc(Ctx& c) {
 // +0x0C lives lost (u32), +0x10 targeting computer efficiency % (float). With the cheat the
 // record says 0:01, every enemy that appeared destroyed, 100%, 0, 0 and 100%. (Mission 15's
 // +0x08 counts something where more is better: left as it is.)
+// DitherStrength (0x7FD345CC): the alpha of the TEV color with which the frame setup (0x7FD34A78)
+// blends a screen-space dither texture over the picture (25 at boot, 45 later; 0 = none). Its
+// texture matrix (0x7FD2AB48) repeats every 4 pixels of a 640x480 screen, so at 4K a texel
+// covers ~4.5 pixels: a zigzag grid over smooth areas such as Hoth's sky. Off by default, like
+// Dolphin's "Disable Dithering" code (it zeroes this byte and the pattern's mode word). The
+// pattern is not zero-mean: it also brightened the picture (~10/255 in Hoth's sky).
+void hle_DitherStrength(Ctx& c) {
+    f_7FD345CC_orig(c);
+    if (!settings::get().gameDither) c.r[3] = 0;
+}
+
 void hle_MissionResults(Ctx& c) {
     const u32 rec = c.r[4];
     f_7FD76514_orig(c);

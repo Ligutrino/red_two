@@ -258,6 +258,7 @@ void viFrameHook() {
     if (noGfx) input::poll();  // otherwise the renderer polls (Aurora pads)
     else gfx::vblank();
     state::scriptTick();  // R2_STATE_SCRIPT (tests)
+    if (s_frames % 120 == 0) vmAramReport();
     // R2_WATCH_PTR=<addr>[,<offset>,<len>[,<from seconds>]] (hex): R2_WATCH on what the pointer at addr points to,
     // offset -0x20 len 0x20 by default (the game's heap block header: who corrupts it?)
     if (static const char* wp = getenv("R2_WATCH_PTR"); wp) {

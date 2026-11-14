@@ -36,6 +36,7 @@ u8* physPtr(u32 phys, u32 len);
 // --- VM region (vm.cpp) ---------------------------------------------------------------
 void vmFlushAll();
 void vmSetSdr1(u32 v);
+void vmAramReport();  // R2_VM_SLOTS: the game's ARAM swap slots
 
 // --- guest functions ------------------------------------------------------------------
 GuestFn lookupFn(u32 addr);
