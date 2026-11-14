@@ -47,7 +47,7 @@ void profilerStart();  // profiler.cpp: R2_PROFILE=<seconds> (call on the guest'
 // profiler.cpp, always on: stall reports (no frame for 250 ms: where the game thread is) and a
 // perf line every 30 s. diagStart on the guest's host thread; diagFramePresented per frame.
 void diagStart();
-void diagFramePresented(u32 draws);
+void diagFramePresented(u32 draws, u64 presentTb);  // presentTb: time in aurora_end_frame
 extern u64 g_idleTb;  // time the guest's host thread waited for the next event (idleWait)
 
 // --- time and events ------------------------------------------------------------------

@@ -56,3 +56,5 @@ hle     MissionResults
 hle     DitherStrength
 # Prisons of the Maw: the two dialogue gates before the force field reach the sky (the user flew over one)
 hle     AreaTriggerUpdate
+# Prisons of the Maw: force field panels that vanished (a generator disabled) no longer collide
+hle     MawShieldPanelHit

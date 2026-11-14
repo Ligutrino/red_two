@@ -302,8 +302,9 @@ void endFrame() {
     mods::textureFrame(false);  // (Aurora's replacement counters reset at the end of a frame)
     aurora_end_frame();
     mods::textureFrame(true);
-    frameLog(endStart, tbNow());
-    diagFramePresented(s_frameDraws);  // session log: perf lines, stall reports (profiler.cpp)
+    const u64 endDone = tbNow();
+    frameLog(endStart, endDone);
+    diagFramePresented(s_frameDraws, endDone - endStart);  // session log: perf lines, stall reports (profiler.cpp)
     tileFrameEnd();
     s_inFrame = false;
     s_frames++;

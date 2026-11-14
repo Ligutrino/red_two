@@ -518,6 +518,48 @@ void hle_AreaTriggerUpdate(Ctx& c) {
     f_7FC23008_orig(c);
 }
 
+// Prisons of the Maw's force field: two hexagons (OBJmawShieldCore, vtable 0x7FDD1CD0; a list
+// from 0x80096054 = r13-0x4D4C, next +0x104), each six triangular panels: centre +0xA8,
+// generator i, generator i+1 (count +0xE0, their level records +0xE4, position at record +0x10).
+// MawShieldCoreUpdate (0x7FD02AAC) flags generator i at +0x1F8 + i while its OBJmawShieldGen's
+// +0x104 is above 0 (ion cannons set it: disabled) and the hexagon at +0xFC (down) once fewer
+// than 3 of its generators run. MawShieldCoreDraw (0x7FD02BE8) draws a panel only if neither of
+// its generators is flagged, but MawShieldCollide (0x7FD02EC0: the ray test for craft and shots)
+// tests every panel of a hexagon that is not down: a panel next to a disabled generator vanishes
+// and stays solid (the user flew into the gap and crashed). The game's own code does that on
+// hardware too; as the user asked, the panel test (MawShieldPanelHit 0x7FD02CC0, called only from
+// there: ray r3/r4, centre r5, generator positions r6/r7) now misses the panels the draw leaves
+// out.
+void hle_MawShieldPanelHit(Ctx& c) {
+    const u32 core = c.r[5] - 0xA8;
+    const u32 n = rd32(core + 0xE0);
+    if (rd32(core + 0x80) == 0x7FDD1CD0u && n >= 3 && n <= 6) {
+        u32 open = 0, panel = n;  // open: panels with a disabled generator (bit i: generators i, i+1)
+        for (u32 i = 0; i < n; i++) {
+            const u32 next = (i + 1) % n;
+            if (rd8(core + 0x1F8 + i) || rd8(core + 0x1F8 + next)) open |= 1u << i;
+            if (rd32(core + 0xE4 + i * 4) + 0x10 == c.r[6] && rd32(core + 0xE4 + next * 4) + 0x10 == c.r[7])
+                panel = i;
+        }
+        static u32 s_core[4], s_open[4];
+        for (u32 k = 0; k < 4; k++) {
+            if (s_core[k] && s_core[k] != core) continue;
+            if (s_core[k] != core || s_open[k] != open) {
+                s_core[k] = core;
+                s_open[k] = open;
+                logf("game", "Prisons of the Maw: force field hexagon %08X: panels open (generator disabled, no collision): mask %02X",
+                     core, open);
+            }
+            break;
+        }
+        if (panel < n && (open >> panel & 1)) {
+            c.r[3] = 0;  // no hit
+            return;
+        }
+    }
+    f_7FD02CC0_orig(c);
+}
+
 // Perfect mission stats (settings). The mission's running stats live at 0x7FDF04F0 (StatsReset
 // 0x7FC464B0 at a mission's start): +0x00/+0x04 shots fired (lasers / other), +0x0C hits, +0x10
 // enemies that appeared, +0x14 enemies the player destroyed, +0x18 friendlies, +0x1C friendlies

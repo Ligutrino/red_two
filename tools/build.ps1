@@ -2,16 +2,20 @@
 # linker) and compiles with clang-cl.
 #   powershell -ExecutionPolicy Bypass -File tools\build.ps1 [-Disc <game.rvz|.iso>] [-Configure] [-Target red_two]
 # -Disc: the user's disc image (or main.dol) to recompile; CMake remembers it (R2_DOL).
+# -BuildDir: another build tree (default build\windows, the one the player runs); -CMakeArgs:
+# extra -D options when that tree is configured.
 param(
     [string]$Disc = "",
     [switch]$Configure,
     [string]$Target = "",
     [string]$Config = "RelWithDebInfo",
-    [string]$ClangCl = ""
+    [string]$ClangCl = "",
+    [string]$BuildDir = "",
+    [string[]]$CMakeArgs = @()
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-$build = Join-Path $root "build\windows"
+$build = if ($BuildDir) { $BuildDir } else { Join-Path $root "build\windows" }
 
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
@@ -61,6 +65,7 @@ if ($Configure -or -not (Test-Path "$build\build.ninja")) {
         "-DCMAKE_IGNORE_PREFIX_PATH=$ignore", "-DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=ON")
     if (Test-Path $lld) { $args += "-DCMAKE_LINKER=$lld" }
     if ($Disc) { $args += "-DR2_DOL=$Disc" }
+    $args += $CMakeArgs
     cmake @args
     if ($LASTEXITCODE) { throw "configure failed" }
 }

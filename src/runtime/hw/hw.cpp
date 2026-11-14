@@ -295,7 +295,7 @@ void diStart() {
             latencyTb += u64(double(s_diOp.len) * double(kTbClock) / (mbps * 1024.0 * 1024.0));
             latencyTb = u64(double(latencyTb) / s_dvdBoost);
         }
-        if (envFlag("R2_DVD_LOG")) {
+        if (static const bool dvdLog = envFlag("R2_DVD_LOG"); dvdLog) {
             const u64 o = u64(s_diOp.off) << 2;
             logf("dvd", "read %08llX len %X -> %08X  %s", (unsigned long long)o, s_diOp.len, s_diOp.mar, discFileAt(o).c_str());
         }
@@ -903,7 +903,7 @@ void dspPostMail(u32 m, bool irq) {
 }
 
 void dspMailFromCpu(u32 m) {
-    if (envFlag("R2_DSP_LOG")) logf("dsp", "CPU->DSP mail %08X (state %d)", m, int(s_dspState));
+    if (static const bool dspLog = envFlag("R2_DSP_LOG"); dspLog) logf("dsp", "CPU->DSP mail %08X (state %d)", m, int(s_dspState));
     switch (s_dspState) {
     case DspState::Rom:
     case DspState::BootParams:
@@ -970,7 +970,7 @@ void aramDma() {
         else a = m[i];
     }
     if (toMram) watchHost(mm, cnt, "ARAM DMA");
-    if (envFlag("R2_ARAM_LOG")) logf("aram", "%s mram %08X aram %08X len %X", toMram ? "A->M" : "M->A", mm, ar, cnt);
+    if (static const bool aramLog = envFlag("R2_ARAM_LOG"); aramLog) logf("aram", "%s mram %08X aram %08X len %X", toMram ? "A->M" : "M->A", mm, ar, cnt);
     // The game's pager busy-waits on this flag for every 4 KiB page it brings in (the intro
     // pages a lot): model a fast ARAM (2 GiB/s, ~3 us a page) and let a status read complete a
     // due transfer at once (dspRead) instead of after the timer thread's wake-up and a safepoint.
@@ -1107,7 +1107,7 @@ void dspWrite(u32 off, u16 v) {
             dspPostMail(0x8071FEED, false);
         }
         if (v & CSR_PIINT) {
-            if (envFlag("R2_DSP_LOG")) logf("dsp", "CPU interrupts DSP");
+            if (static const bool dspLog = envFlag("R2_DSP_LOG"); dspLog) logf("dsp", "CPU interrupts DSP");
         }
         dspUpdateIrq();
         return;
@@ -1187,7 +1187,7 @@ void cpWrite(u32 off, u16 v) { gxCpWrite(off, v); }
 
 u16 peRead(u32 off) { return pe[(off & 0x1F) / 2]; }
 void peWrite(u32 off, u16 v) {
-    if (off == 0x0A && envFlag("R2_GX_LOG")) logf("gx", "PE_CTRL write %04X", v);
+    if (static const bool gxLog = envFlag("R2_GX_LOG"); off == 0x0A && gxLog) logf("gx", "PE_CTRL write %04X", v);
     if (off == 0x0A) {
         u16& c = pe[0x0A / 2];
         const u16 ack = v & 0x0C;

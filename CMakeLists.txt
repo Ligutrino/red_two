@@ -5,6 +5,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(R2_DEFS _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+# CMake's RelWithDebInfo for MSVC-style compilers inlines only functions marked inline (/Ob1):
+# the bridge's small helpers (vertexSize, isPalette, cmdLength, ...) and Aurora's stayed calls
+# on paths taken for every draw. Full inlining, as in Release.
+string(REPLACE "/Ob1" "/Ob2" CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO}")
+string(REPLACE "/Ob1" "/Ob2" CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
 
 # --- Aurora (renderer, window, input): extern/aurora, MIT ---------------------------------
 # The game's own SDK code runs recompiled, so only Aurora's renderer and platform layer are
@@ -80,6 +85,20 @@ if(MSVC)
 else()
     target_compile_options(r2game PRIVATE -O2 -Wno-unused-label -fno-strict-aliasing)
 endif()
+# R2_ARCH: the x86-64 level the game and runtime code are compiled for. x86-64-v3 (Haswell /
+# Zen and later: AVX2, FMA, MOVBE, BMI2, LZCNT) makes the PowerPC's fused multiply-adds one
+# instruction instead of a call into the C library and big-endian loads/stores one MOVBE.
+# Floating-point contraction stays off: the game's separate multiplies and adds round as on
+# the GameCube. Empty: the compiler's baseline (any x86-64).
+set(R2_ARCH "x86-64-v3" CACHE STRING "x86-64 level for the game and runtime code (empty: baseline)")
+if(R2_ARCH)
+    if(MSVC)
+        set(_r2_arch "/clang:-march=${R2_ARCH}")
+    else()
+        set(_r2_arch "-march=${R2_ARCH}")
+    endif()
+endif()
+target_compile_options(r2game PRIVATE ${_r2_arch} -ffp-contract=off)
 
 # --- runtime ----------------------------------------------------------------------------
 add_executable(red_two
@@ -120,6 +139,7 @@ if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/res/icon.ico")
     target_compile_definitions(red_two PRIVATE R2_HAS_ICON=1)
 endif()
 target_compile_definitions(red_two PRIVATE ${R2_DEFS})
+target_compile_options(red_two PRIVATE ${_r2_arch} -ffp-contract=off)
 target_link_libraries(red_two PRIVATE r2game winmm aurora::core aurora::gx aurora::vi aurora::pad xxHash::xxhash zstd::libzstd dbghelp)
 if(MSVC)
     # /GS-: save states keep the guest threads' host stacks, also into a later session, whose

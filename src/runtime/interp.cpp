@@ -412,7 +412,8 @@ u64 g_interpCalls = 0;
 
 void interpret(Ctx& c, u32 addr) {
     static bool logged = false;
-    if (!logged || envFlag("R2_INTERP_LOG")) {
+    static const bool interpLog = envFlag("R2_INTERP_LOG");
+    if (!logged || interpLog) {
         logf("interp", "interpreting code at %08X (no recompiled function; lr %08X)", addr, c.lr);
         logged = true;
     }

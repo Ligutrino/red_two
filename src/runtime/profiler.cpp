@@ -249,7 +249,7 @@ void stallWatchdog(HANDLE thread) {
 
 // --- the 30-second perf line ---------------------------------------------------------------
 struct PerfWindow {
-    u64 start = 0, last = 0, frames = 0, slow = 0, longest = 0, draws = 0, idleAtStart = 0;
+    u64 start = 0, last = 0, frames = 0, slow = 0, longest = 0, draws = 0, idleAtStart = 0, present = 0;
 };
 PerfWindow s_perf;
 
@@ -261,7 +261,7 @@ void diagStart() {
     std::thread(stallWatchdog, gameThreadHandle()).detach();
 }
 
-void diagFramePresented(u32 draws) {
+void diagFramePresented(u32 draws, u64 presentTb) {
     const u64 now = tbNow();
     s_lastPresent.store(now, std::memory_order_relaxed);
     PerfWindow& w = s_perf;
@@ -276,14 +276,16 @@ void diagFramePresented(u32 draws) {
     if (interval > period + period / 2) w.slow++;
     w.longest = std::max(w.longest, interval);
     w.draws += draws;
+    w.present += presentTb;
     if (now - w.start < 30 * kTbClock) return;
     const double secs = double(now - w.start) / double(kTbClock);
     const double busy = 100.0 * (1.0 - double(g_idleTb - w.idleAtStart) / double(now - w.start));
     logf("perf", "%.0f s: %.1f fps at %.0f Hz, %llu frames over %.1f ms, longest %.0f ms, %llu draws/frame, game thread "
-                 "busy %.0f%%, level %u",
+                 "busy %.0f%% (presenting %.1f ms/frame), level %u",
          secs, double(w.frames) / secs, viRate(), (unsigned long long)w.slow, 1500.0 / viRate(),
          double(w.longest) * 1000.0 / double(kTbClock), (unsigned long long)(w.draws / std::max<u64>(w.frames, 1)),
-         std::clamp(busy, 0.0, 100.0), unsigned(peekGuest32(0x800962EC) >> 24));
+         std::clamp(busy, 0.0, 100.0), double(w.present) * 1000.0 / double(kTbClock) / double(std::max<u64>(w.frames, 1)),
+         unsigned(peekGuest32(0x800962EC) >> 24));
     w = PerfWindow{};
     w.start = w.last = now;
     w.idleAtStart = g_idleTb;
