@@ -67,6 +67,7 @@ const char* hotkeyDefault(int action, bool pad);
 Settings& get();
 void load();  // once at startup, before anything reads the settings
 void save();  // after a change in the menu (no-op for automated runs)
+std::string summary();  // every setting on one line (the session log)
 
 const char* resolutionName(Resolution r);
 const char* aspectName(Aspect a);

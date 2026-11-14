@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <dbghelp.h>
 
+#include <algorithm>
 #include <csignal>
 #include <cstdarg>
 #include <cstdio>
@@ -417,8 +418,11 @@ static u32 bootDisc() {
 }  // namespace rt
 
 // The program is a Windows GUI app (no console window on a double-click). Its log goes to
-// stderr when the parent captured it, to the parent's console with --console, and otherwise
-// to red_two.log in the working directory.
+// stderr when the parent captured it (test runs), to the parent's console with --console, and
+// otherwise to a log of its own for every session: %APPDATA%\Red Two\logs\red_two_<date>_<time>.log
+// (the newest 30 are kept; red_two.log in the working directory if that folder cannot be made).
+static std::string s_sessionLog;
+
 static void setupLogOutput(int argc, char** argv) {
     bool console = false;
     for (int i = 1; i < argc; i++)
@@ -428,7 +432,64 @@ static void setupLogOutput(int argc, char** argv) {
         return;
     }
     const HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
-    if (!h || h == INVALID_HANDLE_VALUE || GetFileType(h) == FILE_TYPE_UNKNOWN) freopen("red_two.log", "w", stderr);
+    if (h && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN) return;
+    std::string dir;
+    if (const char* appdata = getenv("APPDATA")) {
+        dir = std::string(appdata) + "\\Red Two";
+        CreateDirectoryA(dir.c_str(), nullptr);
+        dir += "\\logs";
+        CreateDirectoryA(dir.c_str(), nullptr);
+        if (GetFileAttributesA(dir.c_str()) == INVALID_FILE_ATTRIBUTES) dir.clear();
+    }
+    if (dir.empty()) {
+        s_sessionLog = "red_two.log";
+    } else {
+        // keep the newest 29 old ones (names sort by time)
+        std::vector<std::string> old;
+        WIN32_FIND_DATAA fd;
+        if (HANDLE f = FindFirstFileA((dir + "\\red_two_*.log").c_str(), &fd); f != INVALID_HANDLE_VALUE) {
+            do old.push_back(fd.cFileName);
+            while (FindNextFileA(f, &fd));
+            FindClose(f);
+        }
+        std::sort(old.begin(), old.end());
+        for (size_t i = 0; i + 29 < old.size(); i++) DeleteFileA((dir + "\\" + old[i]).c_str());
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        char name[64];
+        snprintf(name, sizeof name, "\\red_two_%04u-%02u-%02u_%02u-%02u-%02u.log", st.wYear, st.wMonth, st.wDay, st.wHour,
+                 st.wMinute, st.wSecond);
+        s_sessionLog = dir + name;
+    }
+    if (!freopen(s_sessionLog.c_str(), "w", stderr)) freopen("red_two.log", "w", stderr);
+}
+
+// The session log's first lines: which build this is and how it was started (the settings
+// follow from settings::load).
+static void logSessionHeader(int argc, char** argv) {
+    using rt::logf;
+    char exe[MAX_PATH] = "";
+    GetModuleFileNameA(nullptr, exe, sizeof exe);
+    std::string built = "?";
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (GetFileAttributesExA(exe, GetFileExInfoStandard, &fa)) {
+        FILETIME local;
+        SYSTEMTIME st;
+        FileTimeToLocalFileTime(&fa.ftLastWriteTime, &local);
+        FileTimeToSystemTime(&local, &st);
+        char b[64];
+        snprintf(b, sizeof b, "%04u-%02u-%02u %02u:%02u:%02u", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        built = b;
+    }
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    std::string args;
+    for (int i = 1; i < argc; i++) args += std::string(" ") + argv[i];
+    char cwd[MAX_PATH] = "";
+    GetCurrentDirectoryA(sizeof cwd, cwd);
+    logf("session", "Red Two started %04u-%02u-%02u %02u:%02u:%02u; exe %s (built %s)%s", now.wYear, now.wMonth, now.wDay,
+         now.wHour, now.wMinute, now.wSecond, exe, built.c_str(), args.c_str());
+    logf("session", "working directory %s%s%s", cwd, s_sessionLog.empty() ? "" : "; log ", s_sessionLog.c_str());
 }
 
 int main(int argc, char** argv) {
@@ -469,6 +530,7 @@ int main(int argc, char** argv) {
         }).detach();
     }
     eventsInit();
+    logSessionHeader(argc, argv);
     settings::load();  // after eventsInit: logging needs the time base
     // --import-dolphin[=saves,textures,codes]: bring this game's things over from Dolphin, exit
     for (int i = 1; i < argc; i++) {
@@ -478,6 +540,7 @@ int main(int argc, char** argv) {
     mods::codesInit();  // cheat codes (codes.ini), applied every retrace
     viSetRate(settings::get().fps);
     profilerStart();
+    diagStart();  // stall reports and perf lines in the log (profiler.cpp)
     s_t0Tb = tbNow();
     if (!memInit()) fatal("could not reserve the guest address space");
     tableInit();

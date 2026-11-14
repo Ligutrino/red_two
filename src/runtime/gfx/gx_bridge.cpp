@@ -303,6 +303,7 @@ void endFrame() {
     aurora_end_frame();
     mods::textureFrame(true);
     frameLog(endStart, tbNow());
+    diagFramePresented(s_frameDraws);  // session log: perf lines, stall reports (profiler.cpp)
     tileFrameEnd();
     s_inFrame = false;
     s_frames++;

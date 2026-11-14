@@ -44,6 +44,11 @@ GuestFn lookupOrig(u32 addr);  // translated body of a hooked function
 void tableInit();
 void interpret(Ctx& c, u32 addr);  // interp.cpp: code with no recompiled function
 void profilerStart();  // profiler.cpp: R2_PROFILE=<seconds> (call on the guest's host thread)
+// profiler.cpp, always on: stall reports (no frame for 250 ms: where the game thread is) and a
+// perf line every 30 s. diagStart on the guest's host thread; diagFramePresented per frame.
+void diagStart();
+void diagFramePresented(u32 draws);
+extern u64 g_idleTb;  // time the guest's host thread waited for the next event (idleWait)
 
 // --- time and events ------------------------------------------------------------------
 constexpr u64 kBusClock = 162000000, kCpuClock = 486000000, kTbClock = kBusClock / 4;

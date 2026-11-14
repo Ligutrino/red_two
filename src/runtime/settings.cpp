@@ -105,9 +105,27 @@ void load() {
             start = end + 1;
         }
     }
+    logf("config", "settings: %s", summary().c_str());
+}
+
+// every setting on one line, for the session log
+std::string summary() {
+    const Settings& s = s_settings;
+    char b[1024];
+    snprintf(b, sizeof b,
+             "fullscreen=%d resolution=%s aspect=%s fps=%d ubershaders=%d hud_edges=%d tile_menus=%d game_dither=%d "
+             "show_fps=%d volume=%d background_audio=%d skip_logos=%d skip_cutscenes=%d fast_disc=%d invincible=%d "
+             "infinite_lives=%d infinite_ammo=%d perfect_stats=%d custom_textures=%d prefetch_textures=%d "
+             "xbox_buttons=%d state_slot=%d",
+             s.fullscreen, resolutionName(s.resolution), aspectName(s.aspect), s.fps, s.ubershaders, s.hudEdges,
+             s.tileMenus, s.gameDither, s.showFps, s.volume, s.backgroundAudio, s.skipLogos, s.skipCutscenes,
+             s.fastDisc, s.invincible, s.infiniteLives, s.infiniteAmmo, s.perfectStats, s.customTextures,
+             s.prefetchTextures, s.xboxButtons, s.stateSlot);
+    return b;
 }
 
 void save() {
+    logf("config", "settings changed: %s", summary().c_str());
     if (s_path.empty()) return;
     const Settings& s = s_settings;
     FILE* f = fopen(s_path.c_str(), "w");

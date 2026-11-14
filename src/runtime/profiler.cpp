@@ -2,11 +2,18 @@
 // host thread (all guest threads are fibers on it) about once a millisecond and, every
 // <seconds>, logs the hottest host functions - generated f_XXXXXXXX and runtime code alike -
 // resolved from the PDB through DbgHelp.
+//
+// Always on, for the session log (main.cpp): every 30 s a "perf" line (frame rate, slow frames,
+// draws, how busy the game thread was), and stall reports - when no frame is presented for
+// 250 ms, a watchdog samples the game thread's call stack every 5 ms until frames come again
+// (or every 10 s while they do not) and logs where it was.
 #include <windows.h>
 #include <dbghelp.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -23,7 +30,18 @@ struct Sym {
     u64 start = 0;
 };
 
-// Resolves an address to its function; caches whole functions by start address.
+// DbgHelp is single-threaded: the profiler and the stall watchdog take this around lookups.
+std::mutex s_symMu;
+
+void symInit() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+        SymInitialize(GetCurrentProcess(), nullptr, TRUE);
+    });
+}
+
+// Resolves an address to its function; caches whole functions by start address. s_symMu held.
 const Sym& resolve(u64 rip) {
     static std::unordered_map<u64, Sym> byRip;
     auto it = byRip.find(rip);
@@ -74,6 +92,7 @@ struct Chain {
 std::unordered_map<u64, std::vector<Chain>> s_chains;  // rip -> caller chains (helpers only)
 
 void report(const std::unordered_map<u64, u32>& hits, u64 total, int secs) {
+    std::lock_guard lock(s_symMu);
     std::unordered_map<std::string, u32> byName;
     for (auto& [rip, n] : hits) {
         const std::string& name = resolve(rip).name;
@@ -125,12 +144,12 @@ void report(const std::unordered_map<u64, u32>& hits, u64 total, int secs) {
         logf("prof", "%5.1f%%  %s", 100.0 * v[i].second / double(total ? total : 1), v[i].first.c_str());
 }
 
-// Up to 6 return addresses from a stopped thread's context. A bad frame (code without unwind
+// Up to n return addresses from a stopped thread's context. A bad frame (code without unwind
 // data, a stack that does not look like one) ends the walk instead of crashing.
-__declspec(noinline) void unwind(const CONTEXT& start, u64* chain) {
+__declspec(noinline) void unwind(const CONTEXT& start, u64* chain, int n) {
     CONTEXT uc = start;
     __try {
-        for (int d = 0; d < 6; d++) {
+        for (int d = 0; d < n; d++) {
             DWORD64 imageBase = 0;
             PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(uc.Rip, &imageBase, nullptr);
             if (!fe) {  // leaf: the return address is on top of the stack
@@ -148,35 +167,151 @@ __declspec(noinline) void unwind(const CONTEXT& start, u64* chain) {
     }
 }
 
+// The game thread's current function and up to n - 1 callers (nothing allocated while it is
+// stopped: it may hold the heap's lock).
+bool sampleStack(HANDLE thread, u64* chain, int n) {
+    if (SuspendThread(thread) == DWORD(-1)) return false;
+    CONTEXT ctx{};
+    ctx.ContextFlags = CONTEXT_CONTROL;
+    const bool ok = GetThreadContext(thread, &ctx);
+    if (ok) {
+        chain[0] = ctx.Rip;
+        unwind(ctx, chain + 1, n - 1);
+    }
+    ResumeThread(thread);
+    return ok;
+}
+
+HANDLE gameThreadHandle() {
+    static HANDLE h = [] {
+        HANDLE t = nullptr;
+        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &t, 0, FALSE, DUPLICATE_SAME_ACCESS);
+        return t;
+    }();
+    return h;
+}
+
+// --- stall reports ------------------------------------------------------------------------
+std::atomic<u64> s_lastPresent{0};  // time base of the last presented frame (0: none yet)
+constexpr int kStallDepth = 14;
+struct StallSample {
+    u64 f[kStallDepth];
+};
+
+void stallReport(const std::vector<StallSample>& samples, double ms, bool ongoing) {
+    std::lock_guard lock(s_symMu);
+    symInit();
+    std::unordered_map<std::string, u32> byChain;
+    for (const StallSample& s : samples) {
+        std::string label;
+        int shown = 0;
+        for (int i = 0; i < kStallDepth && s.f[i]; i++) {
+            const std::string& name = resolve(s.f[i]).name;
+            if (i > 0 && isLeafHelper(name)) continue;
+            if (!label.empty()) label += " <- ";
+            label += name;
+            if (++shown == 8) break;
+        }
+        byChain[label]++;
+    }
+    std::vector<std::pair<std::string, u32>> v(byChain.begin(), byChain.end());
+    std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });
+    logf("stall", "%s %.0f ms without a new frame (level %u); the game thread in %zu samples:",
+         ongoing ? "still waiting:" : "frames again after", ms, unsigned(peekGuest32(0x800962EC) >> 24), samples.size());
+    for (size_t i = 0; i < v.size() && i < 4; i++)
+        logf("stall", "  %3.0f%%  %s", 100.0 * v[i].second / double(samples.size()), v[i].first.c_str());
+}
+
+void stallWatchdog(HANDLE thread) {
+    constexpr u64 kStall = kTbClock / 4;        // 250 ms without a frame
+    constexpr u64 kInterim = 10 * kTbClock;     // a longer one is reported every 10 s meanwhile
+    for (;;) {
+        Sleep(20);
+        const u64 last = s_lastPresent.load(std::memory_order_relaxed);
+        if (!last || tbNow() - last < kStall) continue;
+        std::vector<StallSample> samples;
+        u64 reported = last;
+        while (s_lastPresent.load(std::memory_order_relaxed) == last) {
+            StallSample s{};
+            if (sampleStack(thread, s.f, kStallDepth)) samples.push_back(s);
+            Sleep(5);
+            const u64 now = tbNow();
+            if (now - reported >= kInterim && s_lastPresent.load(std::memory_order_relaxed) == last) {
+                stallReport(samples, double(now - last) * 1000.0 / double(kTbClock), true);
+                samples.clear();
+                reported = now;
+            }
+        }
+        const u64 next = s_lastPresent.load(std::memory_order_relaxed);
+        if (!samples.empty()) stallReport(samples, double(next - last) * 1000.0 / double(kTbClock), false);
+    }
+}
+
+// --- the 30-second perf line ---------------------------------------------------------------
+struct PerfWindow {
+    u64 start = 0, last = 0, frames = 0, slow = 0, longest = 0, draws = 0, idleAtStart = 0;
+};
+PerfWindow s_perf;
+
 }  // namespace
+
+u64 g_idleTb = 0;  // events.cpp idleWait: time the game thread spent waiting for the next event
+
+void diagStart() {
+    std::thread(stallWatchdog, gameThreadHandle()).detach();
+}
+
+void diagFramePresented(u32 draws) {
+    const u64 now = tbNow();
+    s_lastPresent.store(now, std::memory_order_relaxed);
+    PerfWindow& w = s_perf;
+    if (!w.start) {
+        w.start = w.last = now;
+        w.idleAtStart = g_idleTb;
+        return;
+    }
+    const u64 interval = now - w.last, period = u64(double(kTbClock) / viRate());
+    w.last = now;
+    w.frames++;
+    if (interval > period + period / 2) w.slow++;
+    w.longest = std::max(w.longest, interval);
+    w.draws += draws;
+    if (now - w.start < 30 * kTbClock) return;
+    const double secs = double(now - w.start) / double(kTbClock);
+    const double busy = 100.0 * (1.0 - double(g_idleTb - w.idleAtStart) / double(now - w.start));
+    logf("perf", "%.0f s: %.1f fps at %.0f Hz, %llu frames over %.1f ms, longest %.0f ms, %llu draws/frame, game thread "
+                 "busy %.0f%%, level %u",
+         secs, double(w.frames) / secs, viRate(), (unsigned long long)w.slow, 1500.0 / viRate(),
+         double(w.longest) * 1000.0 / double(kTbClock), (unsigned long long)(w.draws / std::max<u64>(w.frames, 1)),
+         std::clamp(busy, 0.0, 100.0), unsigned(peekGuest32(0x800962EC) >> 24));
+    w = PerfWindow{};
+    w.start = w.last = now;
+    w.idleAtStart = g_idleTb;
+}
 
 void profilerStart() {
     const char* env = getenv("R2_PROFILE");
     if (!env || !*env) return;
     const int secs = atoi(env) > 0 ? atoi(env) : 5;
-    HANDLE target = nullptr;
-    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &target, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    HANDLE target = gameThreadHandle();
     std::thread([target, secs] {
-        SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
-        SymInitialize(GetCurrentProcess(), nullptr, TRUE);
+        {
+            std::lock_guard lock(s_symMu);
+            symInit();
+        }
         std::unordered_map<u64, u32> hits;
         u64 total = 0;
         ULONGLONG next = GetTickCount64() + ULONGLONG(secs) * 1000;
         for (;;) {
             Sleep(1);
-            if (SuspendThread(target) == DWORD(-1)) continue;
-            CONTEXT ctx{};
-            ctx.ContextFlags = CONTEXT_CONTROL;
-            const bool ok = GetThreadContext(target, &ctx);
             // Caller chain while the thread is stopped: RtlVirtualUnwind needs no allocation.
-            u64 chain[6] = {};
-            if (ok) unwind(ctx, chain);
-            ResumeThread(target);  // resolve only after resuming: symbol lookup allocates
-            if (ok) {
-                hits[ctx.Rip]++;
+            u64 chain[7] = {};
+            const bool ok = sampleStack(target, chain, 7);
+            if (ok) {  // resolve only after resuming (sampleStack did): symbol lookup allocates
+                hits[chain[0]]++;
                 // the first caller outside the helper (memmove's own frames are skipped in report)
-                s_callers[ctx.Rip][chain[0]]++;
-                s_chains[ctx.Rip].push_back({chain[0], chain[1], chain[2], chain[3], chain[4], chain[5]});
+                s_callers[chain[0]][chain[1]]++;
+                s_chains[chain[0]].push_back({chain[1], chain[2], chain[3], chain[4], chain[5], chain[6]});
                 total++;
             }
             if (GetTickCount64() >= next) {

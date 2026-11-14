@@ -124,7 +124,9 @@ void idleWait(Ctx& c, u32 pc) {
     if (!g_irqPending && !g_irqLine) {
         g_idleWaits++;
         // The timer thread signals when an event is due; the timeout only bounds a missed wake.
+        const u64 t0 = tbNow();
         WaitForSingleObject(s_guestEv, 4);
+        g_idleTb += tbNow() - t0;  // (the session log's "game thread busy")
     }
     poll(c, pc);
 }
