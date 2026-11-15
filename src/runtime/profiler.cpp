@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "hw/musyx_dsp.h"
 #include "runtime.h"
 
 namespace rt {
@@ -281,11 +282,11 @@ void diagFramePresented(u32 draws, u64 presentTb) {
     const double secs = double(now - w.start) / double(kTbClock);
     const double busy = 100.0 * (1.0 - double(g_idleTb - w.idleAtStart) / double(now - w.start));
     logf("perf", "%.0f s: %.1f fps at %.0f Hz, %llu frames over %.1f ms, longest %.0f ms, %llu draws/frame, game thread "
-                 "busy %.0f%% (presenting %.1f ms/frame), level %u",
+                 "busy %.0f%% (presenting %.1f ms/frame), level %u, %s",
          secs, double(w.frames) / secs, viRate(), (unsigned long long)w.slow, 1500.0 / viRate(),
          double(w.longest) * 1000.0 / double(kTbClock), (unsigned long long)(w.draws / std::max<u64>(w.frames, 1)),
          std::clamp(busy, 0.0, 100.0), double(w.present) * 1000.0 / double(kTbClock) / double(std::max<u64>(w.frames, 1)),
-         unsigned(peekGuest32(0x800962EC) >> 24));
+         unsigned(peekGuest32(0x800962EC) >> 24), audio::perfText().c_str());
     w = PerfWindow{};
     w.start = w.last = now;
     w.idleAtStart = g_idleTb;

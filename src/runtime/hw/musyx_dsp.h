@@ -21,6 +21,8 @@ void push(const u8* data, u32 frames, u32 rate);
 // Output gain (0..1, applied by the SDL stream): the menu's volume, muted while the window is
 // in the background if the player wants that.
 void setGain(float gain);
+void deviceEvent(const void* sdlEvent);  // every SDL event: playback devices come and go
+std::string perfText();                 // what was played since the last call (perf lines)
 }  // namespace audio
 
 }  // namespace rt

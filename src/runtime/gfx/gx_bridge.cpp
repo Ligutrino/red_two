@@ -48,6 +48,7 @@ extern "C" __declspec(dllimport) long long __stdcall SetWindowLongPtrW(void*, in
 extern "C" __declspec(dllimport) int __stdcall GetSystemMetrics(int);
 extern "C" __declspec(dllimport) int __stdcall ShowWindow(void*, int);
 #include "../hw/gx_fifo.h"
+#include "../hw/musyx_dsp.h"
 #include "../hotkeys.h"
 #include "../mods.h"
 #include "tex_dump.h"
@@ -128,7 +129,10 @@ void pollEvents() {
             logf("gfx", "window closed");
             quitToDesktop();
         }
-        if (e->type == AURORA_SDL_EVENT) menuEvent(&e->sdl);
+        if (e->type == AURORA_SDL_EVENT) {
+            menuEvent(&e->sdl);
+            audio::deviceEvent(&e->sdl);
+        }
         // F11 or Alt+Enter: toggle fullscreen
         if (e->type == AURORA_SDL_EVENT && e->sdl.type == SDL_EVENT_KEY_DOWN && !e->sdl.key.repeat &&
             (e->sdl.key.key == SDLK_F11 || (e->sdl.key.key == SDLK_RETURN && (e->sdl.key.mod & SDL_KMOD_ALT)))) {
