@@ -397,20 +397,87 @@ void hle_CameraSetup(Ctx& c) {
 // gets four times its 0xC000 bytes too: hle_HeightTerrainTiles.
 constexpr u32 kTileListRet = 0x7FD8AA58u, kTileListBytes = 0xC000, kTileListScale = 4;
 static u32 s_tileListRecords = kTileListBytes / 12;
+static u32 s_heightRowsExtra = 0;  // rows hle_TerrainRows added for HeightTerrainSetup's block
+
+// The enlarged tables live outside the game's heap. Taken from it (MEM1, 22 MiB, mission data
+// filling most of it), the extra room moved every block allocated after them, and the heap ran
+// short where it never does on hardware: the user's Revenge on Yavin (bonus row) stopped ~5
+// minutes in with "*** OUT OF MEMORY (size 530352, free 1019424)! ***" from the loader thread
+// (0x7FD5B1BC, a level resource read in 256 KiB pieces), which then read the disc into the null
+// pointer it got (fault at 0x0002F880). Their state, 22 s into that mission: 962 KB free in 23
+// pieces, the largest 485 KB, and the 4x visible-tile list alone took 147 KB more than the game
+// planned. So each table takes its original size from the game's heap, as on hardware (the heap's
+// layout and history stay the game's own), and the game gets an enlarged block of the port's
+// (kPortArena, past the end of MEM1, saved in states) whose header copies the original's;
+// HeapFree of it frees the original. One slot per table: a mission sets each up once.
+struct PortTable {
+    const char* name;
+    u32 lr;                // HeapAlloc's return address in the table's setup
+    u32 offset, room;      // the slot in the port arena (data at kPortArena + offset)
+    u32 block = 0, size = 0;  // the game's own (original-size) block, the enlarged size
+};
+static PortTable s_portTables[] = {
+    {"terrain span array", 0x7FD893E8u, 0x00100, 0x0FF00},   // TerrainSetup (the Death Star)
+    {"heightmap terrain rows", 0x7FD8A3C8u, 0x10100, 0x2FF00},  // HeightTerrainSetup (~95 KB in Yavin)
+    {"heightmap visible-tile list", kTileListRet, 0x40100, kTileListBytes * kTileListScale},  // HeightTerrainLists
+};
+static_assert(0x40100 + kTileListBytes * kTileListScale <= kPortArenaSize);
 
 void hle_HeapAlloc(Ctx& c) {
     const u32 lr = c.lr;
+    u32 original = 0, enlarged = 0;
     if (lr == 0x7FD893E8u) [[unlikely]] {
-        logf("wide", "terrain span array: room for %u rows instead of %u", c.r[3], c.r[3] / 4);
-        c.r[3] *= 4;
+        original = c.r[3], enlarged = c.r[3] * 4;
+        logf("wide", "terrain span array: room for %u rows instead of %u", enlarged / 4, original / 4);
     } else if (lr == kTileListRet && c.r[3] == kTileListBytes) [[unlikely]] {
-        c.r[3] *= kTileListScale;
-        s_tileListRecords = c.r[3] / 12;
+        original = c.r[3], enlarged = c.r[3] * kTileListScale;
+        s_tileListRecords = enlarged / 12;
+        logf("wide", "heightmap terrain: room for %u visible tiles instead of %u", s_tileListRecords, original / 12);
+    } else if (lr == 0x7FD8A3C8u && s_heightRowsExtra && c.r[3] > s_heightRowsExtra * 6) [[unlikely]] {
+        // rows * 6 + n * 86 bytes: the table (4 bytes a row), a 2-byte array by rows, records
+        enlarged = c.r[3], original = c.r[3] - s_heightRowsExtra * 6;
+        s_heightRowsExtra = 0;
     }
-    f_800070C4_orig(c);
-    if (lr == kTileListRet) [[unlikely]]
-        logf("wide", "heightmap terrain: room for %u visible tiles instead of %u (at %08X)", s_tileListRecords,
-             kTileListBytes / 12, c.r[3]);
+    PortTable* t = nullptr;
+    for (auto& e : s_portTables)
+        if (enlarged && e.lr == lr) t = &e;
+    if (!t || enlarged > t->room) [[likely]] {
+        if (t) logf("wide", "%s: %u bytes do not fit the port's %u: taken from the game's heap", t->name, enlarged, t->room);
+        if (enlarged) c.r[3] = enlarged;
+        f_800070C4_orig(c);
+        return;
+    }
+    const u32 flags = c.r[4];
+    c.r[3] = original;
+    f_800070C4_orig(c);  // the game's own block, as on hardware
+    const u32 block = c.r[3];
+    if (!block) return;  // out of memory: the game's own handling
+    if (t->block) logf("wide", "%s: the previous one (game block %08X) was never freed", t->name, t->block);
+    const u32 p = kPortArena + t->offset;
+    for (u32 o = 0; o < 0x20; o += 4) wr32(p - 0x20 + o, rd32(block - 0x20 + o));  // its header
+    if (flags & 0x100) memset(g_base + p, 0, enlarged);  // HeapAlloc's clear flag
+    t->block = block, t->size = enlarged;
+    c.r[3] = p;
+    logf("wide", "%s: %u bytes at %08X (the game's %u-byte block at %08X stays as on hardware)", t->name, enlarged, p,
+         original, block);
+}
+
+// HeapFree (0x80007270, ptr r3): a port table's block frees the game's own.
+void hle_HeapFree(Ctx& c) {
+    const u32 p = c.r[3];
+    if (p >= kPortArena && p < kPortArena + kPortArenaSize) [[unlikely]] {
+        PortTable* t = nullptr;
+        for (auto& e : s_portTables)
+            if (p == kPortArena + e.offset) t = &e;
+        if (!t || !t->block) {
+            logf("wide", "HeapFree of %08X in the port arena: not a block of it (ignored)", p);
+            return;
+        }
+        logf("wide", "%s freed (the game's block %08X)", t->name, t->block);
+        c.r[3] = t->block;
+        t->block = 0, t->size = 0;
+    }
+    f_80007270_orig(c);
 }
 
 // The heightmap terrain (Hoth and the other ground missions; state 0x7FDF5E60) has the same
@@ -431,6 +498,7 @@ void hle_TerrainRows(Ctx& c) {
     f_7FC92B7C_orig(c);
     if (lr == 0x7FD8A308u) {
         logf("wide", "heightmap terrain: room for %u rows instead of %u", c.r[3] * 4, c.r[3]);
+        s_heightRowsExtra = c.r[3] * 3;  // its block comes from the port (hle_HeapAlloc)
         c.r[3] *= 4;
     }
 }
@@ -836,11 +904,15 @@ namespace rt {
 void hleSaveState(state::Writer& w) {
     w.section("HLE ");
     w.vec(s_weapons);
+    for (const auto& t : s_portTables) w.pod(t.block), w.pod(t.size);  // (their data: memory.cpp)
+    w.pod(s_tileListRecords), w.pod(s_heightRowsExtra);
 }
 
 void hleLoadState(state::Reader& r) {
     r.section("HLE ");
     r.vec(s_weapons);
+    for (auto& t : s_portTables) r.pod(t.block), r.pod(t.size);
+    r.pod(s_tileListRecords), r.pod(s_heightRowsExtra);
 }
 
 // After a load (on the guest's fiber): caches of guest objects start over, a skip in progress

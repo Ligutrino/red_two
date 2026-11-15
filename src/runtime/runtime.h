@@ -28,6 +28,10 @@ void printHostStack(FILE* f, int skip);  // main.cpp: the host call stack, symbo
 constexpr u32 kMem1Size = 0x01800000;
 constexpr u32 kVmBase = 0x7E000000, kVmSize = 0x02000000;
 constexpr u32 kLockedCache = 0xE0000000, kLockedCacheSize = 0x4000;
+// The port's own guest memory, past the end of MEM1 in the BAT window (no game code addresses
+// it): enlarged copies of tables the game sizes for its 4:3 view (hle_game.cpp, port tables).
+// Committed at start and saved in states.
+constexpr u32 kPortArena = 0x8F000000, kPortArenaSize = 0x80000;
 bool memInit();
 inline bool isMem1(u32 a) { return (a >= 0x80000000u && a < 0x80000000u + kMem1Size) || (a >= 0xC0000000u && a < 0xC0000000u + kMem1Size); }
 // Physical address (as DMA engines see it) -> host pointer into MEM1, or nullptr.

@@ -44,8 +44,10 @@ hle     MTXPerspective
 hle     TargetingPass
 # Widescreen: cutscene movies (quads in the 3D scene sized for the game's view) fill the screen
 hle     CutsceneVideoDraw
-# Widescreen: the terrain's span array is sized for the 4:3 view; wider views overflowed it
+# Widescreen: the terrain's span array is sized for the 4:3 view; wider views overflowed it.
+# Enlarged tables live in the port's arena, outside the game's heap: HeapFree maps them back
 hle     HeapAlloc
+hle     HeapFree
 # Widescreen: the heightmap terrain's (Hoth) span table and the arrays laid out after it, by row count
 hle     TerrainRows
 hle     HeightTerrainSpans

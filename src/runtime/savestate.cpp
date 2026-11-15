@@ -29,7 +29,7 @@ volatile bool g_pending = false;
 
 namespace {
 
-constexpr u32 kVersion = 1;
+constexpr u32 kVersion = 2;  // 2: the port arena (memory.cpp)
 struct Header {
     char magic[4];   // "R2ST"
     u32 version;

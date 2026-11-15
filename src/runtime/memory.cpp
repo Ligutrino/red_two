@@ -134,13 +134,15 @@ static bool mapAt(u8* base) {
     void* b = MapViewOfFileEx(s_mem1, FILE_MAP_ALL_ACCESS, 0, 0, kMem1Size, base + 0xC0000000u);
     // (0x7E000000-0x7FFFFFFF is translated by vm.cpp and never touched at g_base + a.)
     void* l = VirtualAlloc(base + kLockedCache, 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    if (a && b && l) {
+    void* p = VirtualAlloc(base + kPortArena, kPortArenaSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (a && b && l && p) {
         g_base = base;
         return true;
     }
     if (a) UnmapViewOfFile(a);
     if (b) UnmapViewOfFile(b);
     if (l) VirtualFree(l, 0, MEM_RELEASE);
+    if (p) VirtualFree(p, 0, MEM_RELEASE);
     return false;
 }
 
@@ -197,12 +199,14 @@ void memSaveState(state::Writer& w) {
     w.section("MEM1");
     w.bytes(g_base + 0x80000000u, kMem1Size);
     w.bytes(g_base + kLockedCache, kLockedCacheSize);
+    w.bytes(g_base + kPortArena, kPortArenaSize);
 }
 
 void memLoadState(state::Reader& r) {
     r.section("MEM1");
     r.bytes(g_base + 0x80000000u, kMem1Size);
     r.bytes(g_base + kLockedCache, kLockedCacheSize);
+    r.bytes(g_base + kPortArena, kPortArenaSize);
 }
 
 }  // namespace rt
