@@ -20,6 +20,34 @@ const char* const kHotkeyNames[HkCount] = {"save_state", "load_state", "next_slo
 
 bool parseBool(const std::string& v) { return v == "1" || v == "true" || v == "on" || v == "yes"; }
 
+#ifndef _WIN32
+std::string dmiField(const char* name) {
+    std::string s;
+    if (FILE* f = fopen((std::string("/sys/devices/virtual/dmi/id/") + name).c_str(), "r")) {
+        char buf[64];
+        if (fgets(buf, sizeof buf, f)) s = buf;
+        fclose(f);
+    }
+    while (!s.empty() && (s.back() == '\n' || s.back() == ' ')) s.pop_back();
+    return s;
+}
+#endif
+
+// A Steam Deck. Steam sets SteamDeck=1 for what it starts (Game Mode, or a Steam shortcut in
+// Desktop Mode), but not for a start from the desktop (Dolphin, a terminal): the user's first
+// start was one, so it got the desktop defaults (4:3 in a window). The DMI names say it either
+// way: Valve's Jupiter (LCD) and Galileo (OLED).
+bool steamDeck() {
+    if (const char* deck = getenv("SteamDeck"); deck && !strcmp(deck, "1")) return true;
+#ifdef _WIN32
+    return false;
+#else
+    if (dmiField("sys_vendor") != "Valve") return false;
+    const std::string product = dmiField("product_name");
+    return product == "Jupiter" || product == "Galileo";
+#endif
+}
+
 void set(const std::string& key, const std::string& value) {
     Settings& s = s_settings;
     const int n = atoi(value.c_str());
@@ -96,12 +124,17 @@ void load() {
             while (fgets(buf, sizeof buf, f)) parseLine(buf);
             fclose(f);
             logf("config", "settings from %s", s_path.c_str());
-        } else if (const char* deck = getenv("SteamDeck"); deck && !strcmp(deck, "1")) {
-            // the first start on a Steam Deck (Steam sets SteamDeck=1): fullscreen, the picture
-            // as wide as its 16:10 screen
+        } else if (steamDeck()) {
+            // the first start on a Steam Deck: fullscreen, the picture as wide as its 16:10
+            // screen, and texture packs read from the SSD when used rather than all prefetched:
+            // the Deck's 16 GB are shared with the GPU, which keeps up to 4 GB of replacement
+            // textures itself, and prefetching the user's 6 GB pack made the process hold ~7 GiB
+            // more (on the PC) - most of the memory Steam and the system leave. DDS packs load on
+            // Aurora's workers in time anyway (on the PC one load pending in 526 Hoth samples).
             s_settings.fullscreen = true;
             s_settings.aspect = Aspect::Window;
-            logf("config", "first start on a Steam Deck: fullscreen, aspect of the screen");
+            s_settings.prefetchTextures = false;
+            logf("config", "first start on a Steam Deck: fullscreen, aspect of the screen, no texture prefetch");
         } else {
 #ifdef __ANDROID__
             // the first start on Android: the picture as wide as the screen (wider phones get
