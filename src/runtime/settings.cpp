@@ -98,6 +98,12 @@ void load() {
             while (fgets(buf, sizeof buf, f)) parseLine(buf);
             fclose(f);
             logf("config", "settings from %s", s_path.c_str());
+        } else if (const char* deck = getenv("SteamDeck"); deck && !strcmp(deck, "1")) {
+            // the first start on a Steam Deck (Steam sets SteamDeck=1): fullscreen, the picture
+            // as wide as its 16:10 screen
+            s_settings.fullscreen = true;
+            s_settings.aspect = Aspect::Window;
+            logf("config", "first start on a Steam Deck: fullscreen, aspect of the screen");
         }
     }
     // R2_SET="fps=120;aspect=1": overrides, e.g. for test runs

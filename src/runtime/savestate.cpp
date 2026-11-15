@@ -250,7 +250,11 @@ std::string slotInfo(int slot) {
         if (fread(&h, sizeof h, 1, f) == 1 && !memcmp(h.magic, "R2ST", 4)) {
             const time_t t = time_t(h.savedUnix);
             struct tm lt{};
+#ifdef _WIN32
             localtime_s(&lt, &t);
+#else
+            localtime_r(&t, &lt);
+#endif
             char buf[32];
             strftime(buf, sizeof buf, "%m-%d %H:%M", &lt);
             c.text = buf;

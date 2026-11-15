@@ -5,7 +5,15 @@
 // frames hold host pointers: return addresses into the exe, the guest contexts, the stacks
 // themselves. So the exe is linked at a fixed base (no ASLR), and guest memory and the fiber
 // stacks go to fixed addresses too: a state then loads in any later session of the same build.
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <pthread.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <ucontext.h>
+#include <unistd.h>
+#endif
 
 #include <atomic>
 #include <string>
@@ -18,7 +26,11 @@
 namespace rt {
 
 u8* g_base = nullptr;
+#ifdef _WIN32
 static HANDLE s_mem1 = nullptr;
+#else
+static int s_mem1 = -1;  // memfd: MEM1, mapped twice (0x80000000 and 0xC0000000)
+#endif
 static u8* s_stacks = nullptr;
 
 constexpr u64 kFixedGuestBase = 0x0000020000000000ull;  // 2 TiB: free in practice
@@ -72,7 +84,16 @@ static void faultDump(const Ctx& c) {
     }
 }
 
+#ifdef _WIN32
 static DWORD s_guestThread = 0;  // the host thread the guest's fibers run on
+static bool onGuestThread() { return GetCurrentThreadId() == s_guestThread; }
+static unsigned long hostThreadId() { return GetCurrentThreadId(); }
+#else
+static pthread_t s_guestThread{};
+static bool s_haveGuestThread = false;
+static bool onGuestThread() { return s_haveGuestThread && pthread_equal(pthread_self(), s_guestThread); }
+static unsigned long hostThreadId() { return (unsigned long)gettid(); }
+#endif
 
 // The SDK's BATs map 0x80000000-0x8FFFFFFF (cached) and 0xC0000000-0xCFFFFFFF (uncached) to
 // physical 0-0x0FFFFFFF, but MEM1 ends at 24 MiB: on hardware an access past it does not fault
@@ -87,48 +108,68 @@ static bool pastMem1(u32 guest) {
 
 static bool commitPastMem1(u32 guest, bool write) {
     u8* page = g_base + (guest & ~0xFFFFu);
+#ifdef _WIN32
     if (!VirtualAlloc(page, 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)) {
         MEMORY_BASIC_INFORMATION mi{};  // another thread may have committed it meanwhile
         if (!VirtualQuery(g_base + guest, &mi, sizeof mi) || mi.State != MEM_COMMIT) return false;
     }
+#else
+    // (the reservation's own pages: zero-filled once readable; again is harmless)
+    if (mprotect(page, 0x10000, PROT_READ | PROT_WRITE) != 0) return false;
+#endif
     static std::atomic<int> n{0};
     if (n++ < 8) {
-        const bool guestThread = GetCurrentThreadId() == s_guestThread;
+        const bool guestThread = onGuestThread();
         logf("mem", "%s %08X, past the end of MEM1 (as on hardware: zeros, no fault)%s%s", write ? "write to" : "read of", guest,
              guestThread ? " in " : " by a host thread", guestThread ? describeAddr(curCtx().curFn).c_str() : "");
     }
     return true;
 }
 
+// A fault in guest memory: pages past MEM1 are committed, anything else is fatal (with the
+// guest's registers when it was the game's thread). False: not guest memory.
+static bool onGuestFault(u64 host, bool write, const void* at) {
+    const u64 b = u64(g_base);
+    if (!g_base || host < b || host >= b + 0x100000000ull) return false;
+    const u32 guest = u32(host - b);
+    if (pastMem1(guest) && commitPastMem1(guest, write)) return true;
+    // Another host thread (Aurora's GX worker reading vertex arrays and textures, audio):
+    // the guest's registers say nothing about it, its own call stack does.
+    if (!onGuestThread()) {
+        logf("fault", "host thread %lu %s guest address %08X at %p", hostThreadId(), write ? "wrote" : "read", guest, at);
+        printHostStack(stderr, 0);
+        fatal("host %s of unmapped guest address %08X (not the guest's thread)", write ? "write" : "read", guest);
+    }
+    const Ctx& c = curCtx();
+    faultDump(c);
+    if (getenv("R2_FAULT_DUMP")) printHostStack(stderr, 0);
+    char regs[600];
+    int n = 0;
+    for (int i = 0; i < 32; i++) n += snprintf(regs + n, sizeof regs - n, "%sr%d=%08X", i % 8 ? " " : "\n  ", i, c.r[i]);
+    snprintf(regs + n, sizeof regs - n, "\n  lr=%08X ctr=%08X", c.lr, c.ctr);
+    fatal("guest %s of unmapped address %08X (current fn %s)%s", write ? "write" : "read", guest,
+          describeAddr(curCtx().curFn).c_str(), regs);
+}
+
+#ifdef _WIN32
 static LONG CALLBACK onAccessViolation(EXCEPTION_POINTERS* ep) {
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || !g_base) return EXCEPTION_CONTINUE_SEARCH;
     const u64 host = ep->ExceptionRecord->ExceptionInformation[1];
-    const u64 b = u64(g_base);
-    if (host >= b && host < b + 0x100000000ull) {
-        const u32 guest = u32(host - b);
-        const bool write = ep->ExceptionRecord->ExceptionInformation[0] == 1;
-        if (pastMem1(guest) && commitPastMem1(guest, write)) return EXCEPTION_CONTINUE_EXECUTION;
-        // Another host thread (Aurora's GX worker reading vertex arrays and textures, audio):
-        // the guest's registers say nothing about it, its own call stack does.
-        if (s_guestThread && GetCurrentThreadId() != s_guestThread) {
-            logf("fault", "host thread %lu %s guest address %08X at %p", GetCurrentThreadId(), write ? "wrote" : "read",
-                 guest, ep->ExceptionRecord->ExceptionAddress);
-            printHostStack(stderr, 0);
-            fatal("host %s of unmapped guest address %08X (not the guest's thread)", write ? "write" : "read", guest);
-        }
-        const Ctx& c = curCtx();
-        faultDump(c);
-        if (getenv("R2_FAULT_DUMP")) printHostStack(stderr, 0);
-        char regs[600];
-        int n = 0;
-        for (int i = 0; i < 32; i++) n += snprintf(regs + n, sizeof regs - n, "%sr%d=%08X", i % 8 ? " " : "\n  ", i, c.r[i]);
-        snprintf(regs + n, sizeof regs - n, "\n  lr=%08X ctr=%08X", c.lr, c.ctr);
-        fatal("guest %s of unmapped address %08X (current fn %s)%s", write ? "write" : "read", guest,
-              describeAddr(curCtx().curFn).c_str(), regs);
-    }
+    const bool write = ep->ExceptionRecord->ExceptionInformation[0] == 1;
+    if (onGuestFault(host, write, ep->ExceptionRecord->ExceptionAddress)) return EXCEPTION_CONTINUE_EXECUTION;
     return EXCEPTION_CONTINUE_SEARCH;
 }
+#else
+// SIGSEGV: guest memory as above; anything else goes to main.cpp's crash report
+static void onSegv(int sig, siginfo_t* si, void* ucv) {
+    const auto* uc = static_cast<const ucontext_t*>(ucv);
+    const bool write = (uc->uc_mcontext.gregs[REG_ERR] & 2) != 0;  // page fault error code: W
+    if (onGuestFault(u64(si->si_addr), write, reinterpret_cast<const void*>(uc->uc_mcontext.gregs[REG_RIP]))) return;
+    hostCrash(sig, si, ucv);
+}
+#endif
 
+#ifdef _WIN32
 static bool mapAt(u8* base) {
     void* a = MapViewOfFileEx(s_mem1, FILE_MAP_ALL_ACCESS, 0, 0, kMem1Size, base + 0x80000000u);
     void* b = MapViewOfFileEx(s_mem1, FILE_MAP_ALL_ACCESS, 0, 0, kMem1Size, base + 0xC0000000u);
@@ -169,6 +210,48 @@ bool memInit() {
     AddVectoredExceptionHandler(1, onAccessViolation);
     return true;
 }
+#else
+// Linux: a 4 GiB reservation (no access), MEM1 from a memfd mapped into it twice, the locked
+// cache and the port arena made accessible; pages past MEM1 become accessible when touched.
+static u8* reserve(u64 fixed, u64 size) {
+    void* p = mmap(reinterpret_cast<void*>(fixed), size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE,
+                   -1, 0);
+    if (p == MAP_FAILED || u64(p) != fixed) {
+        if (p != MAP_FAILED) munmap(p, size);
+        p = mmap(nullptr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    }
+    return p == MAP_FAILED ? nullptr : static_cast<u8*>(p);
+}
+
+bool memInit() {
+    s_mem1 = memfd_create("red_two_mem1", 0);
+    if (s_mem1 < 0 || ftruncate(s_mem1, kMem1Size) != 0) return false;
+    u8* base = reserve(kFixedGuestBase, 0x100000000ull);
+    if (!base) return false;
+    for (u32 at : {0x80000000u, 0xC0000000u})
+        if (mmap(base + at, kMem1Size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, s_mem1, 0) == MAP_FAILED) return false;
+    // (0x7E000000-0x7FFFFFFF is translated by vm.cpp and never touched at g_base + a.)
+    if (mprotect(base + kLockedCache, 0x10000, PROT_READ | PROT_WRITE) != 0 ||
+        mprotect(base + kPortArena, kPortArenaSize, PROT_READ | PROT_WRITE) != 0)
+        return false;
+    g_base = base;
+    // the guest threads' stacks (made accessible per fiber, threads.cpp)
+    s_stacks = reserve(kFixedStacks, u64(kMaxFibers) * kFiberStackSize);
+    if (!s_stacks) return false;
+    if (u64(g_base) != kFixedGuestBase || u64(s_stacks) != kFixedStacks)
+        logf("mem", "guest memory at %p, stacks at %p (not the fixed addresses: save states of other sessions will not load)",
+             g_base, s_stacks);
+    s_guestThread = pthread_self();
+    s_haveGuestThread = true;
+    struct sigaction sa{};
+    sa.sa_sigaction = onSegv;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGBUS, &sa, nullptr);
+    return true;
+}
+#endif
 
 u8* fiberStackRegion() { return s_stacks; }
 
@@ -180,6 +263,13 @@ u8* physPtr(u32 phys, u32 len) {
 
 // The exe's identity: its code. A state holds return addresses into it, so it loads only into
 // the build that saved it.
+#ifndef _WIN32
+extern "C" char __executable_start, etext;  // the linker's: the start of the image, the end of its code
+HostLayout hostLayout() {
+    static u64 hash = XXH3_64bits(&__executable_start, size_t(&etext - &__executable_start));
+    return {u64(&__executable_start), hash, u64(g_base), u64(s_stacks)};
+}
+#else
 HostLayout hostLayout() {
     static u64 hash = [] {
         const u8* img = reinterpret_cast<const u8*>(GetModuleHandleW(nullptr));
@@ -194,6 +284,7 @@ HostLayout hostLayout() {
     }();
     return {u64(GetModuleHandleW(nullptr)), hash, u64(g_base), u64(s_stacks)};
 }
+#endif
 
 void memSaveState(state::Writer& w) {
     w.section("MEM1");

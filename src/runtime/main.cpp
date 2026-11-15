@@ -4,8 +4,22 @@
 //
 // Environment: R2_IO_LOG=1 (every hardware register access), R2_DVD_LOG=1, R2_DSP_LOG=1,
 // R2_ARAM_LOG=1, R2_TRACE=1 (record guest function entries; ring dumped on fatal errors).
+#ifdef _WIN32
 #include <windows.h>
 #include <dbghelp.h>
+#else
+#include <cxxabi.h>
+#include <dirent.h>
+#include <execinfo.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <climits>
+#include <ctime>
+#endif
+
+#include <SDL3/SDL_filesystem.h>
+#include <SDL3/SDL_messagebox.h>
 
 #include <algorithm>
 #include <csignal>
@@ -13,7 +27,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <exception>
+#include <filesystem>
 #include <mutex>
 #include <thread>
 #include <string>
@@ -69,8 +85,17 @@ void fatal(const char* fmt, ...) {
 void quit(int code) {
     fflush(stdout);
     fflush(stderr);
+#ifdef _WIN32
     TerminateProcess(GetCurrentProcess(), UINT(code));
+#else
+    _exit(code);  // (the same reason: no atexit teardown of Dawn / SDL)
+#endif
 }
+
+#ifndef _WIN32
+// Linux: main() keeps its arguments for a restart (the same program image, the same process)
+static char** s_argv = nullptr;
+#endif
 
 void quitToDesktop() {
     state::finishWrites();  // a save state still being written
@@ -81,6 +106,33 @@ void quitToDesktop() {
 // After a save import: the game read its save at boot, so a new instance (same program, same
 // arguments, same working folder) takes over and this one quits.
 void restartGame() {
+#ifndef _WIN32
+    // Linux: the process replaces itself (same PID: Steam, gamescope and an AppImage's mount
+    // stay with it). Its other threads and windows go with the old image.
+    logf("main", "restarting");
+    fflush(stderr);
+    // The new image would inherit every descriptor not marked close-on-exec: the window
+    // system's socket (the old window would stay until the new process ends), the GPU's and
+    // input devices. Those close; pipes stay (an AppImage's runtime keeps its mount alive
+    // through one), and so do files (the log).
+    if (DIR* d = opendir("/proc/self/fd")) {
+        std::vector<int> close;
+        while (dirent* e = readdir(d)) {
+            const int fd = atoi(e->d_name);
+            if (fd <= 2 || fd == dirfd(d)) continue;
+            char target[256];
+            const ssize_t n = readlinkat(dirfd(d), e->d_name, target, sizeof target - 1);
+            if (n <= 0) continue;
+            target[n] = 0;
+            if (!strncmp(target, "socket:", 7) || !strncmp(target, "/dev/", 5)) close.push_back(fd);
+        }
+        closedir(d);
+        for (int fd : close) ::close(fd);
+    }
+    if (s_argv) execv("/proc/self/exe", s_argv);
+    logf("main", "restart failed (errno %d)", errno);
+    return;
+#else
     wchar_t exe[MAX_PATH];
     if (!GetModuleFileNameW(nullptr, exe, MAX_PATH)) return;
     std::wstring cmd = GetCommandLineW();
@@ -95,6 +147,7 @@ void restartGame() {
     CloseHandle(pi.hProcess);
     logf("main", "restarting");
     quit(0);
+#endif
 }
 
 // The menu's reset, like the console's reset button: the game starts over from the boot screen
@@ -106,6 +159,39 @@ void resetGame() {
     restartGame();
 }
 
+#ifndef _WIN32
+// Linux: the host call stack through the C library's backtrace (names from the exe's dynamic
+// symbol table: linked with -rdynamic), demangled.
+void printHostStack(FILE* f, int skip) {
+    void* frames[48];
+    const int n = backtrace(frames, 48);
+    char** names = backtrace_symbols(frames, n);
+    fprintf(f, "host call stack (thread %ld):\n", long(gettid()));
+    for (int i = skip + 1; i < n; i++) {
+        std::string line = names ? names[i] : "?";
+        // "exe(_ZN2rt3fooEv+0x12) [0x...]": demangle the name between '(' and '+'
+        const size_t open = line.find('('), plus = line.find('+', open);
+        if (open != std::string::npos && plus != std::string::npos && plus > open + 1) {
+            int status = 0;
+            char* dm = abi::__cxa_demangle(line.substr(open + 1, plus - open - 1).c_str(), nullptr, nullptr, &status);
+            if (dm && status == 0) line = line.substr(0, open + 1) + dm + line.substr(plus);
+            free(dm);
+        }
+        fprintf(f, "  %s\n", line.c_str());
+    }
+    free(names);
+}
+
+// A crash outside guest memory (memory.cpp's SIGSEGV handler passes those on), SIGILL, SIGFPE.
+void hostCrash(int sig, void* info, void* uc) {
+    (void)uc;
+    const siginfo_t* si = static_cast<const siginfo_t*>(info);
+    fprintf(stderr, "\nFATAL: host signal %d (%s) at address %p\n", sig, strsignal(sig), si ? si->si_addr : nullptr);
+    printHostStack(stderr, 0);
+    if (g_trace) printTraceRing(stderr, 40);
+    quit(3);
+}
+#else
 // The host call stack, symbolized from the PDB (fatal errors only).
 void printHostStack(FILE* f, int skip) {
     void* frames[48];
@@ -142,6 +228,7 @@ static LONG WINAPI onHostCrash(EXCEPTION_POINTERS* ep) {
     quit(3);
     return EXCEPTION_EXECUTE_HANDLER;
 }
+#endif
 
 // abort() (Aurora's and the C++ library's last resort, std::terminate) ends the process through
 // __fastfail, past the unhandled-exception filter: say where it came from first.
@@ -366,6 +453,7 @@ void viFrameHook() {
              (unsigned long long)g_timerFlags, (unsigned long long)g_idleWaits);
         g_safepoints = g_timerFlags = g_idleWaits = 0;
         logf("gx", "dsp: %s", musyxDspStats().c_str());
+#ifdef _WIN32
         static const bool memLog = envFlag("R2_MEM_LOG");
         if (memLog) {  // large committed regions of this process
             MEMORY_BASIC_INFORMATION mbi;
@@ -380,6 +468,7 @@ void viFrameHook() {
             }
             logf("mem", "committed private total %llu MiB", (unsigned long long)(privTotal >> 20));
         }
+#endif
     }
 }
 
@@ -439,6 +528,70 @@ static u32 bootDisc() {
 // (the newest 30 are kept; red_two.log in the working directory if that folder cannot be made).
 static std::string s_sessionLog;
 
+#ifndef _WIN32
+// Linux: the log goes to stderr when it is a terminal or a test run captured it, and otherwise
+// (a desktop launcher, Steam) to a log of its own for every session in the user data folder
+// (~/.local/share/Red Two/logs/), the newest 30 kept.
+static void setupLogOutput(int, char**) {
+    if (isatty(2) || getenv("R2_BACKGROUND") || getenv("R2_HEADLESS") || getenv("R2_INPUT") || getenv("R2_LOG_STDERR")) return;
+    std::string dir;
+    if (char* pref = SDL_GetPrefPath(nullptr, "Red Two")) {
+        dir = std::string(pref) + "logs";
+        SDL_free(pref);
+        mkdir(dir.c_str(), 0755);
+        struct stat st{};
+        if (stat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) dir.clear();
+    }
+    if (dir.empty()) {
+        s_sessionLog = "red_two.log";
+    } else {
+        std::vector<std::string> old;
+        if (DIR* d = opendir(dir.c_str())) {
+            while (dirent* e = readdir(d))
+                if (!strncmp(e->d_name, "red_two_", 8) && strstr(e->d_name, ".log")) old.push_back(e->d_name);
+            closedir(d);
+        }
+        std::sort(old.begin(), old.end());
+        for (size_t i = 0; i + 29 < old.size(); i++) unlink((dir + "/" + old[i]).c_str());
+        const time_t t = time(nullptr);
+        tm lt{};
+        localtime_r(&t, &lt);
+        char name[64];
+        snprintf(name, sizeof name, "/red_two_%04d-%02d-%02d_%02d-%02d-%02d.log", lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday,
+                 lt.tm_hour, lt.tm_min, lt.tm_sec);
+        s_sessionLog = dir + name;
+    }
+    if (!freopen(s_sessionLog.c_str(), "w", stderr)) freopen("/dev/null", "w", stderr);
+}
+
+static void logSessionHeader(int argc, char** argv) {
+    using rt::logf;
+    char exe[PATH_MAX] = "";
+    const ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n > 0) exe[n] = 0;
+    std::string built = "?";
+    struct stat st{};
+    if (stat(exe, &st) == 0) {
+        tm lt{};
+        localtime_r(&st.st_mtime, &lt);
+        char b[64];
+        strftime(b, sizeof b, "%Y-%m-%d %H:%M:%S", &lt);
+        built = b;
+    }
+    const time_t t = time(nullptr);
+    tm lt{};
+    localtime_r(&t, &lt);
+    char now[64];
+    strftime(now, sizeof now, "%Y-%m-%d %H:%M:%S", &lt);
+    std::string args;
+    for (int i = 1; i < argc; i++) args += std::string(" ") + argv[i];
+    char cwd[PATH_MAX] = "";
+    if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0;
+    logf("session", "Red Two started %s; exe %s (built %s)%s", now, exe, built.c_str(), args.c_str());
+    logf("session", "working directory %s%s%s%s%s", cwd, s_sessionLog.empty() ? "" : "; log ", s_sessionLog.c_str(),
+         getenv("APPIMAGE") ? "; AppImage " : "", getenv("APPIMAGE") ? getenv("APPIMAGE") : "");
+}
+#else
 static void setupLogOutput(int argc, char** argv) {
     bool console = false;
     for (int i = 1; i < argc; i++)
@@ -507,9 +660,56 @@ static void logSessionHeader(int argc, char** argv) {
          now.wHour, now.wMinute, now.wSecond, exe, built.c_str(), args.c_str());
     logf("session", "working directory %s%s%s", cwd, s_sessionLog.empty() ? "" : "; log ", s_sessionLog.c_str());
 }
+#endif
+
+// The disc image when none was given (--disc): the usual names in the working folder and
+// orig/, then every .iso / .gcm / .rvz / .wia in the folders a player keeps it in - this
+// program's, the AppImage's, the user data folder (%APPDATA%\Red Two, ~/.local/share/Red Two),
+// and on Linux EmuDeck's (~/Emulation/roms/gc) - whose disc ID is GSWE64.
+static std::string findDisc() {
+    namespace fs = std::filesystem;
+    for (const char* p : {"orig/GSWE64.iso", "orig/GSWE64.rvz", "GSWE64.rvz", "GSWE64.iso"})
+        if (FILE* f = fopen(p, "rb")) {
+            fclose(f);
+            return p;
+        }
+    std::vector<fs::path> dirs = {fs::current_path()};
+    if (const char* base = SDL_GetBasePath()) dirs.push_back(fs::path(std::u8string(base, base + strlen(base))));
+    if (const char* ai = getenv("APPIMAGE")) dirs.push_back(fs::path(ai).parent_path());
+    if (char* pref = SDL_GetPrefPath(nullptr, "Red Two")) {
+        dirs.push_back(fs::path(std::u8string(pref, pref + strlen(pref))));
+        SDL_free(pref);
+    }
+#ifndef _WIN32
+    if (const char* home = getenv("HOME")) {
+        dirs.push_back(fs::path(home) / "Emulation/roms/gc");
+        dirs.push_back(fs::path(home) / "Emulation/roms/gamecube");
+        dirs.push_back(fs::path(home) / "Games");
+    }
+#endif
+    for (const fs::path& d : dirs) {
+        std::error_code ec;
+        for (fs::directory_iterator it(d, fs::directory_options::skip_permission_denied, ec), end; it != end; it.increment(ec)) {
+            if (ec) break;
+            std::string ext = it->path().extension().string();
+            for (auto& c : ext) c = char(tolower(static_cast<unsigned char>(c)));
+            if (ext != ".iso" && ext != ".gcm" && ext != ".rvz" && ext != ".wia") continue;
+            const std::u8string u8 = it->path().u8string();
+            const std::string path(u8.begin(), u8.end());
+            std::string err;
+            auto img = disc::open(path, err);
+            char id[6] = {};
+            if (img && img->read(0, id, 6) && !memcmp(id, "GSWE64", 6)) return path;
+        }
+    }
+    return {};
+}
 
 int main(int argc, char** argv) {
     using namespace rt;
+#ifndef _WIN32
+    s_argv = argv;
+#endif
     setupLogOutput(argc, argv);
     std::string disc;
     for (int i = 1; i < argc; i++) {
@@ -517,6 +717,22 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--trace")) g_trace = true;
     }
     if (envFlag("R2_TRACE")) g_trace = true;
+#ifndef _WIN32
+    signal(SIGABRT, onAbort);
+    std::set_terminate([] { onAbort(SIGABRT); });
+    signal(SIGINT, [](int) { quit(0); });
+    signal(SIGTERM, [](int) { quit(0); });
+    signal(SIGPIPE, SIG_IGN);  // (a closed log pipe must not end the game)
+    {
+        struct sigaction sa{};
+        sa.sa_sigaction = [](int sig, siginfo_t* si, void* uc) { hostCrash(sig, si, uc); };
+        sa.sa_flags = SA_SIGINFO;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGILL, &sa, nullptr);
+        sigaction(SIGFPE, &sa, nullptr);
+        sigaction(SIGSEGV, &sa, nullptr);  // (memory.cpp takes SIGSEGV over for guest memory)
+    }
+#else
     // A crash must end the process, not wait behind an error-reporting dialog.
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
     // A game: no EcoQoS. Windows 11 otherwise throttles the process (efficiency cores, coarse
@@ -533,13 +749,14 @@ int main(int argc, char** argv) {
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
     std::set_terminate([] { onAbort(SIGABRT); });
     SetConsoleCtrlHandler([](DWORD) -> BOOL { quit(0); return TRUE; }, TRUE);  // Ctrl+C / console closed
+#endif
     debugInit();
     if (const char* w = getenv("R2_WATCHDOG")) {
         const int secs = atoi(w) > 0 ? atoi(w) : 2;
         g_trace = true;
         std::thread([secs] {
             for (;;) {
-                Sleep(DWORD(secs * 1000));
+                std::this_thread::sleep_for(std::chrono::seconds(secs));
                 logf("watch", "%s", traceRing(12).c_str());
                 dumpThreads();
             }
@@ -561,13 +778,20 @@ int main(int argc, char** argv) {
     if (!memInit()) fatal("could not reserve the guest address space");
     tableInit();
     if (disc.empty()) {  // no --disc: the usual places
-        for (const char* p : {"orig/GSWE64.iso", "orig/GSWE64.rvz", "GSWE64.rvz", "GSWE64.iso"})
-            if (FILE* f = fopen(p, "rb")) {
-                fclose(f);
-                disc = p;
-                break;
+        disc = findDisc();
+        if (disc.empty()) {
+            std::string where;
+            if (char* pref = SDL_GetPrefPath(nullptr, "Red Two")) {
+                where = pref;
+                SDL_free(pref);
             }
-        if (disc.empty()) fatal("no disc image: pass --disc <your Rogue Leader .iso or .rvz>");
+            const std::string msg =
+                "Red Two needs your own disc image of Star Wars: Rogue Squadron II - Rogue Leader (USA, GSWE64) as .iso or "
+                ".rvz.\n\nPut it next to Red Two or in\n" + where +
+                "\n(any file name), or start Red Two with --disc <path to the image>.";
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Red Two: no disc image", msg.c_str(), nullptr);
+            fatal("no disc image: pass --disc <your Rogue Leader .iso or .rvz>");
+        }
     }
     if (!discOpen(disc)) fatal("cannot open the disc image %s", disc.c_str());
     ra::init(disc);  // RetroAchievements: hashes the disc and logs in meanwhile (if enabled)
@@ -579,7 +803,11 @@ int main(int argc, char** argv) {
     if (!envFlag("R2_NO_GFX")) gfx::init(argc, argv);
     else input::init(false);  // scripted input still works without a renderer
     if (envFlag("R2_RESTART_TEST")) {  // the save importer's restart, once (the new instance runs on)
+#ifdef _WIN32
         _putenv("R2_RESTART_TEST=");
+#else
+        unsetenv("R2_RESTART_TEST");
+#endif
         restartGame();
     }
     audio::init();

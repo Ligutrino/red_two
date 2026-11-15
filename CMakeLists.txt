@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.25)
-project(red_two LANGUAGES C CXX RC)
+project(red_two LANGUAGES C CXX)
+if(WIN32)
+    enable_language(RC)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -83,7 +86,11 @@ if(MSVC)
     target_compile_options(r2game PRIVATE /O2 -Wno-unused-label -Wno-unused-variable -Wno-unused-but-set-variable
         -fno-strict-aliasing /GS-)
 else()
-    target_compile_options(r2game PRIVATE -O2 -Wno-unused-label -fno-strict-aliasing)
+    # Linux (clang): as for Windows - no stack protector (save states keep host stacks, whose
+    # canaries differ per process), no CET (rt_longjmp jumps without the shadow stack), not
+    # position-independent (the exe sits at a fixed address)
+    target_compile_options(r2game PRIVATE -O2 -Wno-unused-label -Wno-unused-variable -Wno-unused-but-set-variable
+        -fno-strict-aliasing -fno-stack-protector -fcf-protection=none -fno-pie)
 endif()
 # R2_ARCH: the x86-64 level the game and runtime code are compiled for. x86-64-v3 (Haswell /
 # Zen and later: AVX2, FMA, MOVBE, BMI2, LZCNT) makes the PowerPC's fused multiply-adds one
@@ -160,8 +167,20 @@ if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/res/icon.ico")
 endif()
 target_compile_definitions(red_two PRIVATE ${R2_DEFS})
 target_compile_options(red_two PRIVATE ${_r2_arch} ${_r2_fp})
-target_link_libraries(red_two PRIVATE r2game winmm aurora::core aurora::gx aurora::vi aurora::pad xxHash::xxhash zstd::libzstd dbghelp
-    rcheevos PNG::PNG winhttp)
+target_link_libraries(red_two PRIVATE r2game aurora::core aurora::gx aurora::vi aurora::pad xxHash::xxhash zstd::libzstd
+    rcheevos PNG::PNG)
+if(WIN32)
+    target_link_libraries(red_two PRIVATE winmm dbghelp winhttp)
+else()
+    # Not a position-independent executable (save states hold return addresses into it, as
+    # /DYNAMICBASE:NO on Windows); names in the dynamic symbol table for crash call stacks; the
+    # C++ runtime linked in (the Steam Deck's own libstdc++ may be older than the build's);
+    # libraries found next to it (an AppImage's usr/lib, or the build tree's).
+    target_compile_options(red_two PRIVATE -fno-strict-aliasing -fno-stack-protector -fcf-protection=none -fno-pie)
+    target_link_options(red_two PRIVATE -no-pie -rdynamic -static-libstdc++ -static-libgcc)
+    set_target_properties(red_two PROPERTIES INSTALL_RPATH "$ORIGIN/../lib" BUILD_RPATH_USE_ORIGIN ON)
+    target_link_libraries(red_two PRIVATE dl pthread)
+endif()
 if(MSVC)
     # /GS-: save states keep the guest threads' host stacks, also into a later session, whose
     # stack cookies differ (the generated code is built without them too)
@@ -172,5 +191,7 @@ if(MSVC)
 endif()
 
 # Dawn and SDL3 are DLLs on Windows: copy them next to the executable.
-include(extern/aurora/cmake/AuroraCopyRuntimeDLLs.cmake)
-aurora_copy_runtime_dlls(red_two)
+if(WIN32)
+    include(extern/aurora/cmake/AuroraCopyRuntimeDLLs.cmake)
+    aurora_copy_runtime_dlls(red_two)
+endif()

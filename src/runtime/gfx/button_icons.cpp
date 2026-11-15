@@ -202,7 +202,7 @@ std::array<BakedState, std::size(kBaked)> s_baked;
 // level 0 of a DXT1 / DXT5 .dds (packs' usual formats), else false
 bool loadDds(const std::string& path, std::vector<u8>& out, u32& w, u32& h) {
     FILE* f = nullptr;
-    if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return false;
+    if (!(f = fopen(path.c_str(), "rb"))) return false;
     std::vector<u8> d;
     u8 buf[65536];
     for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0;) d.insert(d.end(), buf, buf + n);

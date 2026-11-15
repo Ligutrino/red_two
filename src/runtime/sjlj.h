@@ -1,8 +1,10 @@
 // Minimal setjmp/longjmp for jumping back up the host stack of the current fiber.
 //
-// Saves every callee-saved register of the Win64 ABI (rbx rbp rdi rsi rsp r12-r15,
-// xmm6-xmm15). Unlike the CRT's longjmp it does not unwind (no destructors run), which is
-// what we want: the frames skipped are recompiled guest functions.
+// Saves every callee-saved general register of the x86-64 ABI in use - Win64: rbx rbp rdi rsi
+// rsp r12-r15 and xmm6-xmm15; System V (Linux): rbx rbp rsp r12-r15 (no vector register is
+// callee-saved there; rdi / rsi / xmm stay unused). Unlike the C library's longjmp it does not
+// unwind (no destructors run), which is what we want: the frames skipped are recompiled guest
+// functions. The same buffer layout on both: threads.cpp sets up fresh fibers through it.
 #pragma once
 #include <cstdint>
 

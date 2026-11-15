@@ -23,6 +23,9 @@ void dumpThreads();  // guest OSThread list (debugging)
 u32 peekGuest32(u32 a);  // a guest word without faulting (VM pages not mapped read as 0)
 std::string guestBacktrace();  // threads.cpp: the running guest thread's call chain (fatal errors)
 void printHostStack(FILE* f, int skip);  // main.cpp: the host call stack, symbolized (fatal errors)
+#ifndef _WIN32
+[[noreturn]] void hostCrash(int sig, void* siginfo, void* ucontext);  // main.cpp: a host crash (signal handlers)
+#endif
 
 // --- memory ---------------------------------------------------------------------------
 constexpr u32 kMem1Size = 0x01800000;

@@ -615,7 +615,17 @@ void cardInit(int slot, const std::string& path) {
 std::string cardImagePath(int slot) {
     if (slot != 0) return {};
     const char* env = getenv("R2_CARD_A");
-    return env && *env ? env : "saves/GSWE64_A.raw";
+    if (env && *env) return env;
+#ifndef _WIN32
+    // Linux (an AppImage starts in any folder): saves/ of the working folder if it has the card,
+    // else the user data folder's (~/.local/share/Red Two/saves/)
+    if (FILE* f = fopen("saves/GSWE64_A.raw", "rb")) {
+        fclose(f);
+        return "saves/GSWE64_A.raw";
+    }
+    if (const std::string u = mods::userDir(); !u.empty()) return u + "saves/GSWE64_A.raw";
+#endif
+    return "saves/GSWE64_A.raw";
 }
 
 bool cardCurrentImage(int slot, std::vector<u8>& out) {

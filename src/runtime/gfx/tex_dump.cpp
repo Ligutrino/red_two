@@ -202,7 +202,11 @@ bool writePng(const std::filesystem::path& path, u32 w, u32 h, const std::vector
     chunk(f, "IDAT", z);
     chunk(f, "IEND", {});
     FILE* fp = nullptr;
+#ifdef _WIN32
     if (_wfopen_s(&fp, path.wstring().c_str(), L"wb") != 0 || !fp) return false;
+#else
+    if (!(fp = fopen(path.c_str(), "wb"))) return false;
+#endif
     fwrite(f.data(), 1, f.size(), fp);
     fclose(fp);
     return true;

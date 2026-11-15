@@ -6,7 +6,11 @@
 // texture's guest memory (gx_bridge.cpp, LOAD_TEXOBJ), so the hashes match Dolphin's.
 #include "mods.h"
 
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_stdinc.h>
@@ -100,9 +104,14 @@ void load() {
     // a texture then appears sharp the first time it is used (no preview while it loads from disk).
     // The game waits for it at startup (gx_bridge.cpp precompileShaders).
     if (settings::get().prefetchTextures && !s_packs.empty()) {
+#ifdef _WIN32
         MEMORYSTATUSEX ms{};
         ms.dwLength = sizeof ms;
         const u64 budget = GlobalMemoryStatusEx(&ms) ? ms.ullTotalPhys / 2 : (u64(4) << 30);
+#else
+        const long pages = sysconf(_SC_PHYS_PAGES), page = sysconf(_SC_PAGE_SIZE);
+        const u64 budget = pages > 0 && page > 0 ? u64(pages) * u64(page) / 2 : (u64(4) << 30);
+#endif
         aurora::texture::prefetch_replacements(budget);
     }
 }
@@ -123,7 +132,11 @@ std::string userDir() {
 
 std::string texturesDir() {
     const std::string u = userDir();
+#ifdef _WIN32
     return u.empty() ? std::string("textures\\") : u + "textures\\";
+#else
+    return u.empty() ? std::string("textures/") : u + "textures/";
+#endif
 }
 
 std::vector<std::string> packFolders(const std::string& root) {

@@ -6,10 +6,9 @@ The game's own PowerPC code is translated to C++ ahead of time and runs on a nat
 that stands in for the console's hardware. **No game data is included**: you need your own
 disc image of the USA release (`GSWE64`, revision 0).
 
-> Status: early development. The recompiled game boots, runs its menus and cutscenes, and the
-> first mission is playable at full speed with graphics (Aurora) and controls (keyboard or
-> gamepad). Saving works (memory card in slot A, `saves/GSWE64_A.raw`). Sound plays (music and effects
-> through an emulation of the MusyX audio DSP). Only the first mission has been tried.
+> Status: playable on Windows and Linux (also packaged as an AppImage for the Steam Deck):
+> menus, cutscenes and missions at full speed with graphics (Aurora), sound (an emulation of the
+> MusyX audio DSP), controls, saving, save states, widescreen, mods, cheats and RetroAchievements.
 
 ## Building (Windows)
 
@@ -28,6 +27,27 @@ Without `--disc` the game looks for `orig\GSWE64.iso`, `orig\GSWE64.rvz`, `GSWE6
 
 The code generated from your disc ends up in `build/` and is yours alone: never share it.
 
+`tools\make_release_win.ps1` packs a build into `build\RedTwo-windows-x64.zip` (the program, its
+symbols, DLLs, a readme) for your own use on another PC.
+
+## Building (Linux) and the Steam Deck AppImage
+
+Requirements: clang, lld, CMake 3.25+, Ninja, git, and SDL3's build dependencies (X11, Wayland,
+xkbcommon, ALSA / PulseAudio / PipeWire, udev and D-Bus development packages). Ubuntu 24.04 (also
+under WSL2) works; the result needs glibc 2.38 or later (SteamOS 3.6+).
+
+```bash
+tools/build_linux.sh --disc "<your Rogue Leader.rvz>"     # -> build/linux/red_two
+# an AppImage: the AppImage type 2 runtime (github.com/AppImage/type2-runtime, runtime-x86_64),
+# mksquashfs and patchelf
+tools/make_appimage.sh --runtime runtime-x86_64 --icon <256x256 png>   # -> build/linux/RedTwo-x86_64.AppImage
+```
+
+On the Steam Deck: copy the AppImage and your disc image (`.rvz` / `.iso`, any name) into the
+same folder (or the disc into `~/Emulation/roms/gc`), make the AppImage executable, and add it
+to Steam as a non-Steam game. The first start on a Deck is fullscreen with the picture as wide
+as the screen. Settings, saves, states and logs live in `~/.local/share/Red Two/`.
+
 ### Playing
 
 - Gamepads work through SDL (with rumble), also while the window is in the background. On an
@@ -38,9 +58,17 @@ The code generated from your disc ends up in `build/` and is yours alone: never 
   bound to, e.g. "PRESS (Y)" and SELECT CRAFT's "(B) > pilot"); F1 > Controls > Button prompts
   switches back to the GameCube ones. The C-stick icon stays.
 - F11 or Alt+Enter toggles fullscreen; `--fullscreen` starts that way.
-- **Cheats** (F1 > Cheats): invincibility, infinite lives, infinite bombs, and perfect mission
-  stats: the results screen says 0:01, every enemy destroyed, 100% accuracy, no friendlies or
-  lives lost and 100% targeting computer efficiency, and the medal is awarded for those.
+- **Cheats** (F1 > Cheats): invincibility, infinite lives, infinite bombs, perfect mission
+  stats (the results screen says 0:01, every enemy destroyed, 100% accuracy, no friendlies or
+  lives lost and 100% targeting computer efficiency, and the medal is awarded for those), and
+  all craft (every craft a mission allows waits in its hangar). **Passcodes**: the game's own
+  unlocks without typing codes - all missions, all tech upgrades, ace mode, art gallery, music
+  hall, documentary, audio commentary, credits, black and white - kept in the game's save as
+  if the codes had been entered.
+- **RetroAchievements** (F1 > Achievements): log in with your retroachievements.org account
+  (only the login token is stored) or take Dolphin's login; softcore only, so save states and
+  cheats stay usable. Unlocks pop up in the top right corner.
+- **Reset game** and **Quit to desktop** are at the top of the menu's first page.
 - **Save states**: Back + RB saves, Back + LB loads, Back + D-pad right / left picks the slot
   (8 slots; keyboard F5 / F8, F7 / F6). F1 > Controls has the slot, save / load buttons and the
   hotkeys, each any combination of buttons (or keys) held together: pick the row, press A, hold
@@ -62,8 +90,8 @@ The code generated from your disc ends up in `build/` and is yours alone: never 
   `Dolphin.ini`) and brings over this game's newest save (from GCI folders or `.raw` cards; the
   previous card is kept in `saves\backup`, and the game restarts), its texture packs (copied) and
   its codes (with their on/off states). `R2_DOLPHIN_DIR=<User folder>` points it elsewhere.
-- `R2_NO_AUDIO=1` runs without sound. The log goes to `red_two.log` (or `--console` for a
-  console window).
+- `R2_NO_AUDIO=1` runs without sound. Every session writes a log to `%APPDATA%\Red Two\logs`
+  (Linux: `~/.local/share/Red Two/logs`); `--console` shows it in a console window on Windows.
 
 ## How it works
 

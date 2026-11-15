@@ -1,8 +1,6 @@
 #include "sjlj.h"
 
-#if !defined(_WIN64)
-#error "sjlj.cpp: only the Win64 ABI is implemented"
-#endif
+#if defined(_WIN64)
 
 // rcx = buffer (Win64 calling convention)
 extern "C" __attribute__((naked, returns_twice)) int rt_setjmp(rt::JmpBuf*) {
@@ -62,3 +60,44 @@ extern "C" __attribute__((naked)) void rt_longjmp(rt::JmpBuf*, int) {
         "movq 32(%rcx), %rsp\n\t"
         "jmpq *72(%rcx)\n\t");
 }
+
+#elif defined(__x86_64__)
+
+// System V: rdi = buffer
+extern "C" __attribute__((naked, returns_twice)) int rt_setjmp(rt::JmpBuf*) {
+    asm volatile(
+        "movq %rbx, 0(%rdi)\n\t"
+        "movq %rbp, 8(%rdi)\n\t"
+        "leaq 8(%rsp), %rdx\n\t"
+        "movq %rdx, 32(%rdi)\n\t"
+        "movq %r12, 40(%rdi)\n\t"
+        "movq %r13, 48(%rdi)\n\t"
+        "movq %r14, 56(%rdi)\n\t"
+        "movq %r15, 64(%rdi)\n\t"
+        "movq (%rsp), %rdx\n\t"
+        "movq %rdx, 72(%rdi)\n\t"
+        "xorl %eax, %eax\n\t"
+        "retq\n\t");
+}
+
+// rdi = buffer, esi = value (0 becomes 1)
+extern "C" __attribute__((naked)) void rt_longjmp(rt::JmpBuf*, int) {
+    asm volatile(
+        "movl %esi, %eax\n\t"
+        "testl %eax, %eax\n\t"
+        "jnz 1f\n\t"
+        "movl $1, %eax\n\t"
+        "1:\n\t"
+        "movq 0(%rdi), %rbx\n\t"
+        "movq 8(%rdi), %rbp\n\t"
+        "movq 40(%rdi), %r12\n\t"
+        "movq 48(%rdi), %r13\n\t"
+        "movq 56(%rdi), %r14\n\t"
+        "movq 64(%rdi), %r15\n\t"
+        "movq 32(%rdi), %rsp\n\t"
+        "jmpq *72(%rdi)\n\t");
+}
+
+#else
+#error "sjlj.cpp: only x86-64 (Win64 and System V) is implemented"
+#endif

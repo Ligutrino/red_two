@@ -26,6 +26,7 @@
 #include <dolphin/vi.h>
 #include <imgui.h>
 #include <imgui_internal.h>
+#include <SDL3/SDL_filesystem.h>
 
 #include <algorithm>
 #include <cmath>
@@ -1649,13 +1650,31 @@ void menuImGuiInit(const void*) {
     ImGuiIO& io = ImGui::GetIO();
     // the menu does its own navigation (above); ImGui's would move a second cursor
     io.ConfigFlags &= ~(ImGuiConfigFlags_NavEnableGamepad | ImGuiConfigFlags_NavEnableKeyboard);
-    const char* path = "C:\\Windows\\Fonts\\bahnschrift.ttf";
-    if (FILE* f = fopen(path, "rb")) {
+    // Windows' Bahnschrift; on Linux one shipped next to the program (the AppImage's
+    // share/red-two/font.ttf, a condensed DejaVu) or the system's DejaVu / Noto
+    std::vector<std::string> fonts;
+    if (const char* f = getenv("R2_FONT")) fonts.push_back(f);
+#ifdef _WIN32
+    fonts.push_back("C:\\Windows\\Fonts\\bahnschrift.ttf");
+#else
+    if (const char* base = SDL_GetBasePath()) {
+        fonts.push_back(std::string(base) + "../share/red-two/font.ttf");
+        fonts.push_back(std::string(base) + "font.ttf");
+    }
+    for (const char* f : {"/usr/share/fonts/TTF/DejaVuSansCondensed.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
+                          "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                          "/usr/share/fonts/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"})
+        fonts.push_back(f);
+#endif
+    for (const std::string& path : fonts) {
+        FILE* f = fopen(path.c_str(), "rb");
+        if (!f) continue;
         fclose(f);
         ImFontConfig cfg;
         cfg.OversampleH = 2;
-        s_font = io.Fonts->AddFontFromFileTTF(path, kFontPx, &cfg);
-        s_fontBig = io.Fonts->AddFontFromFileTTF(path, kBigPx, &cfg);
+        s_font = io.Fonts->AddFontFromFileTTF(path.c_str(), kFontPx, &cfg);
+        s_fontBig = io.Fonts->AddFontFromFileTTF(path.c_str(), kBigPx, &cfg);
+        if (s_font && s_fontBig) break;
     }
     if (!s_font) s_font = s_fontBig = io.Fonts->AddFontDefault();
     applyStyle();

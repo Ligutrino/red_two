@@ -4,10 +4,17 @@
 // high-resolution waitable timer) until the earliest scheduled event and then raises
 // g_irqPending; the guest polls it at loop
 // back-edges (safepoint), runs due events there and takes interrupts if enabled.
+#ifdef _WIN32
 #include <windows.h>
 #include <timeapi.h>
+#else
+#include <sys/prctl.h>
+#include <time.h>
+#include <condition_variable>
+#endif
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <thread>
 
@@ -20,7 +27,11 @@ u64 g_timerFlags = 0;  // times the timer thread raised g_irqPending (R2_GX_LOG)
 volatile u32 g_irqLine = 0;
 
 namespace {
+#ifdef _WIN32
 LARGE_INTEGER s_qpcFreq, s_qpcStart;
+#else
+timespec s_start{};
+#endif
 u64 s_due[EV_COUNT];  // 0 = not scheduled
 std::mutex s_mu;
 std::atomic<u64> s_earliest{~0ull};
@@ -40,14 +51,17 @@ void recomputeEarliest() {
 // variables, Sleep) follow the system tick, and Windows 11 ignores timeBeginPeriod(1) for
 // processes without a visible window (headless runs, windows behind others): retraces then
 // fired a 15.6 ms tick late while the game idled waiting for them (the intro ran at ~1/3 speed).
+#ifdef _WIN32
 HANDLE s_timer = nullptr;   // high-resolution waitable timer
 HANDLE s_wakeEv = nullptr;  // schedule() changed the earliest event
 HANDLE s_guestEv = nullptr; // g_irqPending was raised (wakes an idle guest)
 
-void raisePending() {
-    g_irqPending = 1;
-    SetEvent(s_guestEv);
+void wakeTimer() {
+    if (s_wakeEv) SetEvent(s_wakeEv);
 }
+void signalGuest() { SetEvent(s_guestEv); }
+void waitGuest(u32 ms) { WaitForSingleObject(s_guestEv, ms); }
+void cpuRelax() { YieldProcessor(); }
 
 void sleepUs(u64 us, bool wakeable) {
     LARGE_INTEGER due;
@@ -55,6 +69,47 @@ void sleepUs(u64 us, bool wakeable) {
     SetWaitableTimer(s_timer, &due, 0, nullptr, nullptr, FALSE);
     HANDLE hs[2] = {s_timer, s_wakeEv};
     WaitForMultipleObjects(wakeable ? 2 : 1, hs, FALSE, INFINITE);
+}
+#else
+// Linux: auto-reset events from a mutex and a condition variable; the timer thread asks for a
+// 1 us timer slack (the default 50 us would make every retrace late by that much).
+struct Event {
+    std::mutex m;
+    std::condition_variable cv;
+    bool set = false;
+    void signal() {
+        {
+            std::lock_guard lk(m);
+            set = true;
+        }
+        cv.notify_one();
+    }
+    void wait(u64 us) {
+        std::unique_lock lk(m);
+        cv.wait_for(lk, std::chrono::microseconds(us), [this] { return set; });
+        set = false;
+    }
+};
+Event s_wakeEv, s_guestEv;
+void wakeTimer() { s_wakeEv.signal(); }
+void signalGuest() { s_guestEv.signal(); }
+void waitGuest(u32 ms) { s_guestEv.wait(u64(ms) * 1000); }
+void cpuRelax() { __builtin_ia32_pause(); }
+
+void sleepUs(u64 us, bool wakeable) {
+    if (wakeable) {
+        s_wakeEv.wait(us);
+        return;
+    }
+    timespec ts{time_t(us / 1000000), long(us % 1000000) * 1000};
+    while (nanosleep(&ts, &ts) != 0) {
+    }
+}
+#endif
+
+void raisePending() {
+    g_irqPending = 1;
+    signalGuest();
 }
 
 void timerThread() {
@@ -75,11 +130,12 @@ void timerThread() {
         const u64 waitUs = (e - now) * 1000000 / kTbClock;
         if (waitUs > 300) sleepUs(waitUs - 150, true);  // wake a little early, then spin
         else
-            while (tbNow() < e && s_earliest.load() == e) YieldProcessor();
+            while (tbNow() < e && s_earliest.load() == e) cpuRelax();
     }
 }
 }  // namespace
 
+#ifdef _WIN32
 u64 tbNow() {
     LARGE_INTEGER t;
     QueryPerformanceCounter(&t);
@@ -98,6 +154,22 @@ void eventsInit() {
     s_guestEv = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     std::thread(timerThread).detach();
 }
+#else
+u64 tbNow() {
+    timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    const u64 ns = u64(t.tv_sec - s_start.tv_sec) * 1000000000ull + u64(t.tv_nsec) - u64(s_start.tv_nsec);
+    return (ns / 1000000000ull) * kTbClock + (ns % 1000000000ull) * kTbClock / 1000000000ull;
+}
+
+void eventsInit() {
+    clock_gettime(CLOCK_MONOTONIC, &s_start);
+    std::thread([] {
+        prctl(PR_SET_TIMERSLACK, 1UL, 0, 0, 0);
+        timerThread();
+    }).detach();
+}
+#endif
 
 void schedule(int id, u64 at) {
     if (!at) at = 1;
@@ -105,7 +177,7 @@ void schedule(int id, u64 at) {
     s_due[id] = at;
     const u64 before = s_earliest.load();
     recomputeEarliest();
-    if (s_earliest.load() < before && s_wakeEv) SetEvent(s_wakeEv);
+    if (s_earliest.load() < before) wakeTimer();
 }
 
 void unschedule(int id) {
@@ -125,7 +197,7 @@ void idleWait(Ctx& c, u32 pc) {
         g_idleWaits++;
         // The timer thread signals when an event is due; the timeout only bounds a missed wake.
         const u64 t0 = tbNow();
-        WaitForSingleObject(s_guestEv, 4);
+        waitGuest(4);
         g_idleTb += tbNow() - t0;  // (the session log's "game thread busy")
     }
     poll(c, pc);
@@ -198,7 +270,7 @@ void eventsLoadState(state::Reader& r) {
         for (int i = 0; i < EV_COUNT; i++) s_due[i] = r.time(due[i]);
         recomputeEarliest();
     }
-    if (s_wakeEv) SetEvent(s_wakeEv);
+    wakeTimer();
     if (!g_eventHandlers[EV_DEC]) g_eventHandlers[EV_DEC] = onDec;
     if (s_decPending) g_irqLine |= 2;
     else g_irqLine &= ~2u;

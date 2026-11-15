@@ -7,8 +7,10 @@
 // draws, how busy the game thread was), and stall reports - when no frame is presented for
 // 250 ms, a watchdog samples the game thread's call stack every 5 ms until frames come again
 // (or every 10 s while they do not) and logs where it was.
+#ifdef _WIN32
 #include <windows.h>
 #include <dbghelp.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -26,6 +28,7 @@ namespace rt {
 
 namespace {
 
+#ifdef _WIN32
 struct Sym {
     std::string name;
     u64 start = 0;
@@ -223,6 +226,12 @@ void stallReport(const std::vector<StallSample>& samples, double ms, bool ongoin
         logf("stall", "  %3.0f%%  %s", 100.0 * v[i].second / double(samples.size()), v[i].first.c_str());
 }
 
+#else
+// Linux: no host stack samples (the stall is reported with its length and the level)
+std::atomic<u64> s_lastPresent{0};
+#endif
+
+#ifdef _WIN32
 void stallWatchdog(HANDLE thread) {
     constexpr u64 kStall = kTbClock / 4;        // 250 ms without a frame
     constexpr u64 kInterim = 10 * kTbClock;     // a longer one is reported every 10 s meanwhile
@@ -247,6 +256,29 @@ void stallWatchdog(HANDLE thread) {
         if (!samples.empty()) stallReport(samples, double(next - last) * 1000.0 / double(kTbClock), false);
     }
 }
+#else
+void stallWatchdog() {
+    constexpr u64 kStall = kTbClock / 4, kInterim = 10 * kTbClock;
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        const u64 last = s_lastPresent.load(std::memory_order_relaxed);
+        if (!last || tbNow() - last < kStall) continue;
+        u64 reported = last;
+        while (s_lastPresent.load(std::memory_order_relaxed) == last) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            const u64 now = tbNow();
+            if (now - reported >= kInterim && s_lastPresent.load(std::memory_order_relaxed) == last) {
+                logf("stall", "still waiting: %.0f ms without a new frame (level %u)", double(now - last) * 1000.0 / double(kTbClock),
+                     unsigned(peekGuest32(0x800962EC) >> 24));
+                reported = now;
+            }
+        }
+        const u64 next = s_lastPresent.load(std::memory_order_relaxed);
+        logf("stall", "frames again after %.0f ms without a new frame (level %u)", double(next - last) * 1000.0 / double(kTbClock),
+             unsigned(peekGuest32(0x800962EC) >> 24));
+    }
+}
+#endif
 
 // --- the 30-second perf line ---------------------------------------------------------------
 struct PerfWindow {
@@ -259,7 +291,11 @@ PerfWindow s_perf;
 u64 g_idleTb = 0;  // events.cpp idleWait: time the game thread spent waiting for the next event
 
 void diagStart() {
+#ifdef _WIN32
     std::thread(stallWatchdog, gameThreadHandle()).detach();
+#else
+    std::thread(stallWatchdog).detach();
+#endif
 }
 
 void diagFramePresented(u32 draws, u64 presentTb) {
@@ -295,6 +331,10 @@ void diagFramePresented(u32 draws, u64 presentTb) {
 void profilerStart() {
     const char* env = getenv("R2_PROFILE");
     if (!env || !*env) return;
+#ifndef _WIN32
+    logf("prof", "R2_PROFILE: the sampling profiler is Windows-only");
+    return;
+#else
     const int secs = atoi(env) > 0 ? atoi(env) : 5;
     HANDLE target = gameThreadHandle();
     std::thread([target, secs] {
@@ -326,6 +366,7 @@ void profilerStart() {
         }
     }).detach();
     logf("prof", "sampling every 1 ms, report every %d s", secs);
+#endif
 }
 
 }  // namespace rt

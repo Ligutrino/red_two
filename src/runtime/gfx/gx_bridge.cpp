@@ -20,6 +20,7 @@
 #include <dolphin/gx/GXStruct.h>
 #include <aurora/texture.hpp>
 #include <SDL3/SDL_hints.h>
+#include <SDL3/SDL_init.h>
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_properties.h>
 #include <SDL3/SDL_timer.h>
@@ -41,12 +42,14 @@
 
 #include "../../../extern/aurora/lib/gx/fifo.hpp"
 
+#ifdef _WIN32
 // user32 SetWindowPos without pulling <windows.h> into this file (its macros clash with GX names).
 extern "C" __declspec(dllimport) int __stdcall SetWindowPos(void*, void*, int, int, int, int, unsigned);
 extern "C" __declspec(dllimport) long long __stdcall GetWindowLongPtrW(void*, int);
 extern "C" __declspec(dllimport) long long __stdcall SetWindowLongPtrW(void*, int, long long);
 extern "C" __declspec(dllimport) int __stdcall GetSystemMetrics(int);
 extern "C" __declspec(dllimport) int __stdcall ShowWindow(void*, int);
+#endif
 #include "../hw/gx_fifo.h"
 #include "../hw/musyx_dsp.h"
 #include "../hotkeys.h"
@@ -1683,6 +1686,7 @@ void onCommand(const u8* p, u32 len) {
     }
 }
 
+#ifdef _WIN32
 void sendToBack(void* hwnd) {
     constexpr unsigned SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOACTIVATE = 0x10;
     SetWindowPos(hwnd, reinterpret_cast<void*>(1) /* HWND_BOTTOM */, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
@@ -1698,6 +1702,9 @@ void sendToBack(void* hwnd) {
     SetWindowPos(hwnd, reinterpret_cast<void*>(1), GetSystemMetrics(SM_XVIRTUALSCREEN) - 8000, 0, 0, 0,
                  SWP_NOSIZE | SWP_NOACTIVATE);
     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+#else
+void sendToBack(void*) {  // (Windows only: test windows out of the way)
+#endif
 }
 
 void logCallback(AuroraLogLevel level, const char* module, const char* message, unsigned int len) {
@@ -1749,6 +1756,17 @@ bool init(int argc, char** argv) {
     cfg.emulateXfb = s_xfb;
     cfg.windowWidth = 1280;
     cfg.windowHeight = 960;
+    // (Linux desktops match the window to red-two.desktop - the AppImage's - by this id)
+    SDL_SetHint(SDL_HINT_APP_ID, "red-two");
+    // smaller screens (the Steam Deck's 1280x800 desktop): a 4:3 window that fits its usable area
+    if (SDL_InitSubSystem(SDL_INIT_VIDEO)) {
+        SDL_Rect usable{};
+        if (SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &usable) && usable.h > 0 && usable.h < 1000) {
+            const int h = std::max(480, usable.h - 60), w = h * 4 / 3;
+            cfg.windowWidth = u32(std::min(w, std::max(640, usable.w)));
+            cfg.windowHeight = u32(h);
+        }
+    }
     if (const char* ws = getenv("R2_WINDOW")) {  // R2_WINDOW=<w>x<h> (screenshots)
         unsigned w = 0, h = 0;
         if (sscanf(ws, "%ux%u", &w, &h) == 2 && w >= 320 && h >= 240) {

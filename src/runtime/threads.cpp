@@ -15,7 +15,11 @@
 // switches through rt_setjmp/rt_longjmp, so a save state can copy them and put them back
 // (also in a later session). The program's main thread is the root: it starts the boot
 // fiber and otherwise only takes and restores snapshots, on its own stack.
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <sys/mman.h>
+#endif
 
 #include <unordered_map>
 #include <vector>
@@ -25,6 +29,7 @@
 #include "table.h"
 
 // A fresh fiber starts here: rbx = the fiber, r12 = its entry function (initJb below).
+#ifdef _WIN32
 extern "C" __attribute__((naked)) void r2FiberTrampoline() {
     asm volatile(
         "movq %rbx, %rcx\n\t"
@@ -32,6 +37,15 @@ extern "C" __attribute__((naked)) void r2FiberTrampoline() {
         "callq *%r12\n\t"
         "ud2\n\t");
 }
+#else
+// (System V: the argument in rdi, no shadow space; rsp is 16-byte aligned here)
+extern "C" __attribute__((naked)) void r2FiberTrampoline() {
+    asm volatile(
+        "movq %rbx, %rdi\n\t"
+        "callq *%r12\n\t"
+        "ud2\n\t");
+}
+#endif
 
 namespace rt {
 
@@ -109,10 +123,14 @@ void frameFree(IrqFrame* f) { s_frameUsed[f - s_framePool] = false; }
 // --- stacks and switching -------------------------------------------------------------------
 // The TEB's stack bounds follow the fiber running (stack probes, exception dispatch).
 void setTebStack(void* base, void* limit, void* dealloc) {
+#ifdef _WIN32
     NT_TIB* tib = reinterpret_cast<NT_TIB*>(NtCurrentTeb());
     tib->StackBase = base;
     tib->StackLimit = limit;
     *reinterpret_cast<void**>(reinterpret_cast<u8*>(tib) + 0x1478) = dealloc;  // TEB64 DeallocationStack
+#else
+    (void)base, (void)limit, (void)dealloc;  // (Linux keeps no stack bounds per thread)
+#endif
 }
 
 // Continues `to` where it was; returns when someone switches back to the caller (whose place
@@ -134,7 +152,11 @@ void allocStack(HostFiber* f) {
     if (f->lo) return;
     const int i = int(f - s_fibers);
     u8* lo = fiberStackRegion() + u64(i) * kFiberStackSize;
+#ifdef _WIN32
     if (!VirtualAlloc(lo, kFiberStackSize, MEM_COMMIT, PAGE_READWRITE)) fatal("cannot commit the stack of fiber %d", i);
+#else
+    if (mprotect(lo, kFiberStackSize, PROT_READ | PROT_WRITE) != 0) fatal("cannot commit the stack of fiber %d", i);
+#endif
     f->lo = lo;
     f->hi = lo + kFiberStackSize;
 }
@@ -247,10 +269,12 @@ std::string guestBacktrace() {
 }
 
 void threadsInit(Ctx*& boot) {
+#ifdef _WIN32
     NT_TIB* tib = reinterpret_cast<NT_TIB*>(NtCurrentTeb());
     s_root.base = tib->StackBase;
     s_root.limit = tib->StackLimit;
     s_root.dealloc = *reinterpret_cast<void**>(reinterpret_cast<u8*>(tib) + 0x1478);
+#endif
     HostFiber* f = &s_fibers[0];
     allocStack(f);
     f->used = true;

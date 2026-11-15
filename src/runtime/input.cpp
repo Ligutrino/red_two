@@ -1,6 +1,8 @@
 // Controllers: Aurora reads gamepads (SDL3, GameCube adapters) and the keyboard; the result
 // feeds the SI model (hw/hw.cpp), which answers the game's own controller polling.
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gamepad.h>
@@ -9,6 +11,7 @@
 #include <aurora/pad.hpp>
 #include <dolphin/pad.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -111,14 +114,23 @@ void defaultKeyboard() {
 std::mutex s_joyMutex;
 
 void joystickThread() {
+#ifdef _WIN32
     HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
     if (!timer) timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
     LARGE_INTEGER due{};
     due.QuadPart = -20000;  // 2 ms (100 ns units), then every 2 ms: 500 Hz
     SetWaitableTimer(timer, &due, 2, nullptr, nullptr, FALSE);
+#else
+    auto next = std::chrono::steady_clock::now();
+#endif
     u64 lastLog = 0;
     for (;;) {
+#ifdef _WIN32
         WaitForSingleObject(timer, INFINITE);
+#else
+        next += std::chrono::milliseconds(2);  // 500 Hz
+        std::this_thread::sleep_until(next);
+#endif
         // A controller came or went: Aurora opens or closes it on the game thread (SDL calls that
         // wait for the joystick lock), so no new scan starts before it has.
         if (SDL_PeepEvents(nullptr, 0, SDL_PEEKEVENT, SDL_EVENT_GAMEPAD_ADDED, SDL_EVENT_GAMEPAD_REMAPPED) > 0) continue;
@@ -143,16 +155,16 @@ void scanTest() {
     if (!e) return;
     const double start = atof(e);
     std::thread([start] {
-        Sleep(DWORD(start * 1000));
+        std::this_thread::sleep_for(std::chrono::duration<double>(start));
         for (int i = 0; i < 6; i++) {
             {
                 std::lock_guard lock(s_joyMutex);
                 SDL_LockJoysticks();
                 logf("input", "scan test: joystick lock held for 3 s");
-                Sleep(3000);
+                std::this_thread::sleep_for(std::chrono::seconds(3));
                 SDL_UnlockJoysticks();
             }
-            Sleep(2000);
+            std::this_thread::sleep_for(std::chrono::seconds(2));
         }
     }).detach();
 }

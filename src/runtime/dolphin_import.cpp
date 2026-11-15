@@ -11,8 +11,16 @@
 //   Codes: <exe folder>\Sys\GameSettings and <User>\GameSettings, GSW.ini then GSWE64.ini then
 //     GSWE64r0.ini ([Gecko], [Gecko_Enabled], [ActionReplay], [OnFrame], ...).
 //   Texture packs: <Load>\Textures\GSWE64 (or GSW, or a folder holding a GSWE64.txt).
+//
+// Linux: the data folder (GC, Load, GameSettings) is $XDG_DATA_HOME/dolphin-emu
+// (~/.local/share/dolphin-emu), its .ini files are in $XDG_CONFIG_HOME/dolphin-emu
+// (~/.config/dolphin-emu); the Flatpak (EmuDeck on the Steam Deck) keeps both under
+// ~/.var/app/org.DolphinEmu.dolphin-emu/{data,config}/dolphin-emu; an old or portable layout
+// (~/.dolphin-emu) has Config inside. Sys: <prefix>/share/dolphin-emu/sys.
+#ifdef _WIN32
 #include <windows.h>
 #include <shlobj.h>
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -42,8 +50,20 @@ std::string str(const fs::path& p) {
 }
 std::string narrow(const std::wstring& w) { return str(fs::path(w)); }
 
+FILE* openFile(const fs::path& p, const char* mode) {
+#ifdef _WIN32
+    return _wfopen(p.c_str(), mode[0] == 'w' ? L"wb" : L"rb");
+#else
+    return fopen(p.c_str(), mode);
+#endif
+}
+
 bool readFile(const fs::path& p, std::vector<uint8_t>& out) {
+#ifdef _WIN32
     FILE* f = _wfopen(p.c_str(), L"rb");
+#else
+    FILE* f = fopen(p.c_str(), "rb");
+#endif
     if (!f) return false;
     out.clear();
     uint8_t buf[65536];
@@ -62,6 +82,61 @@ std::string lower(std::string s) {
     for (auto& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
     return s;
 }
+
+#ifndef _WIN32
+fs::path homeDir() {
+    const char* h = getenv("HOME");
+    return h ? fs::path(h) : fs::path();
+}
+fs::path xdg(const char* var, const char* fallback) {
+    const char* v = getenv(var);
+    return v && *v ? fs::path(v) : homeDir() / fallback;
+}
+constexpr const char* kFlatpak = ".var/app/org.DolphinEmu.dolphin-emu";
+
+// (no Dolphin executables to look for: the Sys folders of the usual installs)
+std::vector<fs::path> dolphinExeDirs() { return {}; }
+std::vector<fs::path> dolphinSysDirs() {
+    std::vector<fs::path> v;
+    for (const fs::path& p : {fs::path("/usr/share/dolphin-emu/sys"), fs::path("/usr/local/share/dolphin-emu/sys"),
+                              fs::path("/var/lib/flatpak/app/org.DolphinEmu.dolphin-emu/current/active/files/share/dolphin-emu/sys"),
+                              homeDir() / ".local/share/flatpak/app/org.DolphinEmu.dolphin-emu/current/active/files/share/dolphin-emu/sys"}) {
+        std::error_code ec;
+        if (fs::is_directory(p / "GameSettings", ec)) v.push_back(p);
+    }
+    return v;
+}
+
+std::vector<fs::path> dolphinUserDirs(const std::vector<fs::path>&) {
+    std::vector<fs::path> out;
+    auto add = [&](const fs::path& d) {
+        std::error_code ec;
+        if (d.empty() || !fs::is_directory(d, ec)) return;
+        if (!fs::exists(d / "Config", ec) && !fs::exists(d / "GC", ec) && !fs::exists(d / "Load", ec)) return;
+        for (const auto& o : out)
+            if (fs::equivalent(o, d, ec)) return;
+        out.push_back(d);
+    };
+    if (const char* d = getenv("R2_DOLPHIN_DIR")) {
+        add(fs::path(d));
+        return out;
+    }
+    add(xdg("XDG_DATA_HOME", ".local/share") / "dolphin-emu");
+    add(homeDir() / kFlatpak / "data/dolphin-emu");
+    add(homeDir() / ".dolphin-emu");
+    return out;
+}
+
+// where a user (data) folder's .ini files are
+fs::path configDirOf(const fs::path& user) {
+    std::error_code ec;
+    if (fs::exists(user / "Config", ec)) return user / "Config";
+    const std::string u = str(user);
+    if (u.find(kFlatpak) != std::string::npos) return user.parent_path().parent_path() / "config/dolphin-emu";
+    return xdg("XDG_CONFIG_HOME", ".config") / "dolphin-emu";
+}
+#else
+fs::path configDirOf(const fs::path& user) { return user / "Config"; }
 
 // --- registry ---------------------------------------------------------------------------
 std::wstring regString(HKEY root, const wchar_t* key, const wchar_t* value) {
@@ -139,6 +214,7 @@ std::vector<fs::path> dolphinUserDirs(const std::vector<fs::path>& exeDirs) {
     for (const auto& e : exeDirs) add(e / "User");  // portable builds whose portable.txt went missing
     return out;
 }
+#endif
 
 // Dolphin.ini: section.key -> value
 std::map<std::string, std::string> readIni(const fs::path& p) {
@@ -170,7 +246,11 @@ std::map<std::string, std::string> readIni(const fs::path& p) {
 std::string modTimeText(uint32_t secs) {
     const time_t t = time_t(secs) + 946684800;  // 2000-01-01
     tm tmv{};
+#ifdef _WIN32
     gmtime_s(&tmv, &t);  // GameCube times are local times already
+#else
+    gmtime_r(&t, &tmv);
+#endif
     char b[32];
     strftime(b, sizeof b, "%Y-%m-%d %H:%M", &tmv);
     return b;
@@ -221,7 +301,7 @@ std::vector<fs::path> rawCardNames(const fs::path& p) {
 }
 
 void scanUserDir(DolphinScan& s, const fs::path& user) {
-    const auto ini = readIni(user / "Config" / "Dolphin.ini");
+    const auto ini = readIni(configDirOf(user) / "Dolphin.ini");
     auto get = [&](const char* k) {
         const auto it = ini.find(k);
         return it == ini.end() ? std::string() : it->second;
@@ -325,7 +405,7 @@ bool copyPacks(const std::vector<DolphinPack>& packs, CopyProgress& pr, std::str
 
 std::vector<std::string> dolphinConfigDirs() {
     std::vector<std::string> out;
-    for (const auto& u : dolphinUserDirs(dolphinExeDirs())) out.push_back(str(u / "Config"));
+    for (const auto& u : dolphinUserDirs(dolphinExeDirs())) out.push_back(str(configDirOf(u)));
     return out;
 }
 
@@ -339,6 +419,9 @@ DolphinScan scanDolphin() {
             break;
         }
     }
+#ifndef _WIN32
+    if (const auto sys = dolphinSysDirs(); !sys.empty()) s.sysDir = str(sys.front());
+#endif
     const auto users = dolphinUserDirs(exeDirs);
     if (!s.sysDir.empty() || !users.empty()) s.found = true;
     if (!s.sysDir.empty()) readCodes(s.codes, u8p(s.sysDir) / "GameSettings");
@@ -382,10 +465,14 @@ bool importSave(const DolphinSave& save, std::string& message) {
         char stamp[32];
         const time_t now = time(nullptr);
         tm lt{};
+#ifdef _WIN32
         localtime_s(&lt, &now);
+#else
+        localtime_r(&now, &lt);
+#endif
         strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &lt);
         const fs::path b = dir / u8p(str(path.stem()) + "-" + stamp + str(path.extension()));
-        if (FILE* f = _wfopen(b.c_str(), L"wb")) {
+        if (FILE* f = openFile(b, "wb")) {
             fwrite(img.data(), 1, img.size(), f);
             fclose(f);
             backup = str(b);
@@ -393,7 +480,7 @@ bool importSave(const DolphinSave& save, std::string& message) {
     }
     fs::path tmp = path;
     tmp += ".import";
-    FILE* f = _wfopen(tmp.c_str(), L"wb");
+    FILE* f = openFile(tmp, "wb");
     if (!f || fwrite(out.data(), 1, out.size(), f) != out.size()) {
         if (f) fclose(f);
         message = "Could not write " + str(tmp);
@@ -461,7 +548,7 @@ bool importPacksNow(const std::vector<DolphinPack>& packs, std::string& message)
     std::thread progress([&] {
         int lastPct = -1;
         while (!finished) {
-            Sleep(250);
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
             const uint64_t t = pr.bytesTotal, d = pr.bytesDone;
             const int pct = t ? int(d * 100 / t) : 0;
             if (pct / 10 != lastPct / 10) {
