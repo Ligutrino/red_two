@@ -60,3 +60,7 @@ hle     DitherStrength
 hle     AreaTriggerUpdate
 # Prisons of the Maw: force field panels that vanished (a generator disabled) no longer collide
 hle     MawShieldPanelHit
+# Cheat: all craft in the hangars (the craft passcodes and the medal checks, for the craft list only)
+hle     CraftMask
+hle     AllMissionsMedal
+hle     MissionMedal

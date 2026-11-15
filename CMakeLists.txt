@@ -98,7 +98,26 @@ if(R2_ARCH)
         set(_r2_arch "-march=${R2_ARCH}")
     endif()
 endif()
-target_compile_options(r2game PRIVATE ${_r2_arch} -ffp-contract=off)
+# (clang-cl takes clang's own options behind /clang:; without it the option was ignored)
+if(MSVC)
+    set(_r2_fp "/clang:-ffp-contract=off")
+else()
+    set(_r2_fp "-ffp-contract=off")
+endif()
+target_compile_options(r2game PRIVATE ${_r2_arch} ${_r2_fp})
+
+# --- rcheevos (RetroAchievements client): extern/rcheevos, MIT ------------------------------
+file(GLOB R2_RCHEEVOS_SOURCES
+    extern/rcheevos/src/rapi/*.c
+    extern/rcheevos/src/rcheevos/*.c
+    extern/rcheevos/src/rhash/*.c)
+add_library(rcheevos STATIC ${R2_RCHEEVOS_SOURCES}
+    extern/rcheevos/src/rc_client.c
+    extern/rcheevos/src/rc_compat.c
+    extern/rcheevos/src/rc_util.c
+    extern/rcheevos/src/rc_version.c)
+target_include_directories(rcheevos PUBLIC extern/rcheevos/include)
+target_compile_definitions(rcheevos PUBLIC RC_CLIENT_SUPPORTS_HASH PRIVATE _CRT_SECURE_NO_WARNINGS)
 
 # --- runtime ----------------------------------------------------------------------------
 add_executable(red_two
@@ -130,7 +149,8 @@ add_executable(red_two
     src/runtime/dolphin_import.cpp
     src/runtime/gfx/menu.cpp
     src/runtime/savestate.cpp
-    src/runtime/hotkeys.cpp)
+    src/runtime/hotkeys.cpp
+    src/runtime/achievements.cpp)
 target_include_directories(red_two PRIVATE src/runtime "${GEN_DIR}" extern/aurora/lib)
 # Program icon: your own res/icon.ico (not in the repository), built in when it exists.
 if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/res/icon.ico")
@@ -139,8 +159,9 @@ if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/res/icon.ico")
     target_compile_definitions(red_two PRIVATE R2_HAS_ICON=1)
 endif()
 target_compile_definitions(red_two PRIVATE ${R2_DEFS})
-target_compile_options(red_two PRIVATE ${_r2_arch} -ffp-contract=off)
-target_link_libraries(red_two PRIVATE r2game winmm aurora::core aurora::gx aurora::vi aurora::pad xxHash::xxhash zstd::libzstd dbghelp)
+target_compile_options(red_two PRIVATE ${_r2_arch} ${_r2_fp})
+target_link_libraries(red_two PRIVATE r2game winmm aurora::core aurora::gx aurora::vi aurora::pad xxHash::xxhash zstd::libzstd dbghelp
+    rcheevos PNG::PNG winhttp)
 if(MSVC)
     # /GS-: save states keep the guest threads' host stacks, also into a later session, whose
     # stack cookies differ (the generated code is built without them too)

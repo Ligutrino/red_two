@@ -323,6 +323,12 @@ bool copyPacks(const std::vector<DolphinPack>& packs, CopyProgress& pr, std::str
 
 }  // namespace
 
+std::vector<std::string> dolphinConfigDirs() {
+    std::vector<std::string> out;
+    for (const auto& u : dolphinUserDirs(dolphinExeDirs())) out.push_back(str(u / "Config"));
+    return out;
+}
+
 DolphinScan scanDolphin() {
     DolphinScan s;
     const auto exeDirs = dolphinExeDirs();

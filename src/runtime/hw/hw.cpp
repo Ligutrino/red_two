@@ -15,6 +15,7 @@
 #include <unordered_map>
 
 #include "../mods.h"
+#include "../achievements.h"
 #include "../runtime.h"
 #include "../settings.h"
 #include "gx_fifo.h"
@@ -187,6 +188,7 @@ void onVi() {
     siPollAll();
     cardFlushAll();
     mods::codesFrame();  // Gecko / Action Replay codes and patches, like Dolphin once per field
+    ra::frame();         // RetroAchievements: server replies, then this frame's checks (Dolphin: once per field too)
     viFrameHook();
     // The timer fires a little late every time (and the guest may be busy for a moment): counting
     // the next period from the actual retrace ran 60 fps at ~59 and 144 at ~139. Schedule early by

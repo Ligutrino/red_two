@@ -44,6 +44,12 @@ void set(const std::string& key, const std::string& value) {
     else if (key == "infinite_lives") s.infiniteLives = parseBool(value);
     else if (key == "infinite_ammo") s.infiniteAmmo = parseBool(value);
     else if (key == "perfect_stats") s.perfectStats = parseBool(value);
+    else if (key == "all_craft") s.allCraft = parseBool(value);
+    else if (key == "achievements") s.achievements = parseBool(value);
+    else if (key == "ra_user") s.raUser = value;
+    else if (key == "ra_token") s.raToken = value;
+    else if (key == "ra_notifications") s.raNotifications = parseBool(value);
+    else if (key == "ra_encore") s.raEncore = parseBool(value);
     else if (key == "custom_textures") s.customTextures = parseBool(value);
     else if (key == "prefetch_textures") s.prefetchTextures = parseBool(value);
     else if (key == "xbox_buttons") s.xboxButtons = parseBool(value);
@@ -115,12 +121,13 @@ std::string summary() {
     snprintf(b, sizeof b,
              "fullscreen=%d resolution=%s aspect=%s fps=%d ubershaders=%d hud_edges=%d tile_menus=%d game_dither=%d "
              "show_fps=%d volume=%d background_audio=%d skip_logos=%d skip_cutscenes=%d fast_disc=%d invincible=%d "
-             "infinite_lives=%d infinite_ammo=%d perfect_stats=%d custom_textures=%d prefetch_textures=%d "
-             "xbox_buttons=%d state_slot=%d",
+             "infinite_lives=%d infinite_ammo=%d perfect_stats=%d all_craft=%d custom_textures=%d prefetch_textures=%d "
+             "xbox_buttons=%d state_slot=%d achievements=%d ra_user=%s ra_notifications=%d ra_encore=%d",
              s.fullscreen, resolutionName(s.resolution), aspectName(s.aspect), s.fps, s.ubershaders, s.hudEdges,
              s.tileMenus, s.gameDither, s.showFps, s.volume, s.backgroundAudio, s.skipLogos, s.skipCutscenes,
-             s.fastDisc, s.invincible, s.infiniteLives, s.infiniteAmmo, s.perfectStats, s.customTextures,
-             s.prefetchTextures, s.xboxButtons, s.stateSlot);
+             s.fastDisc, s.invincible, s.infiniteLives, s.infiniteAmmo, s.perfectStats, s.allCraft, s.customTextures,
+             s.prefetchTextures, s.xboxButtons, s.stateSlot, s.achievements, s.raUser.empty() ? "-" : s.raUser.c_str(),
+             s.raNotifications, s.raEncore);
     return b;
 }
 
@@ -158,12 +165,20 @@ void save() {
     fprintf(f, "infinite_lives=%d\n", s.infiniteLives);
     fprintf(f, "infinite_ammo=%d\n", s.infiniteAmmo);
     fprintf(f, "perfect_stats=%d\n", s.perfectStats);
+    fprintf(f, "# every craft a mission allows in its hangar (the craft passcodes and medal rewards)\n");
+    fprintf(f, "all_craft=%d\n", s.allCraft);
     fprintf(f, "# texture packs in the textures folder next to this file (Dolphin's format)\n");
     fprintf(f, "custom_textures=%d\n", s.customTextures);
     fprintf(f, "# texture packs loaded into memory before the game starts (up to half the RAM)\n");
     fprintf(f, "prefetch_textures=%d\n", s.prefetchTextures);
     fprintf(f, "# on-screen button prompts: 1 as on an Xbox controller, 0 GameCube\n");
     fprintf(f, "xbox_buttons=%d\n", s.xboxButtons);
+    fprintf(f, "# RetroAchievements (softcore): the account and its login token (not the password)\n");
+    fprintf(f, "achievements=%d\n", s.achievements);
+    fprintf(f, "ra_user=%s\n", s.raUser.c_str());
+    fprintf(f, "ra_token=%s\n", s.raToken.c_str());
+    fprintf(f, "ra_notifications=%d\n", s.raNotifications);
+    fprintf(f, "ra_encore=%d\n", s.raEncore);
     fprintf(f, "# save states: the slot (1-8) and the hotkeys, buttons or keys held together (SDL names, \" + \" between)\n");
     fprintf(f, "state_slot=%d\n", s.stateSlot);
     for (int a = 0; a < HkCount; a++) {

@@ -130,9 +130,20 @@ bool cardCurrentImage(int slot, std::vector<u8>& out);     // the inserted card 
 void cardDetach(int slot);  // the file was replaced: keep the game's later writes in memory only
 void cardFlushNow();        // card writes not yet in the image file go there now (before quitting)
 void restartGame();         // main.cpp: start a new instance with the same arguments, then quit
+void resetGame();           // main.cpp: the menu's reset (card writes flushed, then restartGame)
 // main.cpp: the window was closed or the menu's quit chosen: a save state being written and the
 // memory card's last writes reach their files, then the process ends
 [[noreturn]] void quitToDesktop();
+
+// hle_game.cpp: the game's own passcode unlocks (two flag words of its progress block, kept in
+// its save), for the menu's cheats page
+namespace unlocks {
+enum Item : int { AllMissions, TechUpgrades, AceMode, ArtGallery, MusicHall, Documentary, Commentary, Credits, BlackWhite, Count };
+const char* name(int item);
+const char* help(int item);
+int state(int item);          // 1 on, 0 off, -1 not known yet (the game has not run a frame)
+void set(int item, bool on);  // applied at the game's next frame
+}  // namespace unlocks
 
 namespace gfx {
 bool menuOpen();  // gfx/menu.cpp: the settings menu has the controls (the game sees idle pads)

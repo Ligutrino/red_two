@@ -89,6 +89,7 @@ static void keepHealth();
 static void keepAmmo();
 static void craftDiffProbe();
 static void resultsTest(Ctx& c);
+static void unlocksFrame();
 
 void hle_GameFrameDelta(Ctx& c) {
     frameDelta(c);
@@ -135,6 +136,7 @@ void hle_GameFrameDelta(Ctx& c) {
     keepAmmo();
     craftDiffProbe();
     resultsTest(c);
+    unlocksFrame();
     // widescreen: the flight HUD goes to the screen edges (not the menus: their layout is 4:3).
     // Nor the pause screen, drawn while the craft exists: its objectives' check marks and dots
     // sit left of the centered text and were moved out to the left (by the 4:3 margin, 240 px
@@ -737,6 +739,149 @@ void hle_LoseLife(Ctx& c) {
         return;
     }
     f_7FD7648C_orig(c);
+}
+
+// --- Passcodes and unlocks --------------------------------------------------------------------
+// The game's progress block (0x7FE1C4A0, bss in its VM; saved to the memory card: +0 = 1 asks for
+// a save, +2 the current pilot, pilot records of 288 bytes after it) keeps two flag words that
+// the Options > Passcodes screen sets (0x7FD6D4A0: the 8 characters, zero-padded to 1 KiB, go
+// through SHA-1 1000 times - each digest written back into the buffer after the code - and the
+// result is looked up in a table of 71 digests at 0x7FDE2350; verified with THATSME!, ?INSIDER,
+// BLAHBLAH, EXHIBIT!, COMPOSER, LIONHEAD, U!?!VWZC + GIVEITUP, !??QWTTJ + CLASSIC, ...):
+//   +0x658 unlocks (SetUnlockFlag 0x7FD588C0: progress r3, mask r4, on r5): 0x1 credits, 0x2 the
+//     documentary ("making of"), 0x8 audio commentary, 0x10 art gallery, 0x20 music hall,
+//     0x40 ace mode (Options > Special Features shows each, 0x7FD70188), 0x100 / 0x200
+//     commentary / ace mode switched on there; 0x400..0x40000 and 0x200000 the craft codes
+//     (read only by CraftMask, below). Indices 1-7 of the table set bits 0x1..0x40.
+//   +0x654 cheats (SetCheatFlag 0x7FD58914): 0x1 every main mission open (0x7FD7F9C0 ORs
+//     0x7FF into the pilot's mission masks), 0x10000..0x100000 the five bonus missions (each
+//     once the main mission before it is open), 0x2 every tech upgrade at its best (UpgradeLevel
+//     0x7FD57FF0 returns 3), 0x8 infinite lives (LoseLife), 0x8000 black and white (LIONHEAD,
+//     a toggle; the renderer's frame setup 0x7FD34978), 0x10..0x4000 single upgrade levels,
+//     0x200000 a developer test mode (test textures: left out).
+// Both setters mark the block for saving unless the mask only holds bits the game does not
+// keep (cheats 0x8 / 0x8000, unlock 0x200000). The menu's rows set and clear the same bits
+// (applied from the per-frame update, an ordinary guest call: the block's VM page can fault in
+// there), so they end up in the game's save as if the codes had been entered.
+namespace {
+constexpr u32 kProgress = 0x7FE1C4A0, kCheatFlags = kProgress + 0x654, kUnlockFlags = kProgress + 0x658;
+constexpr u32 kCraftCodeBits = 0x0007FC00u | 0x00200000u;  // the craft passcodes' unlock bits
+struct Unlock {
+    const char* name;
+    const char* help;
+    int word;  // 0 cheats (+0x654), 1 unlocks (+0x658)
+    u32 mask;
+    bool saved;
+};
+const Unlock kUnlocks[unlocks::Count] = {
+    {"All missions", "Every mission is open, the five bonus missions too (the game's \"all missions\" passcodes).", 0,
+     0x001F0001u, true},
+    {"All tech upgrades", "Every craft has every tech upgrade at its best: advanced lasers, homing torpedoes, shields, "
+     "targeting computer and the rest.", 0, 0x2u, true},
+    {"Ace mode", "Options > Special Features gets Ace Mode: the game at its hardest.", 1, 0x40u, true},
+    {"Art gallery", "Options > Special Features gets the Art Gallery.", 1, 0x10u, true},
+    {"Music hall", "Options > Special Features gets the Music Hall.", 1, 0x20u, true},
+    {"Documentary", "Options > Special Features gets the documentary (the making of the game).", 1, 0x2u, true},
+    {"Audio commentary", "Options > Special Features gets the developers' audio commentary (switch it on there).", 1,
+     0x8u, true},
+    {"Credits", "Options > Special Features gets the end credits.", 1, 0x1u, true},
+    {"Black and white", "The whole game in black and white, like an old film (the LIONHEAD passcode). The game does not "
+     "save it.", 0, 0x8000u, false},
+};
+std::atomic<u32> s_flagsSeen[2];       // the words as last read by the game's frame update
+std::atomic<bool> s_flagsKnown{false};
+std::atomic<u32> s_setBits[2], s_clearBits[2];  // asked for by the menu, not applied yet
+}  // namespace
+
+namespace unlocks {
+const char* name(int i) { return i >= 0 && i < Count ? kUnlocks[i].name : ""; }
+const char* help(int i) { return i >= 0 && i < Count ? kUnlocks[i].help : ""; }
+int state(int i) {
+    if (i < 0 || i >= Count || !s_flagsKnown.load(std::memory_order_relaxed)) return -1;
+    const Unlock& u = kUnlocks[i];
+    return (s_flagsSeen[u.word].load(std::memory_order_relaxed) & u.mask) == u.mask;
+}
+void set(int i, bool on) {
+    if (i < 0 || i >= Count) return;
+    const Unlock& u = kUnlocks[i];
+    (on ? s_setBits : s_clearBits)[u.word].fetch_or(u.mask);
+    (on ? s_clearBits : s_setBits)[u.word].fetch_and(~u.mask);
+    // shown at once (the game's frame update confirms it)
+    s_flagsSeen[u.word].store(on ? s_flagsSeen[u.word].load() | u.mask : s_flagsSeen[u.word].load() & ~u.mask);
+}
+}  // namespace unlocks
+
+// From GameFrameDelta (every mode loop's frame update): the menu's changes go in, the words come out.
+static void unlocksFrame() {
+    // R2_UNLOCKS=<seconds>:all or <seconds>:<item numbers> (unlocks::Item, comma-separated):
+    // switched on that long after the start (tests of the menu's rows; the game loads its save
+    // from the card at boot, over anything set before)
+    static const char* env = getenv("R2_UNLOCKS");
+    static const u64 envStart = tbNow();
+    if (env && double(tbNow() - envStart) / double(kTbClock) >= atof(env)) {
+        const char* list = strchr(env, ':') ? strchr(env, ':') + 1 : env;
+        const std::string l = std::string(",") + list + ",";
+        for (int i = 0; i < unlocks::Count; i++)
+            if (!strcmp(list, "all") || l.find("," + std::to_string(i) + ",") != std::string::npos) unlocks::set(i, true);
+        env = nullptr;
+    }
+    const u32 addr[2] = {kCheatFlags, kUnlockFlags};
+    for (int w = 0; w < 2; w++) {
+        const u32 on = s_setBits[w].exchange(0), off = s_clearBits[w].exchange(0);
+        if (on | off) {
+            const u32 v = rd32(addr[w]), nv = (v | on) & ~off;
+            if (nv != v) {
+                wr32(addr[w], nv);
+                bool saved = false;
+                for (const Unlock& u : kUnlocks)
+                    if (u.word == w && ((v ^ nv) & u.mask) && u.saved) saved = true;
+                if (saved) wr8(kProgress, 1);  // as the game's setters do: the front end saves it
+                for (const Unlock& u : kUnlocks)
+                    if (u.word == w && ((v ^ nv) & u.mask))
+                        logf("unlock", "%s %s%s", u.name, (nv & u.mask) == u.mask ? "on" : "off",
+                             u.saved ? " (kept in the game's save)" : "");
+            }
+        }
+        s_flagsSeen[w].store(rd32(addr[w]), std::memory_order_relaxed);
+    }
+    s_flagsKnown.store(true, std::memory_order_relaxed);
+}
+
+// All craft (settings): CraftMask (0x7FCB9544; mission r3, game mode r4) builds the hangar's
+// craft for a mission from the craft passcodes' unlock bits (+0x658: 0x400 .. 0x40000, 0x200000;
+// copied to a mask at r13-19980) and the pilot's medals (AllMissionsMedal 0x7FCB9458: every
+// main (r3 = 0) or every (r3 = 1) mission at medal level r4 or better; MissionMedal 0x7FCB94E4:
+// mission r3 at level r4 - both only called by the craft code, 0x7FCB9458..0x7FCB9FB4). With the
+// cheat both answer yes and the craft bits are set for the call only: every craft the game lets
+// a mission have, nothing written to the save. Its per-mission rules (the snowspeeder only on
+// Hoth's surface, ...) stay the game's.
+void hle_CraftMask(Ctx& c) {
+    const u32 mission = c.r[3];
+    const bool all = settings::get().allCraft;
+    const u32 v = all ? rd32(kUnlockFlags) : 0, add = all ? kCraftCodeBits & ~v : 0;
+    if (add) wr32(kUnlockFlags, v | add);
+    f_7FCB9544_orig(c);
+    if (add) wr32(kUnlockFlags, rd32(kUnlockFlags) & ~add);
+    static u32 lastMission = ~0u, lastMask = ~0u;
+    if (mission != lastMission || c.r[3] != lastMask) {
+        lastMission = mission;
+        lastMask = c.r[3];
+        logf("craft", "mission %u: craft %04X%s", mission, c.r[3], all ? " (all craft)" : "");
+    }
+}
+void hle_AllMissionsMedal(Ctx& c) {
+    if (settings::get().allCraft) {
+        c.r[3] = 1;
+        return;
+    }
+    f_7FCB9458_orig(c);
+}
+void hle_MissionMedal(Ctx& c) {
+    if (settings::get().allCraft) {
+        c.r[3] = 1;
+        return;
+    }
+    f_7FCB94E4_orig(c);
 }
 
 // Invincibility (settings): CraftDestroy (0x7FC3E528, a method every craft class shares) starts

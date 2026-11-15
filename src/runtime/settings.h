@@ -48,6 +48,14 @@ struct Settings {
     bool infiniteLives = false;
     bool infiniteAmmo = false;  // secondary weapons: torpedoes, bombs, missiles
     bool perfectStats = false;  // mission results: 0:01, every enemy, 100%, nothing lost (hle_game.cpp)
+    bool allCraft = false;      // every craft a mission allows in its hangar (passcodes and medals; hle_game.cpp)
+    // RetroAchievements (achievements.cpp): softcore only. The account's name and its login token
+    // (from logging in with the password in the menu, or Dolphin's RetroAchievements.ini); the
+    // password itself is never stored.
+    bool achievements = false;
+    std::string raUser, raToken;
+    bool raNotifications = true;  // pop-ups for unlocks, leaderboards, the game's progress
+    bool raEncore = false;        // achievements already unlocked can trigger (and pop up) again
     // mods
     bool customTextures = true;  // texture packs in the textures folder (Dolphin's format; mods.cpp)
     bool prefetchTextures = true;  // the packs loaded into memory up front (Dolphin's prefetch)

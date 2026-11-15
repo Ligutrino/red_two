@@ -41,6 +41,7 @@
 #include "../hotkeys.h"
 #include "../hw/musyx_dsp.h"
 #include "../mods.h"
+#include "../achievements.h"
 #include "../runtime.h"
 #include "../savestate.h"
 #include "../settings.h"
@@ -199,8 +200,8 @@ bool padTest() {
     return on;
 }
 
-enum Section { Display, Gameplay, Audio, Controls, Cheats, Mods, SectionCount };
-const char* const kSectionNames[SectionCount] = {"DISPLAY", "GAMEPLAY", "AUDIO", "CONTROLS", "CHEATS", "MODS"};
+enum Section { Display, Gameplay, Audio, Controls, Cheats, Achievements, Mods, SectionCount };
+const char* const kSectionNames[SectionCount] = {"DISPLAY", "GAMEPLAY", "AUDIO", "CONTROLS", "CHEATS", "ACHIEVEMENTS", "MODS"};
 int s_section = 0;
 int s_rowSel[SectionCount] = {};    // each page's selected row
 int s_rowCount[SectionCount] = {};  // the rows each page had when it was last drawn
@@ -217,6 +218,7 @@ struct NavKey {
 };
 NavKey s_navKey[NavCount];
 bool s_nav[NavCount];    // this frame: pressed (or repeated, for directions)
+bool s_padPress[NavCount] = {};  // this frame's controller presses, also while they are not for navigating (typing)
 bool s_navFresh = true;  // just opened: buttons already held are not presses
 bool s_usingPad = false; // the last input came from a controller (button hints)
 
@@ -272,6 +274,7 @@ void pollNav(bool enabled) {
             st.next = now + 0.09;
         }
         st.held = held[k];
+        s_padPress[k] = fire;
         s_nav[k] = fire && enabled;
         if (s_nav[k]) s_usingPad = true;
     }
@@ -698,8 +701,37 @@ void heading(const char* text) {
 // pages
 // ---------------------------------------------------------------------------------------
 bool s_changed = false, s_display = false;
+bool s_confirmQuit = false;   // quitting asks for a second press
+bool s_confirmReset = false;  // so does resetting
+
+// a button that asks for a second press (the selection moving away cancels it)
+bool confirmRow(const char* text, const char* caption, const char* again, bool& armed, const char* help) {
+    const int row = s_row;
+    const bool pressed = buttonRow(text, armed ? again : caption, help, armed ? kAmber : kText);
+    if (s_rowSel[s_section] != row) armed = false;
+    if (!pressed) return false;
+    if (!armed) {
+        armed = true;
+        return false;
+    }
+    armed = false;
+    return true;
+}
 
 void pageDisplay(settings::Settings& s) {
+    heading("GAME");
+    if (confirmRow("Reset game", "RESET", "PRESS AGAIN: RESET", s_confirmReset,
+                   "Start the game over from the boot screen, like the console's reset button. What the game saved to its "
+                   "memory card and your save states are kept; a mission in progress is not.")) {
+        logf("menu", "reset");
+        resetGame();
+    }
+    if (confirmRow("Quit to desktop", "QUIT", "PRESS AGAIN: QUIT", s_confirmQuit,
+                   "Close Red Two. What the game saved to its memory card and your save states are kept; a mission in "
+                   "progress is not.")) {
+        logf("menu", "quit to desktop");
+        quitToDesktop();
+    }
     heading("SCREEN");
     if (toggleRow("Fullscreen", s.fullscreen, "Also F11 or Alt+Enter.")) s_changed = s_display = true;
     if (enumRow("Internal resolution", s.resolution, settings::resolutionName,
@@ -727,8 +759,6 @@ void pageDisplay(settings::Settings& s) {
         s_changed = s_display = true;
 }
 
-bool s_confirmQuit = false;  // quitting asks for a second press
-
 void pageGameplay(settings::Settings& s) {
     heading("LOADING");
     if (toggleRow("Fast loading", s.fastDisc,
@@ -739,21 +769,6 @@ void pageGameplay(settings::Settings& s) {
     if (toggleRow("Skippable cutscenes", s.skipCutscenes,
                   "Press B during the opening crawl or a cutscene to skip to the gameplay."))
         s_changed = true;
-    heading("EXIT");
-    const int row = s_row;
-    const bool pressed = buttonRow("Quit to desktop", s_confirmQuit ? "PRESS AGAIN: QUIT" : "QUIT",
-                                   "Close Red Two. What the game saved to its memory card and your save states are kept; "
-                                   "a mission in progress is not.",
-                                   s_confirmQuit ? kAmber : kText);
-    if (s_rowSel[s_section] != row) s_confirmQuit = false;
-    if (pressed) {
-        if (!s_confirmQuit) {
-            s_confirmQuit = true;
-        } else {
-            logf("menu", "quit to desktop");
-            quitToDesktop();
-        }
-    }
 }
 
 void pageAudio(settings::Settings& s) {
@@ -777,6 +792,172 @@ void pageCheats(settings::Settings& s) {
                   "The mission results say 0:01, every enemy destroyed, 100% accuracy, no friendlies or lives lost and 100% "
                   "targeting computer efficiency; the medals follow."))
         s_changed = true;
+    if (toggleRow("All craft", s.allCraft,
+                  "Every craft a mission allows waits in its hangar: the passcode craft (Millennium Falcon, Slave I, TIE "
+                  "fighter, Naboo starfighter, Imperial shuttle, ...) and the medal rewards. Your save is not changed."))
+        s_changed = true;
+    heading("PASSCODES");
+    // the game's own unlocks: kept in its save like codes entered in Options > Passcodes
+    for (int i = 0; i < unlocks::Count; i++) {
+        bool v = unlocks::state(i) == 1;
+        if (toggleRow(unlocks::name(i), v, unlocks::help(i))) unlocks::set(i, v);
+    }
+}
+
+// --- achievements: RetroAchievements (achievements.cpp) ---------------------------------------
+// A text value: A / Enter starts typing (a keyboard; Steam Deck's on-screen keyboard comes up
+// with SDL's text input), Enter or the controller's A ends it, Esc or B cancels.
+bool s_textEditing = false;
+int s_textRow = -1, s_textSection = -1, s_textFrames = 0;
+char s_textBuf[256] = {};
+
+bool textRow(const char* text, std::string& value, bool password, const char* help) {
+    const bool sel = rowBegin(text, help);
+    const int idx = s_row - 1;
+    const float w = 380.f * s_ui, h = ImGui::GetFrameHeight();
+    const bool editing = s_textEditing && s_textRow == idx && s_textSection == s_section;
+    ImGui::PushID(text);
+    bool changed = false;
+    if (editing) {
+        ImGui::SetNextItemWidth(w);
+        if (s_textFrames++ == 0) ImGui::SetKeyboardFocusHere();
+        const ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll |
+                                          (password ? ImGuiInputTextFlags_Password : 0);
+        const bool enter = ImGui::InputText("##text", s_textBuf, sizeof s_textBuf, flags);
+        const bool lost = s_textFrames > 2 && !ImGui::IsItemActive();
+        if (enter || s_padPress[NavAccept]) {
+            value = s_textBuf;
+            changed = true;
+            s_textEditing = false;
+        } else if (lost || s_padPress[NavBack] || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            s_textEditing = false;
+        }
+        if (!s_textEditing) memset(s_textBuf, 0, sizeof s_textBuf);
+    } else {
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const bool clicked = ImGui::InvisibleButton("##textbox", ImVec2(w, h));
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        valueFrame(dl, p, ImVec2(p.x + w, p.y + h), sel, ImGui::IsItemHovered());
+        const std::string shown = value.empty() ? std::string(sel ? "PRESS A / ENTER TO TYPE" : "-")
+                                                : password ? std::string(std::min<size_t>(value.size(), 24), '*') : value;
+        const ImVec2 ts = ImGui::CalcTextSize(shown.c_str());
+        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(p.x + 14.f * s_ui, p.y + (h - ts.y) * 0.5f),
+                    value.empty() ? kDim : (sel ? kGold : kText), shown.c_str());
+        if (clicked || (sel && s_in.accept)) {
+            s_textEditing = true;
+            s_textRow = idx;
+            s_textSection = s_section;
+            s_textFrames = 0;
+            snprintf(s_textBuf, sizeof s_textBuf, "%s", value.c_str());
+        }
+    }
+    ImGui::PopID();
+    return changed;
+}
+
+// a row that only shows something
+void infoRow(const char* text, const std::string& value, const char* help, ImU32 col = kText) {
+    const bool sel = rowBegin(text, help);
+    ImGui::PushStyleColor(ImGuiCol_Text, sel ? vec(kGold) : vec(col));
+    ImGui::TextUnformatted(value.c_str());
+    ImGui::PopStyleColor();
+}
+
+std::string s_raUser, s_raPassword;  // typed into the login rows (the password is never stored)
+bool s_raUserInit = false;
+std::string s_raNote;                // the menu's own message (Dolphin's login)
+bool s_confirmLogout = false;
+int s_raDolphin = -1;                // Dolphin has a login: -1 not looked yet
+
+void pageAchievements(settings::Settings& s) {
+    const ra::Status st = ra::status();
+    heading("RETROACHIEVEMENTS");
+    if (toggleRow("Achievements", s.achievements,
+                  "Earn achievements from retroachievements.org as you play, with your account there. Softcore: save "
+                  "states, cheats and the options stay allowed (hardcore is not offered).")) {
+        s_changed = true;
+        ra::setEnabled(s.achievements);
+    }
+    if (!st.loggedIn) {
+        if (!s_raUserInit) {
+            s_raUser = s.raUser;
+            s_raUserInit = true;
+        }
+        textRow("Username", s_raUser, false, "Your retroachievements.org user name.");
+        textRow("Password", s_raPassword, true,
+                "Only sent to log in: Red Two keeps the login token the server answers with, never the password.");
+        if (buttonRow("Log in", st.busy ? "LOGGING IN..." : "LOG IN",
+                      "Log in to retroachievements.org with the name and password above.") &&
+            !st.busy) {
+            if (s_raUser.empty() || s_raPassword.empty()) {
+                s_raNote = "Type your user name and password first.";
+            } else {
+                if (!s.achievements) {
+                    s.achievements = true;
+                    s_changed = true;
+                }
+                s_raNote.clear();
+                ra::login(s_raUser, s_raPassword);
+                s_raPassword.clear();
+            }
+        }
+        if (s_raDolphin < 0) s_raDolphin = ra::dolphinLoginAvailable() ? 1 : 0;
+        if (s_raDolphin == 1 && buttonRow("Dolphin's login", "IMPORT",
+                                          "Dolphin is logged in to RetroAchievements on this computer: use the same "
+                                          "account (its login token from RetroAchievements.ini).")) {
+            ra::importDolphinLogin(s_raNote);
+            s_changed = false;  // (saved by the import)
+        }
+    } else {
+        char b[160];
+        snprintf(b, sizeof b, "%s  (%u points)", st.user.c_str(), st.score);
+        infoRow("Account", b, "The retroachievements.org account unlocks go to (softcore points).");
+        if (confirmRow("Log out", "LOG OUT", "PRESS AGAIN: LOG OUT", s_confirmLogout,
+                       "Forget this account's login on this computer."))
+            ra::logout();
+    }
+    if (toggleRow("Notifications", s.raNotifications, "Pop-ups for unlocks, leaderboards and the game's start."))
+        s_changed = true;
+    if (toggleRow("Encore mode", s.raEncore,
+                  "Achievements you already have can trigger (and pop up) again. Takes effect when the game's "
+                  "achievements load: at the next start or login."))
+        s_changed = true;
+    const std::string note = !s_raNote.empty() ? s_raNote : st.message;
+    if (!note.empty()) infoRow("Status", note, note.c_str(), kAmber);
+
+    heading("THIS GAME");
+    if (!st.enabled) {
+        infoRow("Achievements", "Off", "Switch achievements on above.", kDim);
+        return;
+    }
+    if (!st.gameLoaded) {
+        infoRow("Achievements", st.busy ? "Loading..." : st.loggedIn ? "-" : "Log in to see them", nullptr, kDim);
+        return;
+    }
+    char sum[160];
+    snprintf(sum, sizeof sum, "%u of %u unlocked, %u of %u points", st.unlocked, st.total, st.points, st.pointsTotal);
+    infoRow("Progress", sum, st.game.c_str());
+    for (const ra::Achievement& a : ra::achievements()) {
+        static std::string help;
+        help = a.description;
+        const bool sel = rowBegin(a.title.c_str(), help.c_str());
+        const float h = ImGui::GetFrameHeight();
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        if (void* tex = ra::image(a.badgeUrl))
+            dl->AddImage(ImTextureID(uintptr_t(tex)), p, ImVec2(p.x + h, p.y + h), ImVec2(0, 0), ImVec2(1, 1),
+                         a.unlocked ? IM_COL32_WHITE : IM_COL32(150, 150, 150, 200));
+        ImGui::Dummy(ImVec2(h, h));
+        ImGui::SameLine();
+        char v[96];
+        if (a.unlocked) snprintf(v, sizeof v, "UNLOCKED  -  %u POINTS", a.points);
+        else if (!a.progress.empty()) snprintf(v, sizeof v, "%s  -  %u POINTS", a.progress.c_str(), a.points);
+        else snprintf(v, sizeof v, "%u POINTS", a.points);
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushStyleColor(ImGuiCol_Text, a.unlocked ? vec(kGold) : sel ? vec(kText) : vec(kDim));
+        ImGui::TextUnformatted(v);
+        ImGui::PopStyleColor();
+    }
 }
 
 // --- mods: texture packs, codes, importing from Dolphin -------------------------------------
@@ -1093,6 +1274,8 @@ void switchSection(int i) {
     s_section = i;
     s_scrollToSel = true;
     s_confirmQuit = false;
+    s_confirmReset = false;
+    s_textEditing = false;
     s_pendingCapture = -1;
     s_pendingHotkey = -1;
     hotkeys::captureCancel();
@@ -1135,7 +1318,10 @@ void tabBar() {
               on ? IM_COL32(30, 18, 4, 235) : IM_COL32(4, 10, 22, 200),
               on ? kAmber : (hot ? alpha(kHolo, 200) : alpha(kGold, 60)), 1.f * s_ui);
         if (on) dl->AddRectFilled(ImVec2(a.x + 14.f * s_ui, b.y - 4.f * s_ui), ImVec2(b.x - 14.f * s_ui, b.y), kAmber);
-        const float px = 22.f * s_ui, tr = 4.f * s_ui;
+        // (smaller where a name does not fit: seven tabs on a narrow screen)
+        float px = 22.f * s_ui, tr = 4.f * s_ui;
+        const float fit = tw - 16.f * s_ui, full = textWidth(s_font, px, kSectionNames[i], tr);
+        if (full > fit) px *= fit / full, tr *= fit / full;
         const float w = textWidth(s_font, px, kSectionNames[i], tr);
         drawText(dl, s_font, px, ImVec2(a.x + (tw - w) * 0.5f, a.y + h * 0.5f - px * 0.55f),
                  on ? kGold : (hot ? kText : kDim), kSectionNames[i], tr, on ? alpha(kAmber, 40) : 0);
@@ -1154,7 +1340,7 @@ void tabBar() {
 bool drawMenu(settings::Settings& s, float t) {
     // input first: B closes, LB / RB switch tabs, up / down move the selection
     const bool rebinding = rebindingNow();
-    pollNav(!rebinding);
+    pollNav(!rebinding && !s_textEditing);  // (typing: the text field takes the keys)
     if (s_nav[NavBack]) return false;
     if (s_nav[NavPrevTab]) switchSection((s_section + SectionCount - 1) % SectionCount);
     if (s_nav[NavNextTab]) switchSection((s_section + 1) % SectionCount);
@@ -1246,6 +1432,7 @@ bool drawMenu(settings::Settings& s, float t) {
         case Audio: pageAudio(s); break;
         case Controls: pageControls(); break;
         case Cheats: pageCheats(s); break;
+        case Achievements: pageAchievements(s); break;
         case Mods: pageMods(s); break;
         }
         ImGui::Dummy(ImVec2(0, 8.f * s_ui));
@@ -1259,7 +1446,30 @@ bool drawMenu(settings::Settings& s, float t) {
         if (s_display) applyDisplaySettings();
     }
     ImGui::End();
-    if (s_help) drawText(bg, s_font, 19.f * s_ui, ImVec2(a.x + pad, helpY), alpha(kHolo, 220), s_help, 0.5f * s_ui);
+    if (s_help) {
+        // one line, smaller where it is long; two lines (split at the space nearest the middle)
+        // where it would get too small
+        const float avail = w - 2.f * pad, tr = 0.5f * s_ui;
+        float px = 19.f * s_ui;
+        const float full = textWidth(s_font, px, s_help, tr);
+        if (full <= avail || px * avail / full >= 15.f * s_ui) {
+            if (full > avail) px *= avail / full;
+            drawText(bg, s_font, px, ImVec2(a.x + pad, helpY), alpha(kHolo, 220), s_help, tr);
+        } else {
+            const std::string text = s_help;
+            size_t split = std::string::npos;
+            for (size_t i = 0; i < text.size(); i++)
+                if (text[i] == ' ' && (split == std::string::npos || std::abs(int(i) - int(text.size() / 2)) <
+                                                                         std::abs(int(split) - int(text.size() / 2))))
+                    split = i;
+            const std::string l1 = text.substr(0, split), l2 = split == std::string::npos ? "" : text.substr(split + 1);
+            px = 17.f * s_ui;
+            const float wide = std::max(textWidth(s_font, px, l1.c_str(), tr), textWidth(s_font, px, l2.c_str(), tr));
+            if (wide > avail) px *= avail / wide;
+            drawText(bg, s_font, px, ImVec2(a.x + pad, helpY - px * 0.55f), alpha(kHolo, 220), l1.c_str(), tr);
+            drawText(bg, s_font, px, ImVec2(a.x + pad, helpY + px * 0.6f), alpha(kHolo, 220), l2.c_str(), tr);
+        }
+    }
     s_focus = false;
     if (s_captureRow < 0 && s_navBackTb && tbNow() >= s_navBackTb) s_navBackTb = 0;
     return true;
@@ -1280,7 +1490,34 @@ void pushKey(SDL_Scancode sc) {
         SDL_PushEvent(&e);
     }
 }
+// R2_MENU_TEXT_TEST=1 (with R2_MENU=1 R2_MENU_SECTION=5 R2_MENU_ROW=1 and R2_INPUT set): types
+// into the achievements page's user name row through synthetic key and text events
+void pushText(const char* text) {
+    SDL_Event e{};
+    e.type = SDL_EVENT_TEXT_INPUT;
+    e.text.timestamp = SDL_GetTicksNS();
+    e.text.windowID = aurora_get_window() ? SDL_GetWindowID(aurora_get_window()) : 0;
+    e.text.text = SDL_strdup(text);  // (SDL keeps it for the event's lifetime; a test, leaked)
+    SDL_PushEvent(&e);
+}
+void textSelfTest() {
+    static const bool on = envFlag("R2_MENU_TEXT_TEST") && getenv("R2_INPUT");
+    if (!on) return;
+    static int k = 0;
+    switch (++k) {
+    case 30: logf("menu", "text test: user '%s', editing %d", s_raUser.c_str(), s_textEditing); pushKey(SDL_SCANCODE_RETURN); break;
+    case 40: logf("menu", "text test: editing %d after Enter", s_textEditing); pushText("Wedge"); break;
+    case 50: pushText("Antilles"); break;
+    case 60: pushKey(SDL_SCANCODE_RETURN); break;
+    case 70: logf("menu", "text test: user '%s', editing %d", s_raUser.c_str(), s_textEditing); pushKey(SDL_SCANCODE_RETURN); break;
+    case 80: pushText("x"); break;
+    case 90: pushKey(SDL_SCANCODE_ESCAPE); break;
+    case 100: logf("menu", "text test: after Esc: user '%s', editing %d, menu open %d", s_raUser.c_str(), s_textEditing, s_open); break;
+    }
+}
+
 void bindSelfTest() {
+    textSelfTest();
     static const bool on = envFlag("R2_MENU_BIND_TEST") && getenv("R2_INPUT");
     if (!on) return;
     static int k = 0;
@@ -1372,6 +1609,10 @@ void setOpen(bool open) {
     if (open) s_dolphinStale = true;  // Dolphin's files may have changed meanwhile
     s_confirmSave = false;
     s_confirmQuit = false;
+    s_confirmReset = false;
+    s_confirmLogout = false;
+    s_textEditing = false;
+    if (open) s_raDolphin = -1;  // (Dolphin may have logged in meanwhile)
     s_open = open;
     s_focus = open;
     s_navFresh = true;
@@ -1429,7 +1670,7 @@ void menuEvent(const void* p) {
             s_usingPad = false;
             if (!s_open) s_padDevice = false;  // Controls shows the keyboard's
             setOpen(!s_open);
-        } else if (e.key.key == SDLK_ESCAPE && s_open) {
+        } else if (e.key.key == SDLK_ESCAPE && s_open && !s_textEditing) {
             logf("menu", "Esc: close");
             setOpen(false);
         }
@@ -1620,6 +1861,54 @@ void menuDraw() {
                      3.f * ui);
         } else {
             s_toast.clear();
+        }
+    }
+    // RetroAchievements pop-ups: top right, stacked, 5 s each (only the first few at a time)
+    {
+        auto& list = ra::popups();
+        const double secs = double(now) / double(kTbClock);
+        constexpr double kShow = 5.0;
+        float y = 18.f * ui;
+        int shown = 0;
+        for (auto it = list.begin(); it != list.end() && shown < 3; shown++) {
+            if (it->shownAt < 0) it->shownAt = secs;
+            const double age = secs - it->shownAt;
+            if (age > kShow) {
+                it = list.erase(it);
+                continue;
+            }
+            const float a = float(std::min({1.0, age / 0.25, (kShow - age) / 0.5}));
+            const float px = 19.f * ui, tpx = 16.f * ui, badge = 64.f * ui, padIn = 12.f * ui;
+            // the text: a title line, then the text's lines (split at '\n')
+            std::vector<std::string> lines;
+            for (size_t p0 = 0; p0 <= it->text.size();) {
+                const size_t nl = it->text.find('\n', p0);
+                lines.push_back(it->text.substr(p0, nl == std::string::npos ? std::string::npos : nl - p0));
+                if (nl == std::string::npos) break;
+                p0 = nl + 1;
+            }
+            float tw = textWidth(s_font, tpx, it->title.c_str(), 2.f * ui);
+            for (const auto& l : lines) tw = std::max(tw, textWidth(s_font, px, l.c_str(), 0.f));
+            void* tex = ra::image(it->badgeUrl);
+            const float textX = it->badgeUrl.empty() ? padIn : padIn * 2.f + badge;
+            const float w = std::min(textX + tw + padIn * 1.5f, io.DisplaySize.x * 0.6f);
+            const float h = std::max(badge, tpx + 6.f * ui + float(lines.size()) * (px + 4.f * ui)) + padIn * 2.f;
+            const float slide = (1.f - std::min(1.f, float(age / 0.25))) * 40.f * ui;
+            const ImVec2 pa(io.DisplaySize.x - w - 18.f * ui + slide, y), pb(pa.x + w, y + h);
+            panel(fg, pa, pb, 10.f * ui, alpha(IM_COL32(8, 18, 38, 255), int(230 * a)), alpha(IM_COL32(2, 6, 14, 255), int(240 * a)),
+                  alpha(kGold, int(200 * a)), 1.5f * ui);
+            if (tex)
+                fg->AddImage(ImTextureID(uintptr_t(tex)), ImVec2(pa.x + padIn, pa.y + padIn),
+                             ImVec2(pa.x + padIn + badge, pa.y + padIn + badge), ImVec2(0, 0), ImVec2(1, 1), alpha(IM_COL32_WHITE, int(255 * a)));
+            float ty = pa.y + padIn;
+            drawText(fg, s_font, tpx, ImVec2(pa.x + textX, ty), alpha(kAmber, int(255 * a)), it->title.c_str(), 2.f * ui);
+            ty += tpx + 6.f * ui;
+            for (size_t i = 0; i < lines.size(); i++) {
+                drawText(fg, s_font, px, ImVec2(pa.x + textX, ty), alpha(i == 0 ? kGold : kText, int(255 * a)), lines[i].c_str(), 0.f);
+                ty += px + 4.f * ui;
+            }
+            y = pb.y + 10.f * ui;
+            ++it;
         }
     }
     if (cinematicSkip()) {

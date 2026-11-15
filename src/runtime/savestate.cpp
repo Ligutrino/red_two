@@ -20,6 +20,7 @@
 #include <thread>
 
 #include "runtime.h"
+#include "achievements.h"
 #include "savestate.h"
 #include "settings.h"
 
@@ -29,7 +30,7 @@ volatile bool g_pending = false;
 
 namespace {
 
-constexpr u32 kVersion = 2;  // 2: the port arena (memory.cpp)
+constexpr u32 kVersion = 3;  // 2: the port arena (memory.cpp); 3: RetroAchievements progress
 struct Header {
     char magic[4];   // "R2ST"
     u32 version;
@@ -95,6 +96,7 @@ void rootSave() {
     musyxSaveState(w);
     hleSaveState(w);
     gfx::bridgeSaveState(w);
+    ra::saveState(w);
     w.section("END ");
     s_done = Done::Saved;
 }
@@ -113,6 +115,7 @@ void rootLoad() {
     musyxLoadState(r);
     hleLoadState(r);
     gfx::bridgeLoadState(r);
+    ra::loadState(r);
     r.section("END ");
     // (the file's checksum matched: a mismatch here is a bug, and the machine is half restored)
     if (!r.ok) fatal("save state %d did not fit this build's layout", s_doneSlot);
@@ -304,6 +307,7 @@ void service(Ctx&) {
         gfx::bridgeAfterLoad();
         audio::flush();
         hleAfterLoad();
+        ra::afterLoad();
         g_irqPending = 1;
         logf("state", "slot %d loaded", s_doneSlot);
         message("STATE %d LOADED", s_doneSlot);

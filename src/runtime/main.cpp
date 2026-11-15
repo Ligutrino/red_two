@@ -22,6 +22,7 @@
 #include "gfx/gx_bridge.h"
 #include "hw/gx_fifo.h"
 #include "mods.h"
+#include "achievements.h"
 #include "runtime.h"
 #include "settings.h"
 #include "../common/disc_image.h"
@@ -94,6 +95,15 @@ void restartGame() {
     CloseHandle(pi.hProcess);
     logf("main", "restarting");
     quit(0);
+}
+
+// The menu's reset, like the console's reset button: the game starts over from the boot screen
+// in a new instance (as after a save import); the memory card's last writes and a save state
+// still being written reach their files first.
+void resetGame() {
+    state::finishWrites();
+    cardFlushNow();
+    restartGame();
 }
 
 // The host call stack, symbolized from the PDB (fatal errors only).
@@ -560,6 +570,7 @@ int main(int argc, char** argv) {
         if (disc.empty()) fatal("no disc image: pass --disc <your Rogue Leader .iso or .rvz>");
     }
     if (!discOpen(disc)) fatal("cannot open the disc image %s", disc.c_str());
+    ra::init(disc);  // RetroAchievements: hashes the disc and logs in meanwhile (if enabled)
     loadFst();
     Ctx* boot = nullptr;
     threadsInit(boot);

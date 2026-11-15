@@ -86,6 +86,8 @@ struct DolphinScan {
     std::vector<Code> codes;             // this game's codes (with Dolphin's enabled state)
 };
 DolphinScan scanDolphin();  // R2_DOLPHIN_DIR=<User folder> overrides the search
+// folders holding Dolphin's .ini files (Dolphin.ini, RetroAchievements.ini, ...), most likely first
+std::vector<std::string> dolphinConfigDirs();
 
 // Saves: writes the save into Red Two's memory card image (the old image is kept in
 // saves/backup). Returns false with a message on failure.
