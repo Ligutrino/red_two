@@ -156,11 +156,18 @@ void pollEvents() {
 // (rebuild_pipeline_cache, in the order the game first used them); with Dawn's blob cache that
 // takes ~2 s, after a graphics driver update each one compiles again (~25 ms on Aurora's one
 // worker: ~55 s for 2,100; patch 0020's 8 workers: ~10 s). The texture packs' prefetch (mods.cpp,
-// setting prefetch_textures) runs meanwhile and is waited for too. R2_NO_PRECOMPILE=1 starts the
-// game at once.
+// setting prefetch_textures) runs meanwhile and is waited for too. The setting
+// precompile_shaders off (Display page) or R2_NO_PRECOMPILE=1 starts the game at once: the
+// queue is still built, on the workers while the game runs, and a draw whose pipeline is not
+// built yet is skipped (or drawn by the ubershader, if that is on) until it is.
 void precompileShaders() {
     const AuroraStats* st = aurora_get_stats();
-    if (!st || envFlag("R2_NO_PRECOMPILE")) return;
+    if (!st) return;
+    if (envFlag("R2_NO_PRECOMPILE") || !settings::get().precompileShaders) {
+        logf("gfx", "shaders not precompiled (setting): %u from the cache compile while the game runs",
+             st->createdPipelines + st->queuedPipelines);
+        return;
+    }
     const u64 t0 = tbNow();
     u32 total = 0;
     bool waited = false;
@@ -1814,6 +1821,10 @@ bool init(int argc, char** argv) {
     SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON, "1");
     SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON_SMALL, "1");
 #endif
+    // The ubershader mode before Aurora loads the pipeline cache: with them off, the uber
+    // pipelines are neither derived from the cached shaders nor built from their stored rows
+    // (patch 0028) - Aurora's own default is on, and applyDisplaySettings below comes too late.
+    AuroraSetUberShaders(uberShaderMode());
     const AuroraInfo info = aurora_initialize(argc, argv, &cfg);
     if (background) {
         if (SDL_Window* w = aurora_get_window()) {

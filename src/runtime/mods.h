@@ -4,6 +4,7 @@
 //
 // Files live next to settings.ini (%APPDATA%\Red Two\):
 //   textures\GSWE64\...   texture packs, laid out as in Dolphin's Load\Textures
+//   (and wherever the setting textures_folder points: a pack left where it was unpacked)
 //   codes.ini             Gecko / Action Replay codes and patches ([Gecko], [Gecko_Enabled], ...)
 // Automated runs (R2_BACKGROUND, R2_HEADLESS, R2_INPUT) load neither unless asked:
 // R2_TEXTURES=1 (or R2_TEXTURES_DIR=<textures root>) and R2_CODES=<codes.ini>.
@@ -26,9 +27,17 @@ std::string texturesDir();  // where texture packs go (userDir()/textures/)
 // GSW.txt or all.txt somewhere inside.
 std::vector<std::string> packFolders(const std::string& root);
 
+// A folder chosen in the menu (setting textures_folder) can be anything: the downloaded pack's
+// own folder (holding GSWE64), GSWE64 itself, or a pack with its files right inside. Its pack:
+// the folder itself when it is named GSWE64 / GSW (Pack), else its GSWE64 / GSW subfolder
+// (HoldsPack), else the folder itself (Other). No recursive scan: it may be a large folder.
+enum class FolderKind { Missing, Pack, HoldsPack, Other };
+FolderKind textureFolderKind(const std::string& dir, std::string* packDir = nullptr);
+
 struct PackInfo {
     std::string path;
     size_t textures = 0;  // replacement registrations
+    bool chosen = false;  // from the folder chosen in the menu (not Red Two's textures folder)
 };
 void texturesInit();               // after Aurora is up: load the packs if enabled
 void setTexturesEnabled(bool on);  // load / unload now (the menu)

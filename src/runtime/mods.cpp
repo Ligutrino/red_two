@@ -93,12 +93,23 @@ void unload() {
 
 void load() {
     unload();
-    const std::string root = texturesRoot();
-    if (root.empty()) return;
-    for (const std::string& dir : packFolders(root)) {
+    // Red Two's own textures folder (Dolphin's rules), then the folder chosen in the menu
+    std::vector<std::pair<std::string, bool>> dirs;  // pack folder, chosen
+    if (const std::string root = texturesRoot(); !root.empty())
+        for (const std::string& dir : packFolders(root)) dirs.emplace_back(dir, false);
+    if (const std::string& chosen = settings::get().texturesFolder; !chosen.empty()) {
+        std::string pack;
+        if (textureFolderKind(chosen, &pack) == FolderKind::Missing) logf("mods", "texture folder %s: not found", chosen.c_str());
+        else dirs.emplace_back(pack, true);
+    }
+    for (size_t i = 0; i < dirs.size(); i++) {
+        const auto& [dir, chosen] = dirs[i];
+        bool seen = false;  // (the chosen folder may be Red Two's own pack)
+        for (size_t j = 0; j < i; j++) seen |= ieq(dirs[j].first, dir.c_str());
+        if (seen) continue;
         auto group = aurora::texture::load_replacement_directory(u8(dir));
-        PackInfo info{dir, group.registrations.size()};
-        logf("mods", "texture pack %s: %zu textures", dir.c_str(), info.textures);
+        PackInfo info{dir, group.registrations.size(), chosen};
+        logf("mods", "texture pack %s: %zu textures%s", dir.c_str(), info.textures, chosen ? " (chosen folder)" : "");
         s_groups.push_back(std::move(group));
         s_packs.push_back(std::move(info));
     }
@@ -176,6 +187,22 @@ std::vector<std::string> packFolders(const std::string& root) {
         add(r / *rel.begin());
     }
     return out;
+}
+
+FolderKind textureFolderKind(const std::string& dir, std::string* packDir) {
+    std::error_code ec;
+    if (dir.empty() || !fs::is_directory(u8(dir), ec)) return FolderKind::Missing;
+    fs::path p = u8(dir).lexically_normal();
+    if (!p.has_filename() && p != p.root_path()) p = p.parent_path();  // (a trailing separator)
+    const auto found = [&](const fs::path& pack, FolderKind kind) {
+        if (packDir) *packDir = str(pack);
+        return kind;
+    };
+    const std::string name = str(p.filename());
+    if (ieq(name, "GSWE64") || ieq(name, "GSW")) return found(p, FolderKind::Pack);
+    if (fs::is_directory(p / "GSWE64", ec)) return found(p / "GSWE64", FolderKind::HoldsPack);
+    if (fs::is_directory(p / "GSW", ec)) return found(p / "GSW", FolderKind::HoldsPack);
+    return found(p, FolderKind::Other);
 }
 
 void texturesInit() {

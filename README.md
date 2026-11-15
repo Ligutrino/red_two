@@ -81,7 +81,10 @@ as the screen. Settings, saves, states and logs live in `~/.local/share/Red Two/
   `R2_CARD_A=<path>` uses another card image.
 - **Mods** (F1, MODS tab): texture packs in Dolphin's format go in
   `%APPDATA%\Red Two\textures\` (a `GSWE64` folder inside, exactly as in Dolphin's
-  `Load\Textures`; `.dds` and `.png`, mip files and wildcards work). Gecko / Action Replay codes and
+  `Load\Textures`; `.dds` and `.png`, mip files and wildcards work), or stay wherever you unpacked
+  them: MODS -> Texture pack folder opens a folder browser (d-pad / stick, A opens, X goes up, B
+  back) - pick the pack's folder (the one holding `GSWE64`, or `GSWE64` itself), e.g. in Downloads
+  or on an SD card. Gecko / Action Replay codes and
   patches go in `%APPDATA%\Red Two\codes.ini` (Dolphin's GameSettings format) and can be switched
   in the menu. The game is recompiled ahead of time, so codes that change its code (Gecko C2
   "insert ASM", writes into code) cannot work; the menu marks them as not supported.
@@ -91,6 +94,10 @@ as the screen. Settings, saves, states and logs live in `~/.local/share/Red Two/
   `Dolphin.ini`) and brings over this game's newest save (from GCI folders or `.raw` cards; the
   previous card is kept in `saves\backup`, and the game restarts), its texture packs (copied) and
   its codes (with their on/off states). `R2_DOLPHIN_DIR=<User folder>` points it elsewhere.
+- **Shaders** (F1, DISPLAY -> PERFORMANCE): "Prepare shaders at start" (on) compiles every shader
+  the game has used on this device before it starts; off, the game starts at once and objects may
+  pop in while their shaders compile. "Ubershaders" (off) draws not-yet-compiled objects with a
+  generic shader instead of skipping them.
 - `R2_NO_AUDIO=1` runs without sound. Every session writes a log to `%APPDATA%\Red Two\logs`
   (Linux: `~/.local/share/Red Two/logs`); `--console` shows it in a console window on Windows.
 

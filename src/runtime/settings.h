@@ -31,8 +31,14 @@ struct Settings {
     int fps = 60;  // 60, 90, 120 or 144: the emulated retrace rate
     bool showFps = false;
     // While a shader compiles, a generic one (Aurora's ubershader) draws the object instead of it
-    // being skipped (Dolphin's hybrid ubershaders)
-    bool ubershaders = true;
+    // being skipped (Dolphin's hybrid ubershaders). Off by default (the user's call): it is the
+    // shader that crashed the Steam Deck's driver before patch 0027, and with shaders compiled
+    // before the game starts only shaders never seen before pop in.
+    bool ubershaders = false;
+    // Every shader in the cache compiled before the game starts ("PREPARING SHADERS",
+    // gx_bridge.cpp precompileShaders). Off: the game starts at once and they compile while it
+    // runs (objects whose shader is not ready yet are skipped for a few frames: pop-in).
+    bool precompileShaders = true;
     // audio
     int volume = 100;            // master volume, 0..100 (output gain (volume/100)^2)
     bool backgroundAudio = true;  // keep playing while the window is in the background
@@ -59,6 +65,9 @@ struct Settings {
     // mods
     bool customTextures = true;  // texture packs in the textures folder (Dolphin's format; mods.cpp)
     bool prefetchTextures = true;  // the packs loaded into memory up front (Dolphin's prefetch)
+    // A folder anywhere (picked in the MODS page's folder browser) whose texture packs load too,
+    // besides Red Two's own textures folder: e.g. a pack unpacked in ~/Downloads. Empty: none.
+    std::string texturesFolder;
     // controls
     bool xboxButtons = true;  // on-screen button prompts as on an Xbox controller (gfx/button_icons.cpp)
     // save states (savestate.cpp): the slot the hotkeys use, and the hotkeys (hotkeys.cpp), each a

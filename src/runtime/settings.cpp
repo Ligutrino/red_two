@@ -61,6 +61,7 @@ void set(const std::string& key, const std::string& value) {
     else if (key == "fps") { for (int f : kFpsChoices) if (f == n) s.fps = n; }
     else if (key == "show_fps") s.showFps = parseBool(value);
     else if (key == "ubershaders") s.ubershaders = parseBool(value);
+    else if (key == "precompile_shaders") s.precompileShaders = parseBool(value);
     else if (key == "hud_edges") s.hudEdges = parseBool(value);
     else if (key == "tile_menus") s.tileMenus = parseBool(value);
     else if (key == "game_dither") s.gameDither = parseBool(value);
@@ -81,6 +82,7 @@ void set(const std::string& key, const std::string& value) {
     else if (key == "ra_encore") s.raEncore = parseBool(value);
     else if (key == "custom_textures") s.customTextures = parseBool(value);
     else if (key == "prefetch_textures") s.prefetchTextures = parseBool(value);
+    else if (key == "textures_folder") s.texturesFolder = value;
     else if (key == "xbox_buttons") s.xboxButtons = parseBool(value);
     else if (key == "state_slot") s.stateSlot = n < 1 ? 1 : n > 8 ? 8 : n;
     else {
@@ -120,7 +122,7 @@ void load() {
     }
     if (!s_path.empty()) {
         if (FILE* f = fopen(s_path.c_str(), "r")) {
-            char buf[512];
+            char buf[4096];  // (textures_folder holds a path)
             while (fgets(buf, sizeof buf, f)) parseLine(buf);
             fclose(f);
             logf("config", "settings from %s", s_path.c_str());
@@ -163,16 +165,16 @@ void load() {
 // every setting on one line, for the session log
 std::string summary() {
     const Settings& s = s_settings;
-    char b[1024];
+    char b[2048];
     snprintf(b, sizeof b,
-             "fullscreen=%d resolution=%s aspect=%s fps=%d ubershaders=%d hud_edges=%d tile_menus=%d game_dither=%d "
+             "fullscreen=%d resolution=%s aspect=%s fps=%d ubershaders=%d precompile_shaders=%d hud_edges=%d tile_menus=%d game_dither=%d "
              "show_fps=%d volume=%d background_audio=%d skip_logos=%d skip_cutscenes=%d fast_disc=%d invincible=%d "
              "infinite_lives=%d infinite_ammo=%d perfect_stats=%d all_craft=%d custom_textures=%d prefetch_textures=%d "
-             "xbox_buttons=%d state_slot=%d achievements=%d ra_user=%s ra_notifications=%d ra_encore=%d",
-             s.fullscreen, resolutionName(s.resolution), aspectName(s.aspect), s.fps, s.ubershaders, s.hudEdges,
+             "textures_folder=%s xbox_buttons=%d state_slot=%d achievements=%d ra_user=%s ra_notifications=%d ra_encore=%d",
+             s.fullscreen, resolutionName(s.resolution), aspectName(s.aspect), s.fps, s.ubershaders, s.precompileShaders, s.hudEdges,
              s.tileMenus, s.gameDither, s.showFps, s.volume, s.backgroundAudio, s.skipLogos, s.skipCutscenes,
              s.fastDisc, s.invincible, s.infiniteLives, s.infiniteAmmo, s.perfectStats, s.allCraft, s.customTextures,
-             s.prefetchTextures, s.xboxButtons, s.stateSlot, s.achievements, s.raUser.empty() ? "-" : s.raUser.c_str(),
+             s.prefetchTextures, s.texturesFolder.empty() ? "-" : s.texturesFolder.c_str(), s.xboxButtons, s.stateSlot, s.achievements, s.raUser.empty() ? "-" : s.raUser.c_str(),
              s.raNotifications, s.raEncore);
     return b;
 }
@@ -196,6 +198,8 @@ void save() {
     fprintf(f, "show_fps=%d\n", s.showFps);
     fprintf(f, "# a generic shader draws objects whose own shader is still compiling (no pop-in)\n");
     fprintf(f, "ubershaders=%d\n", s.ubershaders);
+    fprintf(f, "# every shader this PC has seen compiled before the game starts (0: start at once, shaders compile in play)\n");
+    fprintf(f, "precompile_shaders=%d\n", s.precompileShaders);
     fprintf(f, "hud_edges=%d\n", s.hudEdges);
     fprintf(f, "tile_menus=%d\n", s.tileMenus);
     fprintf(f, "# the game's own dither pattern (made for 640x480: a grid at higher resolutions)\n");
@@ -217,6 +221,8 @@ void save() {
     fprintf(f, "custom_textures=%d\n", s.customTextures);
     fprintf(f, "# texture packs loaded into memory before the game starts (up to half the RAM)\n");
     fprintf(f, "prefetch_textures=%d\n", s.prefetchTextures);
+    fprintf(f, "# another folder whose texture packs load too (the folder holding GSWE64, or GSWE64 itself); empty: none\n");
+    fprintf(f, "textures_folder=%s\n", s.texturesFolder.c_str());
     fprintf(f, "# on-screen button prompts: 1 as on an Xbox controller, 0 GameCube\n");
     fprintf(f, "xbox_buttons=%d\n", s.xboxButtons);
     fprintf(f, "# RetroAchievements (softcore): the account and its login token (not the password)\n");

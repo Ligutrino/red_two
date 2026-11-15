@@ -16,5 +16,6 @@ void menuDraw();                       // inside a frame, before it ends (ImGui)
 // menu.cpp: the startup screen while shaders compile and textures prefetch (inside a frame)
 void drawShaderProgress(u32 done, u32 total, u64 texDone, u64 texTotal, u64 texBytes);
 void applyDisplaySettings();           // resolution, aspect, fullscreen, frame rate -> Aurora/VI
+int uberShaderMode();                  // AuroraSetUberShaders' mode: 0 off, 1 hybrid (R2_UBER overrides)
 void menuImGuiInit(const void* windowSize);  // Aurora's ImGui init callback: fonts and style
 }  // namespace rt::gfx

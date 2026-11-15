@@ -29,6 +29,7 @@
 #include <SDL3/SDL_filesystem.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -222,6 +223,10 @@ bool s_nav[NavCount];    // this frame: pressed (or repeated, for directions)
 bool s_padPress[NavCount] = {};  // this frame's controller presses, also while they are not for navigating (typing)
 bool s_navFresh = true;  // just opened: buttons already held are not presses
 bool s_usingPad = false; // the last input came from a controller (button hints)
+// this frame's press is a new one, not the repeat of a held direction: ON / OFF switches take
+// only these (a held d-pad / stick / arrow key repeats every 0.09 s, and on a switch row it
+// flipped the setting back and forth - the user's log: fast_disc 22 times in 1.4 s)
+bool s_navFirst[NavCount];
 
 void readPads(bool held[NavCount]) {
     static bool last[NavCount] = {};  // while the input thread updates the controllers (a device scan)
@@ -266,17 +271,19 @@ void pollNav(bool enabled) {
     for (int k = 0; k < NavCount; k++) {
         NavKey& st = s_navKey[k];
         const bool repeats = k <= NavRight;
-        bool fire = false;
+        bool fire = false, again = false;
         if (held[k] && !st.held) {
             fire = !s_navFresh;
             st.next = now + 0.40;
         } else if (held[k] && repeats && now >= st.next) {
             fire = !s_navFresh;
+            again = true;
             st.next = now + 0.09;
         }
         st.held = held[k];
         s_padPress[k] = fire;
         s_nav[k] = fire && enabled;
+        s_navFirst[k] = s_nav[k] && !again;
         if (s_nav[k]) s_usingPad = true;
     }
     s_navFresh = false;
@@ -293,9 +300,12 @@ void pollNav(bool enabled) {
     kb[NavClear] = ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false);
     kb[NavPrevTab] = ImGui::IsKeyPressed(ImGuiKey_Q, false) || (shift && ImGui::IsKeyPressed(ImGuiKey_Tab, false));
     kb[NavNextTab] = ImGui::IsKeyPressed(ImGuiKey_E, false) || (!shift && ImGui::IsKeyPressed(ImGuiKey_Tab, false));
+    // (ImGui's repeats: pressed with repeat but not without it)
+    const ImGuiKey dirKeys[] = {ImGuiKey_UpArrow, ImGuiKey_DownArrow, ImGuiKey_LeftArrow, ImGuiKey_RightArrow};
     for (int k = 0; k < NavCount; k++)
         if (kb[k]) {
             s_nav[k] = true;
+            if (k > NavRight || ImGui::IsKeyPressed(dirKeys[k], false)) s_navFirst[k] = true;
             s_usingPad = false;
         }
 }
@@ -493,7 +503,8 @@ bool rebindingNow() {
 float s_ui = 1.f;      // size of the UI: the display's height / 1080
 float s_valueX = 0.f;  // where values start in a row
 struct RowInput {
-    int dx = 0;  // left -1 / right +1
+    int dx = 0;       // left -1 / right +1 (repeating while held)
+    int dxFirst = 0;  // the same, new presses only
     bool accept = false, clear = false;
 } s_in;
 int s_row = 0;               // rows drawn so far on this page
@@ -568,7 +579,7 @@ bool onOff(const char* id, bool& v, bool sel) {
 bool toggleRow(const char* text, bool& v, const char* help = nullptr) {
     const bool sel = rowBegin(text, help);
     bool changed = onOff(text, v, sel);
-    if (sel && (s_in.accept || s_in.dx != 0)) {
+    if (sel && (s_in.accept || s_in.dxFirst != 0)) {  // (held: once)
         v = !v;
         changed = true;
     }
@@ -755,8 +766,13 @@ void pageDisplay(settings::Settings& s) {
     if (fpsRow("Frame rate", s.fps, "Above 60 the game runs more frames per second at its normal speed."))
         s_changed = s_display = true;
     if (toggleRow("Show frame rate", s.showFps, "Frames per second in the top-left corner.")) s_changed = true;
+    if (toggleRow("Prepare shaders at start", s.precompileShaders,
+                  "Before the game starts, compiles every shader it has used on this device (PREPARING SHADERS). Off: "
+                  "the game starts at once and objects may pop in while their shaders compile. From the next start."))
+        s_changed = true;
     if (toggleRow("Ubershaders", s.ubershaders,
-                  "A shader seen for the first time is drawn with a generic one while it compiles: no pop-in."))
+                  "A shader seen for the first time is drawn with a generic one while it compiles: no pop-in, but more "
+                  "GPU work."))
         s_changed = s_display = true;
 }
 
@@ -1002,14 +1018,230 @@ std::string gigabytes(uint64_t b) {
     return t;
 }
 
+// a folder in the system's file manager. Linux paths start with '/', so file:// + the path (it was
+// "file:///" + "/home/...": four slashes); every byte but unreserved ones and separators is
+// percent-encoded ("Red Two", non-ASCII names, '#', '%').
 void openFolder(const std::string& dir) {
+#ifdef _WIN32
     std::string url = "file:///";
-    for (char c : dir) {
+#else
+    std::string url = "file://";
+#endif
+    static const char kHex[] = "0123456789ABCDEF";
+    for (const unsigned char c : dir) {
         if (c == '\\') url += '/';
-        else if (c == ' ') url += "%20";
-        else url += c;
+        else if (std::isalnum(c) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~' || c == ':') url += char(c);
+        else {
+            url += '%';
+            url += kHex[c >> 4];
+            url += kHex[c & 15];
+        }
     }
-    SDL_OpenURL(url.c_str());
+    if (!SDL_OpenURL(url.c_str())) logf("menu", "cannot open %s: %s", url.c_str(), SDL_GetError());
+    else logf("menu", "opened %s", url.c_str());
+}
+
+// text shortened with "..." to fit `w` pixels in the current font
+std::string fitText(const std::string& text, float w) {
+    if (ImGui::CalcTextSize(text.c_str()).x <= w) return text;
+    std::string t = text;
+    while (!t.empty() && ImGui::CalcTextSize((t + "...").c_str()).x > w) {
+        t.pop_back();
+        while (!t.empty() && (static_cast<unsigned char>(t.back()) & 0xC0) == 0x80) t.pop_back();  // (whole UTF-8 characters)
+        if (!t.empty() && static_cast<unsigned char>(t.back()) >= 0xC0) t.pop_back();
+    }
+    return t + "...";
+}
+
+// --- choosing a texture pack folder ----------------------------------------------------------
+// The MODS page's folder browser: a pack can stay where it was unpacked (~/Downloads, an SD card)
+// instead of going into Red Two's own folder. It is part of the menu, driven like every page: a
+// system file dialog or file manager does not show in the Steam Deck's Game Mode.
+// A opens a folder (or picks "Use this folder"), X / Backspace goes up, B / Esc goes back.
+struct BrowseEntry {
+    std::string name, path;
+    bool pack = false;  // named GSWE64 / GSW, or holding such a folder
+};
+bool s_browsing = false;
+std::string s_browseDir;                 // the folder shown
+std::string s_browseParent;              // its parent ("" at a root)
+std::vector<BrowseEntry> s_browseList;   // its folders
+std::vector<BrowseEntry> s_browsePlaces; // home, Downloads, SD cards / drives
+std::string s_browseNote;                // what choosing it loads
+std::string s_browseError;               // why it could not be listed
+int s_browseReturnRow = 0;               // the MODS page's row to go back to
+bool s_browseLeft = false;               // left this frame: the page's rows were the browser's
+
+std::filesystem::path u8path(const std::string& s) { return std::filesystem::path(std::u8string(s.begin(), s.end())); }
+std::string u8str(const std::filesystem::path& p) {
+    const std::u8string s = p.u8string();
+    return std::string(s.begin(), s.end());
+}
+// without a trailing separator, but for a root ("/", "C:\")
+std::filesystem::path tidyPath(const std::string& dir) {
+    std::filesystem::path p = u8path(dir).lexically_normal();
+    if (!p.has_filename() && p != p.root_path()) p = p.parent_path();
+    return p;
+}
+
+std::vector<BrowseEntry> browsePlaces() {
+    namespace fs = std::filesystem;
+    std::vector<BrowseEntry> out;
+    std::vector<std::string> seen;  // canonical paths (an SD card can be reached through a link too)
+    const auto add = [&](const std::string& name, const char* dir) {
+        std::error_code ec;
+        if (!dir || !*dir || !fs::is_directory(u8path(dir), ec)) return;
+        const fs::path p = tidyPath(dir);
+        const std::string key = u8str(fs::weakly_canonical(p, ec));
+        for (const auto& s : seen)
+            if (s == key) return;
+        seen.push_back(key);
+        out.push_back({name, u8str(p), false});
+    };
+    add("Home", SDL_GetUserFolder(SDL_FOLDER_HOME));
+    add("Downloads", SDL_GetUserFolder(SDL_FOLDER_DOWNLOADS));
+    add("Desktop", SDL_GetUserFolder(SDL_FOLDER_DESKTOP));
+#ifdef _WIN32
+    for (char d = 'C'; d <= 'Z'; d++) {
+        const char root[4] = {d, ':', '\\', 0};
+        add(std::string("Drive ") + d + ":", root);
+    }
+#else
+    // SD cards and USB drives: SteamOS (udisks) mounts them in /run/media/<user>/<label>
+    const char* user = getenv("USER");
+    for (const std::string base : {std::string("/run/media/") + (user ? user : ""), std::string("/run/media")}) {
+        std::error_code ec;
+        for (fs::directory_iterator it(u8path(base), fs::directory_options::skip_permission_denied, ec), end;
+             !ec && it != end; it.increment(ec)) {
+            std::error_code e2;
+            const std::string name = u8str(it->path().filename());
+            if (!it->is_directory(e2) || name == "root" || (user && name == user)) continue;  // (users' mount folders)
+            add("SD card / drive: " + name, u8str(it->path()).c_str());
+        }
+    }
+#endif
+    add("Red Two's folder", mods::userDir().c_str());
+    return out;
+}
+
+void browseOpen(const std::string& dir) {
+    namespace fs = std::filesystem;
+    const fs::path p = tidyPath(dir);
+    s_browseDir = u8str(p);
+    s_browseParent = p.has_relative_path() ? u8str(p.parent_path()) : std::string();
+    s_browseList.clear();
+    s_browseError.clear();
+    std::error_code ec;
+    for (fs::directory_iterator it(p, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        std::error_code e2;
+        if (!it->is_directory(e2)) continue;  // (links to folders count)
+        const std::string name = u8str(it->path().filename());
+        if (name.empty() || name[0] == '.') continue;  // hidden
+        const std::string path = u8str(it->path());
+        const auto kind = mods::textureFolderKind(path);
+        s_browseList.push_back({name, path, kind == mods::FolderKind::Pack || kind == mods::FolderKind::HoldsPack});
+    }
+    if (ec) s_browseError = "Cannot read this folder: " + ec.message();
+    std::sort(s_browseList.begin(), s_browseList.end(),
+              [](const BrowseEntry& a, const BrowseEntry& b) { return SDL_strcasecmp(a.name.c_str(), b.name.c_str()) < 0; });
+    std::string pack;
+    switch (mods::textureFolderKind(s_browseDir, &pack)) {
+    case mods::FolderKind::Pack: s_browseNote = "This is a texture pack folder: its textures load."; break;
+    case mods::FolderKind::HoldsPack: s_browseNote = "Holds a texture pack: " + pack + " loads."; break;
+    default:
+        s_browseNote = "No GSWE64 folder here: open your pack's folder, or use this one only if the pack's files are "
+                       "inside it.";
+        break;
+    }
+    s_rowSel[Mods] = 0;
+    s_scrollToSel = true;
+}
+
+void browseStart(const settings::Settings& s) {
+    std::error_code ec;
+    s_browseReturnRow = s_rowSel[Mods];
+    s_browsePlaces = browsePlaces();
+    std::string start = s.texturesFolder;
+    if (start.empty() || !std::filesystem::is_directory(u8path(start), ec)) {
+        const char* dl = SDL_GetUserFolder(SDL_FOLDER_DOWNLOADS);
+        const char* home = SDL_GetUserFolder(SDL_FOLDER_HOME);
+        start = dl && std::filesystem::is_directory(u8path(dl), ec) ? dl : home ? home : "/";
+    }
+    s_browsing = true;
+    browseOpen(start);
+}
+
+void browseClose() {
+    if (!s_browsing) return;
+    s_browsing = false;
+    s_browseLeft = true;
+    s_rowSel[Mods] = s_browseReturnRow;
+    s_scrollToSel = true;
+}
+
+// a full-width row: a name (shortened to fit) and a tag at the right; true when picked
+bool folderRow(const char* text, const char* tag, const char* help, ImU32 tagCol = kText) {
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float rowW = ImGui::GetContentRegionAvail().x, h = ImGui::GetFrameHeight();
+    const bool sel = rowBegin("", help);
+    ImGui::SetCursorScreenPos(p);
+    ImGui::PushID(text);
+    const bool clicked = ImGui::InvisibleButton("##folder", ImVec2(rowW, h));
+    ImGui::PopID();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float tagW = ImGui::CalcTextSize(tag).x, pad = 20.f * s_ui;
+    const float ty = p.y + (h - ImGui::GetFontSize()) * 0.5f;
+    const std::string label = fitText(text, rowW - tagW - 3.f * pad);
+    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(p.x + pad, ty), sel ? kGold : kText, label.c_str());
+    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(p.x + rowW - tagW - pad, ty), sel ? kGold : tagCol, tag);
+    return clicked || (sel && s_in.accept);
+}
+
+void browseChoose(settings::Settings& s) {
+    s.texturesFolder = s_browseDir;
+    s.customTextures = true;  // (a folder chosen: textures wanted)
+    s_changed = true;
+    browseClose();
+    mods::setTexturesEnabled(true);  // (loads Red Two's folder and the chosen one again)
+    size_t n = 0;
+    for (const auto& p : mods::loadedPacks()) n += p.chosen ? p.textures : 0;
+    s_modsStatus = n ? std::to_string(n) + " replacement textures loaded from " + s.texturesFolder
+                     : "No replacement textures found in " + s.texturesFolder + ".";
+    logf("menu", "texture folder chosen: %s (%zu textures)", s.texturesFolder.c_str(), n);
+}
+
+void pageBrowse(settings::Settings& s) {
+    heading("CHOOSE A TEXTURE PACK FOLDER");
+    ImGui::PushStyleColor(ImGuiCol_Text, vec(kHolo));
+    ImGui::TextWrapped("%s", s_browseDir.c_str());
+    ImGui::PopStyleColor();
+    std::string go;  // (opened after the rows: they read the list)
+    if (folderRow("Use this folder", "SELECT", s_browseNote.c_str(), kAmber)) {
+        browseChoose(s);
+        return;
+    }
+    if (!s_browseParent.empty() && folderRow(".. (parent folder)", "UP", "Back up one folder (X / Backspace too).")) go = s_browseParent;
+    heading("FOLDERS");
+    if (s_browseList.empty()) ImGui::TextDisabled("%s", s_browseError.empty() ? "No folders here." : s_browseError.c_str());
+    for (size_t i = 0; i < s_browseList.size(); i++) {
+        const BrowseEntry& e = s_browseList[i];
+        ImGui::PushID(int(i));
+        if (folderRow(e.name.c_str(), e.pack ? "TEXTURE PACK" : "OPEN",
+                      e.pack ? "A Rogue Leader texture pack (GSWE64): open it, then Use this folder." : "Open this folder.",
+                      e.pack ? kAmber : kDim))
+            go = e.path;
+        ImGui::PopID();
+    }
+    heading("PLACES");
+    for (size_t i = 0; i < s_browsePlaces.size(); i++) {
+        const BrowseEntry& e = s_browsePlaces[i];
+        ImGui::PushID(int(1000 + i));
+        if (folderRow(e.name.c_str(), "GO", e.path.c_str(), kDim)) go = e.path;
+        ImGui::PopID();
+    }
+    if (s_in.clear && !s_browseParent.empty()) go = s_browseParent;
+    if (!go.empty()) browseOpen(go);
 }
 
 // a texture pack copy finished (the menu may be closed by then): load what it brought
@@ -1024,14 +1256,27 @@ void modsPoll() {
 void pageMods(settings::Settings& s) {
     dolphinScanPoll();
     modsPoll();
+    if (s_browsing) {
+        pageBrowse(s);
+        return;
+    }
     const mods::CopyProgress& copy = mods::packCopy();
+    // the last import's / folder choice's outcome (also when Dolphin is not there: the page ends early then)
+    const auto status = [] {
+        if (s_modsStatus.empty()) return;
+        ImGui::Dummy(ImVec2(0, 4.f * s_ui));
+        ImGui::PushStyleColor(ImGuiCol_Text, vec(kHolo));
+        ImGui::TextWrapped("%s", s_modsStatus.c_str());
+        ImGui::PopStyleColor();
+    };
 
     heading("TEXTURE PACKS");
     {
         const auto& packs = mods::loadedPacks();
         std::string help;
-        if (!s.customTextures) help = "Replacement textures in Dolphin's format, from Red Two's textures folder.";
-        else if (packs.empty()) help = "No texture pack for Rogue Leader in Red Two's textures folder yet.";
+        if (!s.customTextures)
+            help = "Replacement textures in Dolphin's format: from Red Two's textures folder and the texture pack folder below.";
+        else if (packs.empty()) help = "No texture pack loaded: choose your pack's folder below (Texture pack folder).";
         else help = std::to_string(mods::loadedTextureCount()) + " replacement textures loaded (Dolphin's format).";
         if (toggleRow("Custom textures", s.customTextures, help.c_str())) {
             s_changed = true;
@@ -1043,10 +1288,43 @@ void pageMods(settings::Settings& s) {
                   "textures appear sharp the first time. Takes effect at the next start.")) {
         s_changed = true;
     }
-    if (buttonRow("Textures folder", "OPEN", "Opens Red Two's textures folder: packs go in a GSWE64 folder inside, as in Dolphin.")) {
+    {  // a pack wherever it was unpacked
+        const int row = s_row;
+        std::string caption = "CHOOSE", help;
+        if (s.texturesFolder.empty()) {
+            help = "Pick the folder of a texture pack you downloaded, e.g. in Downloads: the one holding GSWE64, or "
+                   "GSWE64 itself. No need to copy it anywhere.";
+        } else {
+            caption = fitText(tidyPath(s.texturesFolder).filename().empty() ? s.texturesFolder
+                                                                             : u8str(tidyPath(s.texturesFolder).filename()),
+                              360.f * s_ui);
+            size_t n = 0;
+            for (const auto& p : mods::loadedPacks()) n += p.chosen ? p.textures : 0;
+            std::error_code ec;
+            const bool there = std::filesystem::is_directory(u8path(s.texturesFolder), ec);
+            help = s.texturesFolder + (!there ? ": NOT FOUND." : !s.customTextures ? "" : ": " + std::to_string(n) + " textures.") +
+                   (s_usingPad ? " A: choose another, X: stop using it." : " Enter: choose another, Delete: stop using it.");
+        }
+        if (buttonRow("Texture pack folder", caption.c_str(), help.c_str(), s.texturesFolder.empty() ? kText : kAmber)) {
+            browseStart(s);
+            return;
+        }
+        if (s_rowSel[s_section] == row && s_in.clear && !s.texturesFolder.empty()) {
+            logf("menu", "texture folder forgotten: %s", s.texturesFolder.c_str());
+            s.texturesFolder.clear();
+            s_changed = true;
+            s_modsStatus.clear();
+            mods::reloadTextures();
+        }
+    }
+    if (buttonRow("Red Two's textures folder", "OPEN",
+                  "Opens Red Two's own textures folder in the file manager (packs go in a GSWE64 folder inside, as in "
+                  "Dolphin). Not shown in the Steam Deck's Game Mode: use Texture pack folder there.")) {
+        const std::string dir = mods::texturesDir();  // (one string: begin and end of the same one)
         std::error_code ec;
-        std::filesystem::create_directories(std::filesystem::path(std::u8string(mods::texturesDir().begin(), mods::texturesDir().end())), ec);
-        openFolder(mods::texturesDir());
+        std::filesystem::create_directories(u8path(dir), ec);
+        if (ec) logf("menu", "cannot create %s: %s", dir.c_str(), ec.message().c_str());
+        openFolder(dir);
     }
 
     heading("CODES");
@@ -1071,10 +1349,12 @@ void pageMods(settings::Settings& s) {
     heading("IMPORT FROM DOLPHIN");
     if (!s_dolphinHave) {
         ImGui::TextDisabled("Looking for Dolphin...");
+        status();
         return;
     }
     if (!s_dolphin.found) {
         ImGui::TextDisabled("Dolphin was not found on this PC.");
+        status();
         return;
     }
     {  // save
@@ -1138,12 +1418,7 @@ void pageMods(settings::Settings& s) {
             s_modsStatus = msg;
         }
     }
-    if (!s_modsStatus.empty()) {
-        ImGui::Dummy(ImVec2(0, 4.f * s_ui));
-        ImGui::PushStyleColor(ImGuiCol_Text, vec(kHolo));
-        ImGui::TextWrapped("%s", s_modsStatus.c_str());
-        ImGui::PopStyleColor();
-    }
+    status();
 }
 
 void pageControls() {
@@ -1272,6 +1547,7 @@ void pageControls() {
 // ---------------------------------------------------------------------------------------
 void switchSection(int i) {
     if (i == s_section) return;
+    browseClose();
     s_section = i;
     s_scrollToSel = true;
     s_confirmQuit = false;
@@ -1342,7 +1618,11 @@ bool drawMenu(settings::Settings& s, float t) {
     // input first: B closes, LB / RB switch tabs, up / down move the selection
     const bool rebinding = rebindingNow();
     pollNav(!rebinding && !s_textEditing);  // (typing: the text field takes the keys)
-    if (s_nav[NavBack]) return false;
+    if (s_nav[NavBack]) {
+        if (!s_browsing) return false;
+        browseClose();  // (the folder browser: back to the MODS page)
+        s_nav[NavBack] = false;
+    }
     if (s_nav[NavPrevTab]) switchSection((s_section + SectionCount - 1) % SectionCount);
     if (s_nav[NavNextTab]) switchSection((s_section + 1) % SectionCount);
     {
@@ -1355,6 +1635,7 @@ bool drawMenu(settings::Settings& s, float t) {
     }
     s_in = {};
     s_in.dx = (s_nav[NavRight] ? 1 : 0) - (s_nav[NavLeft] ? 1 : 0);
+    s_in.dxFirst = (s_navFirst[NavRight] ? 1 : 0) - (s_navFirst[NavLeft] ? 1 : 0);
     s_in.accept = s_nav[NavAccept];
     s_in.clear = s_nav[NavClear];
 
@@ -1403,6 +1684,9 @@ bool drawMenu(settings::Settings& s, float t) {
                                   : "Q / E  TABS      ARROWS  MOVE, CHANGE      ENTER  SELECT";
     if (s_section == Controls) hint += s_usingPad ? "      X  CLEAR" : "      DEL  CLEAR";
     hint += s_usingPad ? "      B / BACK  CLOSE" : "      ESC / F1  CLOSE";
+    if (s_section == Mods && s_browsing)
+        hint = s_usingPad ? "D-PAD / STICK  MOVE      A  OPEN, SELECT      X  PARENT FOLDER      B  BACK"
+                          : "ARROWS  MOVE      ENTER  OPEN, SELECT      BACKSPACE  PARENT FOLDER      ESC  BACK";
     drawText(bg, s_font, 16.f * s_ui, ImVec2(a.x + pad, footY), kDim, hint.c_str(), 2.f * s_ui);
 
     // the interactive part: an invisible window over the panel body
@@ -1437,8 +1721,11 @@ bool drawMenu(settings::Settings& s, float t) {
         case Mods: pageMods(s); break;
         }
         ImGui::Dummy(ImVec2(0, 8.f * s_ui));
-        s_rowCount[s_section] = s_row;
-        if (s_row > 0) s_rowSel[s_section] = std::clamp(s_rowSel[s_section], 0, s_row - 1);
+        if (!s_browseLeft) {  // (left the folder browser mid-page: keep the MODS row to return to)
+            s_rowCount[s_section] = s_row;
+            if (s_row > 0) s_rowSel[s_section] = std::clamp(s_rowSel[s_section], 0, s_row - 1);
+        }
+        s_browseLeft = false;
         ImGui::EndChild();
 
         ImGui::PopStyleVar(2);
@@ -1607,6 +1894,7 @@ void padSelfTest() {
 
 void setOpen(bool open) {
     if (!open) cancelCapture();
+    if (!open) browseClose();
     if (open) s_dolphinStale = true;  // Dolphin's files may have changed meanwhile
     s_confirmSave = false;
     s_confirmQuit = false;
@@ -1694,8 +1982,12 @@ void menuEvent(const void* p) {
             if (!s_open) s_padDevice = false;  // Controls shows the keyboard's
             setOpen(!s_open);
         } else if (e.key.key == SDLK_ESCAPE && s_open && !s_textEditing) {
-            logf("menu", "Esc: close");
-            setOpen(false);
+            if (s_browsing) {
+                browseClose();  // (the folder browser: back to the MODS page)
+            } else {
+                logf("menu", "Esc: close");
+                setOpen(false);
+            }
         }
     } else if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
         // Back toggles the menu when it is let go with nothing else pressed meanwhile: Back + RB
@@ -1745,13 +2037,17 @@ static void applyDisplayAspect() {
     AuroraSetDisplayAspect(a);
 }
 
+// ubershaders (Aurora patch 0021): R2_UBER=0/1/2 (off, hybrid, every draw: testing) overrides
+int uberShaderMode() {
+    static const char* uberEnv = getenv("R2_UBER");
+    return uberEnv ? atoi(uberEnv) : settings::get().ubershaders ? 1 : 0;
+}
+
 void applyDisplaySettings() {
     const settings::Settings& s = settings::get();
     VISetFrameBufferScale(settings::resolutionScale(s.resolution));
     applyDisplayAspect();
-    // ubershaders (Aurora patch 0021): R2_UBER=0/1/2 (off, hybrid, every draw: testing) overrides
-    static const char* uberEnv = getenv("R2_UBER");
-    AuroraSetUberShaders(uberEnv ? atoi(uberEnv) : s.ubershaders ? 1 : 0);
+    AuroraSetUberShaders(uberShaderMode());
     // widescreen: letterboxed cinematics fill the screen (4:3 keeps the original bars)
     AuroraSetLetterboxFill(s.aspect != settings::Aspect::R4_3);
     if (SDL_Window* w = aurora_get_window()) {
