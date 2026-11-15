@@ -51,6 +51,11 @@ as the screen. Settings, saves, states and logs live in `~/.local/share/Red Two/
 
 ### Playing
 
+- **Launcher**: Red Two opens on its settings (the same pages as the in-game menu) before the
+  game starts. Start game (the first row) or the controller's START launches it. Turn off
+  "Show launcher at start" there to go straight into the game from then on; the in-game menu
+  (F1 or Back) has the same switch and "Back to launcher". `--launcher` / `--no-launcher` override
+  the setting for one start. A reset from the menu goes straight back into the game.
 - Gamepads work through SDL (with rumble), also while the window is in the background. On an
   Xbox-style pad the face buttons follow the GameCube positions: A = A (fire), X (left) = B,
   B (right) = X, Y = Y; LT/RT = L/R, RB = Z, right stick = C-stick, Menu = Start. Keyboard: WASD or arrows steer, Space = A (fire),
@@ -69,7 +74,7 @@ as the screen. Settings, saves, states and logs live in `~/.local/share/Red Two/
 - **RetroAchievements** (F1 > Achievements): log in with your retroachievements.org account
   (only the login token is stored) or take Dolphin's login; softcore only, so save states and
   cheats stay usable. Unlocks pop up in the top right corner.
-- **Reset game** and **Quit to desktop** are at the top of the menu's first page.
+- **Reset game**, **Back to launcher** and **Quit to desktop** are at the top of the menu's first page.
 - **Save states**: Back + RB saves, Back + LB loads, Back + D-pad right / left picks the slot
   (8 slots; keyboard F5 / F8, F7 / F6). F1 > Controls has the slot, save / load buttons and the
   hotkeys, each any combination of buttons (or keys) held together: pick the row, press A, hold

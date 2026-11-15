@@ -51,7 +51,8 @@ bool steamDeck() {
 void set(const std::string& key, const std::string& value) {
     Settings& s = s_settings;
     const int n = atoi(value.c_str());
-    if (key == "fullscreen") s.fullscreen = parseBool(value);
+    if (key == "launcher") s.launcher = parseBool(value);
+    else if (key == "fullscreen") s.fullscreen = parseBool(value);
     else if (key == "resolution") { if (n >= 0 && n < int(Resolution::Count)) s.resolution = Resolution(n); }
     else if (key == "aspect") {
         if (n >= 0 && n <= 3) s.aspect = Aspect(n);
@@ -167,11 +168,11 @@ std::string summary() {
     const Settings& s = s_settings;
     char b[2048];
     snprintf(b, sizeof b,
-             "fullscreen=%d resolution=%s aspect=%s fps=%d ubershaders=%d precompile_shaders=%d hud_edges=%d tile_menus=%d game_dither=%d "
+             "launcher=%d fullscreen=%d resolution=%s aspect=%s fps=%d ubershaders=%d precompile_shaders=%d hud_edges=%d tile_menus=%d game_dither=%d "
              "show_fps=%d volume=%d background_audio=%d skip_logos=%d skip_cutscenes=%d fast_disc=%d invincible=%d "
              "infinite_lives=%d infinite_ammo=%d perfect_stats=%d all_craft=%d custom_textures=%d prefetch_textures=%d "
              "textures_folder=%s xbox_buttons=%d state_slot=%d achievements=%d ra_user=%s ra_notifications=%d ra_encore=%d",
-             s.fullscreen, resolutionName(s.resolution), aspectName(s.aspect), s.fps, s.ubershaders, s.precompileShaders, s.hudEdges,
+             s.launcher, s.fullscreen, resolutionName(s.resolution), aspectName(s.aspect), s.fps, s.ubershaders, s.precompileShaders, s.hudEdges,
              s.tileMenus, s.gameDither, s.showFps, s.volume, s.backgroundAudio, s.skipLogos, s.skipCutscenes,
              s.fastDisc, s.invincible, s.infiniteLives, s.infiniteAmmo, s.perfectStats, s.allCraft, s.customTextures,
              s.prefetchTextures, s.texturesFolder.empty() ? "-" : s.texturesFolder.c_str(), s.xboxButtons, s.stateSlot, s.achievements, s.raUser.empty() ? "-" : s.raUser.c_str(),
@@ -189,6 +190,8 @@ void save() {
         return;
     }
     fprintf(f, "# Red Two settings (also editable in game: F1 or the controller's Back/Select button)\n");
+    fprintf(f, "# the launcher (these settings before the game starts); 0: straight into the game\n");
+    fprintf(f, "launcher=%d\n", s.launcher);
     fprintf(f, "fullscreen=%d\n", s.fullscreen);
     fprintf(f, "# 0 window size, 1 480p, 2 960p, 3 1440p, 4 2160p (4K)\n");
     fprintf(f, "resolution=%d\n", int(s.resolution));

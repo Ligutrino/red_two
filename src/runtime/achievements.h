@@ -15,6 +15,7 @@ namespace rt::ra {
 
 void init(const std::string& discPath);  // main.cpp, after the settings and the disc
 void frame();                            // hw.cpp onVi: replies, then rc_client_do_frame
+void idle();                             // the launcher (no game running yet): replies, rc_client_idle
 
 // save states: the achievements' progress travels with them
 void saveState(state::Writer& w);

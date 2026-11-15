@@ -599,6 +599,21 @@ void frame() {
     else rc_client_idle(s_client);
 }
 
+// The launcher (gfx/menu.cpp), before the game runs: the server's replies (a login from the
+// ACHIEVEMENTS page) and rc_client's idle work, but no frame - nothing to evaluate yet.
+void idle() {
+    if (!s_client) return;
+    std::vector<std::function<void()>> replies;
+    {
+        std::lock_guard lk(s_repliesMutex);
+        replies.swap(s_replies);
+    }
+    for (auto& r : replies) r();
+    if (!settings::get().achievements) return;
+    startGame();
+    rc_client_idle(s_client);
+}
+
 Status status() {
     Status st;
     st.enabled = settings::get().achievements;

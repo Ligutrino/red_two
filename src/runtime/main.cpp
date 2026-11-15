@@ -186,7 +186,13 @@ void quitToDesktop() {
 
 // After a save import: the game read its save at boot, so a new instance (same program, same
 // arguments, same working folder) takes over and this one quits.
-void restartGame() {
+void restartGame(bool toLauncher) {
+    // the new instance: straight into the game (a reset, a save import) or to the launcher
+#ifdef _WIN32
+    _putenv(toLauncher ? "R2_LAUNCHER=1" : "R2_LAUNCHER=0");
+#else
+    setenv("R2_LAUNCHER", toLauncher ? "1" : "0", 1);
+#endif
 #if defined(__ANDROID__)
     // Android: a small activity in a process of its own ends this one and starts the game
     // again (RestartActivity.java); this thread waits for the end.
@@ -245,10 +251,10 @@ void restartGame() {
 // The menu's reset, like the console's reset button: the game starts over from the boot screen
 // in a new instance (as after a save import); the memory card's last writes and a save state
 // still being written reach their files first.
-void resetGame() {
+void resetGame(bool toLauncher) {
     state::finishWrites();
     cardFlushNow();
-    restartGame();
+    restartGame(toLauncher);
 }
 
 #ifndef _WIN32

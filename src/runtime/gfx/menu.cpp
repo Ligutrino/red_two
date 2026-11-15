@@ -189,6 +189,9 @@ void starfield(ImDrawList* dl, ImVec2 size, float t) {
 // ---------------------------------------------------------------------------------------
 bool s_open = false;
 bool s_focus = false;  // just opened: focus the window
+// The launcher: this menu before the game boots (gx_bridge.cpp runLauncher), with the game's
+// start on its first row; B / Esc / F1 / Back do not close it. s_launch: start was chosen.
+bool s_launcher = false, s_launch = false;
 u64 s_fpsFrames = 0, s_fpsTb = 0;
 float s_fps = 0.f;
 // automated runs: nobody's controller drives the menu (or opens it over a scripted test)
@@ -213,7 +216,7 @@ int s_rowCount[SectionCount] = {};  // the rows each page had when it was last d
 // connects). ImGui's SDL backend lists gamepads once and refreshes the list only on connection
 // events, which Aurora's input router keeps from it, so a controller that showed up after
 // startup (Steam Input's virtual pad, a wireless pad waking up) never reached the menu.
-enum Nav { NavUp, NavDown, NavLeft, NavRight, NavAccept, NavBack, NavClear, NavPrevTab, NavNextTab, NavCount };
+enum Nav { NavUp, NavDown, NavLeft, NavRight, NavAccept, NavBack, NavClear, NavPrevTab, NavNextTab, NavStart, NavCount };
 struct NavKey {
     bool held = false;
     double next = 0.0;  // directions: when the held press repeats
@@ -259,6 +262,7 @@ void readPads(bool held[NavCount]) {
         held[NavClear] |= btn(SDL_GAMEPAD_BUTTON_WEST);
         held[NavPrevTab] |= btn(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
         held[NavNextTab] |= btn(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+        held[NavStart] |= btn(SDL_GAMEPAD_BUTTON_START);  // (the launcher: start the game)
     }
     SDL_free(ids);
 }
@@ -715,6 +719,7 @@ void heading(const char* text) {
 bool s_changed = false, s_display = false;
 bool s_confirmQuit = false;   // quitting asks for a second press
 bool s_confirmReset = false;  // so does resetting
+bool s_confirmLauncher = false;  // and going back to the launcher
 
 // a button that asks for a second press (the selection moving away cancels it)
 bool confirmRow(const char* text, const char* caption, const char* again, bool& armed, const char* help) {
@@ -732,12 +737,31 @@ bool confirmRow(const char* text, const char* caption, const char* again, bool& 
 
 void pageDisplay(settings::Settings& s) {
     heading("GAME");
-    if (confirmRow("Reset game", "RESET", "PRESS AGAIN: RESET", s_confirmReset,
-                   "Start the game over from the boot screen, like the console's reset button. What the game saved to its "
-                   "memory card and your save states are kept; a mission in progress is not.")) {
-        logf("menu", "reset");
-        resetGame();
+    if (s_launcher) {
+        if (buttonRow("Start game", "LAUNCH", "Start Rogue Leader with these settings. The controller's START button "
+                      "does this from any page.", kAmber)) {
+            logf("menu", "launcher: start");
+            s_launch = true;
+        }
+    } else {
+        if (confirmRow("Reset game", "RESET", "PRESS AGAIN: RESET", s_confirmReset,
+                       "Start the game over from the boot screen, like the console's reset button. What the game saved to "
+                       "its memory card and your save states are kept; a mission in progress is not.")) {
+            logf("menu", "reset");
+            resetGame();
+        }
+        if (confirmRow("Back to launcher", "RESTART", "PRESS AGAIN: RESTART", s_confirmLauncher,
+                       "Start over in the launcher, where every setting can be changed before the game starts. The "
+                       "memory card and your save states are kept; a mission in progress is not.")) {
+            logf("menu", "back to launcher");
+            resetGame(true);
+        }
     }
+    if (toggleRow("Show launcher at start", s.launcher,
+                  s_launcher ? "Off: from the next start Red Two goes straight into the game. The launcher comes back "
+                               "with this switch in the in-game menu (F1 or the controller's Back)."
+                             : "On: Red Two opens the launcher before the game starts. Off: straight into the game."))
+        s_changed = true;
     if (confirmRow("Quit to desktop", "QUIT", "PRESS AGAIN: QUIT", s_confirmQuit,
                    "Close Red Two. What the game saved to its memory card and your save states are kept; a mission in "
                    "progress is not.")) {
@@ -767,8 +791,11 @@ void pageDisplay(settings::Settings& s) {
         s_changed = s_display = true;
     if (toggleRow("Show frame rate", s.showFps, "Frames per second in the top-left corner.")) s_changed = true;
     if (toggleRow("Prepare shaders at start", s.precompileShaders,
-                  "Before the game starts, compiles every shader it has used on this device (PREPARING SHADERS). Off: "
-                  "the game starts at once and objects may pop in while their shaders compile. From the next start."))
+                  s_launcher ? "Before the game starts, compiles every shader it has used on this device (PREPARING "
+                               "SHADERS). Off: the game starts at once and objects may pop in while their shaders compile."
+                             : "Before the game starts, compiles every shader it has used on this device (PREPARING "
+                               "SHADERS). Off: the game starts at once and objects may pop in while their shaders "
+                               "compile. From the next start."))
         s_changed = true;
     if (toggleRow("Ubershaders", s.ubershaders,
                   "A shader seen for the first time is drawn with a generic one while it compiles: no pop-in, but more "
@@ -800,6 +827,8 @@ void pageAudio(settings::Settings& s) {
         s_changed = true;
 }
 
+void infoRow(const char* text, const std::string& value, const char* help, ImU32 col);  // (below)
+
 void pageCheats(settings::Settings& s) {
     heading("REBEL ALLIANCE CLEARANCE");
     if (toggleRow("Invincibility", s.invincible, "Your ship cannot be destroyed.")) s_changed = true;
@@ -814,6 +843,12 @@ void pageCheats(settings::Settings& s) {
                   "fighter, Naboo starfighter, Imperial shuttle, ...) and the medal rewards. Your save is not changed."))
         s_changed = true;
     heading("PASSCODES");
+    if (s_launcher) {  // (the game loads its save at boot, over anything set now)
+        infoRow("Passcode unlocks", "IN THE GAME",
+                "The passcode unlocks live in the game's save, which it loads once it has started: switch them in the "
+                "in-game menu (F1 or the controller's Back).", kDim);
+        return;
+    }
     // the game's own unlocks: kept in its save like codes entered in Options > Passcodes
     for (int i = 0; i < unlocks::Count; i++) {
         bool v = unlocks::state(i) == 1;
@@ -1284,9 +1319,12 @@ void pageMods(settings::Settings& s) {
         }
     }
     if (toggleRow("Prefetch textures", s.prefetchTextures,
-                  "Loads the texture packs into memory before the game starts (up to half the RAM, as Dolphin): "
-                  "textures appear sharp the first time. Takes effect at the next start.")) {
+                  s_launcher ? "Loads the texture packs into memory before the game starts (up to half the RAM, as "
+                               "Dolphin): textures appear sharp the first time."
+                             : "Loads the texture packs into memory before the game starts (up to half the RAM, as "
+                               "Dolphin): textures appear sharp the first time. Takes effect at the next start.")) {
         s_changed = true;
+        if (s_launcher) mods::reloadTextures();  // (the game has not started: this start gets it)
     }
     {  // a pack wherever it was unpacked
         const int row = s_row;
@@ -1375,7 +1413,7 @@ void pageMods(settings::Settings& s) {
                 s_confirmSave = false;
                 std::string msg;
                 if (mods::importSave(s_dolphin.saves.front(), msg)) {
-                    restartGame();  // (returns only if it could not start the new instance)
+                    restartGame(s_launcher);  // (returns only if it could not start the new instance)
                     msg += " Restart Red Two to play with it.";
                 }
                 s_modsStatus = msg;
@@ -1552,6 +1590,7 @@ void switchSection(int i) {
     s_scrollToSel = true;
     s_confirmQuit = false;
     s_confirmReset = false;
+    s_confirmLauncher = false;
     s_textEditing = false;
     s_pendingCapture = -1;
     s_pendingHotkey = -1;
@@ -1619,9 +1658,13 @@ bool drawMenu(settings::Settings& s, float t) {
     const bool rebinding = rebindingNow();
     pollNav(!rebinding && !s_textEditing);  // (typing: the text field takes the keys)
     if (s_nav[NavBack]) {
-        if (!s_browsing) return false;
-        browseClose();  // (the folder browser: back to the MODS page)
+        if (!s_browsing && !s_launcher) return false;
+        if (s_browsing) browseClose();  // (the folder browser: back to the MODS page)
         s_nav[NavBack] = false;
+    }
+    if (s_launcher && s_nav[NavStart] && !s_textEditing) {
+        logf("menu", "launcher: controller START");
+        s_launch = true;
     }
     if (s_nav[NavPrevTab]) switchSection((s_section + SectionCount - 1) % SectionCount);
     if (s_nav[NavNextTab]) switchSection((s_section + 1) % SectionCount);
@@ -1644,8 +1687,8 @@ bool drawMenu(settings::Settings& s, float t) {
     s_ui = std::clamp(disp.y / 1080.f, 0.6f, 3.f);
     ImDrawList* bg = ImGui::GetBackgroundDrawList();
 
-    // the game behind: dimmed, stars over it
-    bg->AddRectFilled(ImVec2(0, 0), disp, IM_COL32(0, 3, 10, 205));
+    // the game behind: dimmed, stars over it (the launcher: nothing behind yet)
+    bg->AddRectFilled(ImVec2(0, 0), disp, IM_COL32(0, 3, 10, s_launcher ? 255 : 205));
     starfield(bg, disp, t);
 
     const float w = std::min(disp.x * 0.86f, disp.y * 1.45f), h = disp.y * 0.86f;
@@ -1665,12 +1708,13 @@ bool drawMenu(settings::Settings& s, float t) {
     const float titleY = a.y + pad * 0.55f;
     drawText(bg, s_fontBig, titlePx, ImVec2(a.x + pad, titleY), kGold, "RED TWO", 10.f * s_ui, alpha(kAmber, 50));
     drawText(bg, s_font, 18.f * s_ui, ImVec2(a.x + pad + 2.f, titleY + titlePx * 1.02f), kHolo,
-             "ROGUE SQUADRON II  //  FLIGHT SYSTEMS CONFIGURATION", 3.f * s_ui);
+             s_launcher ? "ROGUE SQUADRON II  //  PRE-FLIGHT CHECK" : "ROGUE SQUADRON II  //  FLIGHT SYSTEMS CONFIGURATION",
+             3.f * s_ui);
     const float blink = 0.5f + 0.5f * std::sin(t * 3.f);
     const ImVec2 lamp(b.x - pad - 8.f * s_ui, titleY + titlePx * 0.45f);
     bg->AddCircleFilled(lamp, 6.f * s_ui, alpha(kAmber, int(120 + 135 * blink)));
     bg->AddCircle(lamp, 11.f * s_ui, alpha(kAmber, 90), 24, 1.f);
-    const char* status = "SYSTEMS ONLINE";
+    const char* status = s_launcher ? "AWAITING LAUNCH" : "SYSTEMS ONLINE";
     const float statusPx = 17.f * s_ui;
     drawText(bg, s_font, statusPx, ImVec2(lamp.x - 22.f * s_ui - textWidth(s_font, statusPx, status, 2.f * s_ui), lamp.y - 9.f * s_ui),
              kDim, status, 2.f * s_ui);
@@ -1683,7 +1727,8 @@ bool drawMenu(settings::Settings& s, float t) {
     std::string hint = s_usingPad ? "LB / RB  TABS      D-PAD / STICK  MOVE, CHANGE      A  SELECT"
                                   : "Q / E  TABS      ARROWS  MOVE, CHANGE      ENTER  SELECT";
     if (s_section == Controls) hint += s_usingPad ? "      X  CLEAR" : "      DEL  CLEAR";
-    hint += s_usingPad ? "      B / BACK  CLOSE" : "      ESC / F1  CLOSE";
+    if (s_launcher) hint += s_usingPad ? "      START  LAUNCH" : "";
+    else hint += s_usingPad ? "      B / BACK  CLOSE" : "      ESC / F1  CLOSE";
     if (s_section == Mods && s_browsing)
         hint = s_usingPad ? "D-PAD / STICK  MOVE      A  OPEN, SELECT      X  PARENT FOLDER      B  BACK"
                           : "ARROWS  MOVE      ENTER  OPEN, SELECT      BACKSPACE  PARENT FOLDER      ESC  BACK";
@@ -1874,7 +1919,10 @@ void padSelfTest() {
     stick(180, SDL_GAMEPAD_AXIS_LEFTX, -32768);     // 90
     press(200, SDL_GAMEPAD_BUTTON_DPAD_DOWN);       // row 1
     press(220, SDL_GAMEPAD_BUTTON_SOUTH);           // A: sound in background off
-    press(260, SDL_GAMEPAD_BUTTON_EAST);            // B: close
+    press(260, SDL_GAMEPAD_BUTTON_EAST);            // B: close (the launcher stays)
+    static bool launcherStart = false;               // the launcher (R2_LAUNCHER=1): START starts the game
+    if (k == 300 && s_launcher) SDL_SetJoystickVirtualButton(joy, SDL_GAMEPAD_BUTTON_START, launcherStart = true);
+    if (k == 304 && launcherStart) SDL_SetJoystickVirtualButton(joy, SDL_GAMEPAD_BUTTON_START, false);
     switch (k) {
     case 30: show("start"); break;
     case 55: show("RB"); break;
@@ -1888,6 +1936,7 @@ void padSelfTest() {
     case 215: show("d-pad down"); break;
     case 235: show("A"); break;
     case 275: show("B"); break;
+    case 310: if (launcherStart) logf("menu", "pad test START: launcher %s", s_launcher ? "still open" : "closed, game started"); break;
     default: break;
     }
 }
@@ -1899,6 +1948,7 @@ void setOpen(bool open) {
     s_confirmSave = false;
     s_confirmQuit = false;
     s_confirmReset = false;
+    s_confirmLauncher = false;
     s_confirmLogout = false;
     s_textEditing = false;
     if (open) s_raDolphin = -1;  // (Dolphin may have logged in meanwhile)
@@ -1914,6 +1964,39 @@ void setOpen(bool open) {
 // interface
 // ---------------------------------------------------------------------------------------
 bool menuOpen() { return s_open; }
+bool launcherShowing() { return s_launcher; }
+
+void launcherOpen() {
+    s_launcher = true;
+    s_launch = false;
+    s_section = Display;
+    s_rowSel[Display] = 0;  // Start game: Enter / A right away
+    s_usingPad = SDL_HasGamepad();  // (button hints; the first input decides after that)
+    s_padDevice = s_usingPad && aurora::pad::port_controller(0) != 0;  // (the Controls page's device)
+    setOpen(true);
+}
+
+// one frame of the launcher, inside an ImGui frame; true: the player started the game
+bool launcherFrame() {
+    ImGuiContext* ctx = ImGui::GetCurrentContext();
+    if (!ctx || !ctx->WithinFrameScope) return false;
+    modsPoll();
+    const float t = float(double(SDL_GetTicks()) / 1000.0);
+    drawMenu(settings::get(), t);
+    if (s_open) bindSelfTest();
+    padSelfTest();
+    // R2_LAUNCHER_AUTO=<seconds> (tests): start the game that long after the launcher opened
+    static const char* autoEnv = getenv("R2_LAUNCHER_AUTO");
+    static const u64 openedTb = tbNow();
+    if (autoEnv && double(tbNow() - openedTb) / double(kTbClock) >= atof(autoEnv)) {
+        logf("menu", "launcher: R2_LAUNCHER_AUTO start");
+        s_launch = true;
+    }
+    if (!s_launch) return false;
+    s_launcher = s_launch = false;
+    setOpen(false);
+    return true;
+}
 
 void setHudAnchoring(bool on) {
     static bool last = false;
@@ -1975,6 +2058,11 @@ void menuImGuiInit(const void*) {
 void menuEvent(const void* p) {
     const SDL_Event& e = *static_cast<const SDL_Event*>(p);
     if (rebindingNow()) return;  // rebinding takes these
+    if (s_launcher) {  // no opening or closing: Esc only leaves the folder browser
+        if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_ESCAPE && s_browsing && !s_textEditing)
+            browseClose();
+        return;
+    }
     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
         if (e.key.key == SDLK_F1 || e.key.key == SDLK_AC_BACK) {  // (AC_BACK: Android's back button / gesture)
             logf("menu", "F1: %s", s_open ? "close" : "open");

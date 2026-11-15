@@ -19,6 +19,9 @@ enum class Aspect : int { R4_3 = 0, R16_9, R16_10, R21_9, Window, Count };
 inline constexpr float kMaxAspect = 64.f / 27.f;
 
 struct Settings {
+    // start: the launcher (the settings menu before the game boots, gfx/menu.cpp) or straight
+    // into the game. On until the player turns it off; --launcher / R2_LAUNCHER=1 show it anyway.
+    bool launcher = true;
     // display
     bool fullscreen = false;
     Resolution resolution = Resolution::Window;

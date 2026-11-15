@@ -132,8 +132,10 @@ std::string cardImagePath(int slot);                       // the image file of 
 bool cardCurrentImage(int slot, std::vector<u8>& out);     // the inserted card (false: none yet)
 void cardDetach(int slot);  // the file was replaced: keep the game's later writes in memory only
 void cardFlushNow();        // card writes not yet in the image file go there now (before quitting)
-void restartGame();         // main.cpp: start a new instance with the same arguments, then quit
-void resetGame();           // main.cpp: the menu's reset (card writes flushed, then restartGame)
+// main.cpp: start a new instance with the same arguments, then quit. The new instance goes
+// straight into the game, or to the launcher with toLauncher (R2_LAUNCHER=1/0 in its environment).
+void restartGame(bool toLauncher = false);
+void resetGame(bool toLauncher = false);  // main.cpp: the menu's reset (card writes flushed, then restartGame)
 // main.cpp: the window was closed or the menu's quit chosen: a save state being written and the
 // memory card's last writes reach their files, then the process ends
 [[noreturn]] void quitToDesktop();
@@ -150,6 +152,7 @@ void set(int item, bool on);  // applied at the game's next frame
 
 namespace gfx {
 bool menuOpen();  // gfx/menu.cpp: the settings menu has the controls (the game sees idle pads)
+bool launcherShowing();  // gfx/menu.cpp: the launcher is up (the game has not started)
 // gfx/touch.cpp: on-screen touch controls (Android): every SDL event, drawn inside a frame,
 // merged into port 1's PADStatus (false: not in use)
 void touchEvent(const void* sdlEvent);

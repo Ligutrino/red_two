@@ -8,6 +8,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <link.h>
 #include <pthread.h>
 #include <signal.h>
 #include <sys/mman.h>
@@ -330,9 +331,27 @@ HostLayout hostLayout() {
     return {base, hash, u64(g_base), u64(s_stacks)};
 }
 #elif !defined(_WIN32)
-extern "C" char __executable_start, etext;  // the linker's: the start of the image, the end of its code
+extern "C" char __executable_start;  // the linker's: the start of the image
+// The executable segments as the loader mapped them. Not __executable_start..etext: that range
+// also covers the read-only data, and an exe rewritten by patchelf (the AppImage's rpath) has
+// its headers moved to a new segment, leaving an unmapped page in that range (reading it
+// crashed every save and load in the AppImage).
+static int hashCodeSegments(dl_phdr_info* info, size_t, void* out) {
+    u64 h = 0, n = 0;  // n, not the header's index: the same code hashes the same after patchelf
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr)& ph = info->dlpi_phdr[i];
+        if (ph.p_type == PT_LOAD && (ph.p_flags & PF_X))
+            h ^= XXH3_64bits_withSeed(reinterpret_cast<const void*>(info->dlpi_addr + ph.p_vaddr), ph.p_filesz, n++);
+    }
+    *static_cast<u64*>(out) = h;
+    return 1;  // the first object is the exe itself
+}
 HostLayout hostLayout() {
-    static u64 hash = XXH3_64bits(&__executable_start, size_t(&etext - &__executable_start));
+    static u64 hash = [] {
+        u64 h = 0;
+        dl_iterate_phdr(hashCodeSegments, &h);
+        return h;
+    }();
     return {u64(&__executable_start), hash, u64(g_base), u64(s_stacks)};
 }
 #else

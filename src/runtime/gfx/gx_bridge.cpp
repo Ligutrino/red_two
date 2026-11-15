@@ -50,6 +50,7 @@ extern "C" __declspec(dllimport) long long __stdcall SetWindowLongPtrW(void*, in
 extern "C" __declspec(dllimport) int __stdcall GetSystemMetrics(int);
 extern "C" __declspec(dllimport) int __stdcall ShowWindow(void*, int);
 #endif
+#include "../achievements.h"
 #include "../hw/gx_fifo.h"
 #include "../hw/musyx_dsp.h"
 #include "../hotkeys.h"
@@ -190,6 +191,42 @@ void precompileShaders() {
     logf("gfx", "before the game started (%.1f s): %u pipelines built, %llu textures prefetched (%.1f GiB%s)",
          double(tbNow() - t0) / double(kTbClock), st->createdPipelines, (unsigned long long)tex.total,
          double(tex.bytes) / double(1ull << 30), tex.budgetFull ? ", memory budget reached" : "");
+}
+
+// The launcher: the settings menu (menu.cpp, in a launcher mode) before the game boots, so
+// everything - display, texture packs, shader preparation, controls, achievements - can be set
+// before anything of the game runs. On by default (settings::launcher, the first page's "Show
+// launcher at start"); R2_LAUNCHER=1/0 overrides (a restart sets it: a reset goes straight into
+// the game, "Back to launcher" here), then automated runs skip it, then --launcher /
+// --no-launcher, then the setting. Aurora is up meanwhile: its workers build the cached
+// pipelines and prefetch textures while the player looks at the settings.
+bool launcherWanted(int argc, char** argv) {
+    if (const char* e = getenv("R2_LAUNCHER"); e && *e) return *e == '1';
+    if (envFlag("R2_BACKGROUND") || envFlag("R2_HEADLESS") || getenv("R2_INPUT") || envFlag("R2_MENU")) return false;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--launcher")) return true;
+        if (!strcmp(argv[i], "--no-launcher")) return false;
+    }
+    return settings::get().launcher;
+}
+
+void runLauncher() {
+    logf("gfx", "launcher open");
+    const u64 t0 = tbNow();
+    launcherOpen();
+    for (;;) {
+        pollEvents();  // (closing the window quits)
+        ra::idle();    // a login from the ACHIEVEMENTS page
+        bool start = false;
+        if (aurora_begin_frame()) {
+            start = launcherFrame();
+            aurora_end_frame();
+        }
+        if (start) break;
+        SDL_Delay(8);
+    }
+    logf("gfx", "launcher: game started after %.1f s; settings: %s", double(tbNow() - t0) / double(kTbClock),
+         settings::summary().c_str());
 }
 
 void testQuad();
@@ -1837,11 +1874,12 @@ bool init(int argc, char** argv) {
     buttonIconsUpdate();   // Xbox button prompts (button_icons.cpp)
     static const char* backends[] = {"auto", "D3D11", "D3D12", "Metal", "Vulkan", "OpenGL", "OpenGL ES", "WebGPU", "null"};
     logf("gfx", "Aurora up: %s backend, window %ux%u", backends[info.backend], info.windowSize.width, info.windowSize.height);
+    input::init(true);  // (before the launcher: the controllers drive it)
+    if (launcherWanted(argc, argv)) runLauncher();
     precompileShaders();
     s_enabled = true;
     gxSetSink(onCommand);
     gxSetSyncHook(gpSync);
-    input::init(true);
     return true;
 }
 
