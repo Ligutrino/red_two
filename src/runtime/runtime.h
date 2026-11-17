@@ -35,8 +35,15 @@ constexpr u32 kLockedCache = 0xE0000000, kLockedCacheSize = 0x4000;
 // it): enlarged copies of tables the game sizes for its 4:3 view (hle_game.cpp, port tables).
 // Committed at start and saved in states.
 constexpr u32 kPortArena = 0x8F000000, kPortArenaSize = 0x80000;
+// The game's heap extension: 8 MiB of RAM right after MEM1 (physical 0x01800000-0x01FFFFFF,
+// cached 0x81800000 and uncached 0xC1800000, mapped with MEM1 like a 32 MiB console), which the
+// game is never told about (0x80000028 says 24 MiB) and only gets for an allocation its full
+// heap would fail (hle_game.cpp, heap extension). Inside 32 MiB so every device register that
+// holds a physical address reaches it (texture bases keep 20-21 bits of address >> 5).
+constexpr u32 kMem1Ext = 0x00800000, kMem1Mapped = kMem1Size + kMem1Ext;
 bool memInit();
-inline bool isMem1(u32 a) { return (a >= 0x80000000u && a < 0x80000000u + kMem1Size) || (a >= 0xC0000000u && a < 0xC0000000u + kMem1Size); }
+// MEM1 or its extension (guest RAM at g_base + a)
+inline bool isMem1(u32 a) { return (a >= 0x80000000u && a < 0x80000000u + kMem1Mapped) || (a >= 0xC0000000u && a < 0xC0000000u + kMem1Mapped); }
 // Physical address (as DMA engines see it) -> host pointer into MEM1, or nullptr.
 u8* physPtr(u32 phys, u32 len);
 

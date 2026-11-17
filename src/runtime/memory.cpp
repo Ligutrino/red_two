@@ -1,5 +1,5 @@
 // Guest address space: one 4 GiB host reservation, guest address a at g_base + a
-// (MEM1 twice, the locked cache; the VM region is translated, see vm.cpp).
+// (MEM1 and its heap extension twice, the locked cache; the VM region is translated, see vm.cpp).
 //
 // Save states keep the host stacks of the guest's threads (threads.cpp), whose recompiled
 // frames hold host pointers: return addresses into the exe, the guest contexts, the stacks
@@ -48,7 +48,7 @@ constexpr u64 kFixedStacks = 0x0000021000000000ull;
 static void faultDump(const Ctx& c) {
     const char* spec = getenv("R2_FAULT_DUMP");
     if (!spec) return;
-    auto readable = [](u32 a) { return a >= 0x80000000u && a < 0x80000000u + kMem1Size; };
+    auto readable = [](u32 a) { return a >= 0x80000000u && a < 0x80000000u + kMem1Mapped; };
     for (const char* p = spec; *p;) {
         if (*p != 'r') break;
         char* e = nullptr;
@@ -107,8 +107,10 @@ static unsigned long hostThreadId() { return (unsigned long)gettid(); }
 // inner loops set, so the paths that jump straight to the block use the caller's r31 (a stack
 // address): base + 0x800ABFB4 * 20, 14 MiB past the records (0x8230xxxx), about 30 s into the
 // mission. Such pages get committed (zero-filled) when first touched and the access goes on.
+// The heap extension (24-32 MiB, runtime.h) is mapped with MEM1: reads there give zeros too
+// until the game's heap overflows into it (on hardware it would have stopped then).
 static bool pastMem1(u32 guest) {
-    return (guest >= 0x80000000u + kMem1Size && guest < 0x90000000u) || (guest >= 0xC0000000u + kMem1Size && guest < 0xC8000000u);
+    return (guest >= 0x80000000u + kMem1Mapped && guest < 0x90000000u) || (guest >= 0xC0000000u + kMem1Mapped && guest < 0xC8000000u);
 }
 
 static bool commitPastMem1(u32 guest, bool write) {
@@ -203,8 +205,8 @@ static void onSegv(int sig, siginfo_t* si, void* ucv) {
 
 #ifdef _WIN32
 static bool mapAt(u8* base) {
-    void* a = MapViewOfFileEx(s_mem1, FILE_MAP_ALL_ACCESS, 0, 0, kMem1Size, base + 0x80000000u);
-    void* b = MapViewOfFileEx(s_mem1, FILE_MAP_ALL_ACCESS, 0, 0, kMem1Size, base + 0xC0000000u);
+    void* a = MapViewOfFileEx(s_mem1, FILE_MAP_ALL_ACCESS, 0, 0, kMem1Mapped, base + 0x80000000u);
+    void* b = MapViewOfFileEx(s_mem1, FILE_MAP_ALL_ACCESS, 0, 0, kMem1Mapped, base + 0xC0000000u);
     // (0x7E000000-0x7FFFFFFF is translated by vm.cpp and never touched at g_base + a.)
     void* l = VirtualAlloc(base + kLockedCache, 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     void* p = VirtualAlloc(base + kPortArena, kPortArenaSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -220,7 +222,7 @@ static bool mapAt(u8* base) {
 }
 
 bool memInit() {
-    s_mem1 = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, kMem1Size, nullptr);
+    s_mem1 = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, kMem1Mapped, nullptr);
     if (!s_mem1) return false;
     bool ok = mapAt(reinterpret_cast<u8*>(kFixedGuestBase));
     for (int attempt = 0; !ok && attempt < 32; attempt++) {
@@ -243,8 +245,9 @@ bool memInit() {
     return true;
 }
 #else
-// Linux: a 4 GiB reservation (no access), MEM1 from a memfd mapped into it twice, the locked
-// cache and the port arena made accessible; pages past MEM1 become accessible when touched.
+// Linux: a 4 GiB reservation (no access), MEM1 (and the heap extension after it) from a memfd
+// mapped into it twice, the locked cache and the port arena made accessible; pages past MEM1
+// become accessible when touched.
 static u8* reserve(u64 fixed, u64 size) {
     void* p = mmap(reinterpret_cast<void*>(fixed), size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE,
                    -1, 0);
@@ -258,16 +261,16 @@ static u8* reserve(u64 fixed, u64 size) {
 bool memInit() {
 #ifdef __ANDROID__
     // (bionic has memfd_create from API 30; shared memory of the platform's own from 26)
-    s_mem1 = ASharedMemory_create("red_two_mem1", kMem1Size);
+    s_mem1 = ASharedMemory_create("red_two_mem1", kMem1Mapped);
     if (s_mem1 < 0) return false;
 #else
     s_mem1 = memfd_create("red_two_mem1", 0);
-    if (s_mem1 < 0 || ftruncate(s_mem1, kMem1Size) != 0) return false;
+    if (s_mem1 < 0 || ftruncate(s_mem1, kMem1Mapped) != 0) return false;
 #endif
     u8* base = reserve(kFixedGuestBase, 0x100000000ull);
     if (!base) return false;
     for (u32 at : {0x80000000u, 0xC0000000u})
-        if (mmap(base + at, kMem1Size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, s_mem1, 0) == MAP_FAILED) return false;
+        if (mmap(base + at, kMem1Mapped, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, s_mem1, 0) == MAP_FAILED) return false;
     // (0x7E000000-0x7FFFFFFF is translated by vm.cpp and never touched at g_base + a.)
     if (mprotect(base + kLockedCache, 0x10000, PROT_READ | PROT_WRITE) != 0 ||
         mprotect(base + kPortArena, kPortArenaSize, PROT_READ | PROT_WRITE) != 0)
@@ -295,7 +298,7 @@ u8* fiberStackRegion() { return s_stacks; }
 
 u8* physPtr(u32 phys, u32 len) {
     phys &= 0x3FFFFFFF;
-    if (phys >= kMem1Size || phys + len > kMem1Size) return nullptr;
+    if (phys >= kMem1Mapped || len > kMem1Mapped - phys) return nullptr;
     return g_base + 0x80000000u + phys;
 }
 
@@ -373,14 +376,14 @@ HostLayout hostLayout() {
 
 void memSaveState(state::Writer& w) {
     w.section("MEM1");
-    w.bytes(g_base + 0x80000000u, kMem1Size);
+    w.bytes(g_base + 0x80000000u, kMem1Mapped);  // with the heap extension
     w.bytes(g_base + kLockedCache, kLockedCacheSize);
     w.bytes(g_base + kPortArena, kPortArenaSize);
 }
 
 void memLoadState(state::Reader& r) {
     r.section("MEM1");
-    r.bytes(g_base + 0x80000000u, kMem1Size);
+    r.bytes(g_base + 0x80000000u, kMem1Mapped);
     r.bytes(g_base + kLockedCache, kLockedCacheSize);
     r.bytes(g_base + kPortArena, kPortArenaSize);
 }

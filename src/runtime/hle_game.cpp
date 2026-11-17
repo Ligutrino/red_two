@@ -8,6 +8,8 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <iterator>
+#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -464,9 +466,120 @@ void hle_HeapAlloc(Ctx& c) {
          original, block);
 }
 
-// HeapFree (0x80007270, ptr r3): a port table's block frees the game's own.
+// The game's heap extension. Vengeance on Kothlis (the user's session, 16:10, ~5 minutes into
+// the mission) stopped with "*** OUT OF MEMORY (size 4096, free 3136)! ***" twice, then a
+// store through the null pointer it got (fatal at address 0, guest lr 0x7FC0ED1C): the MEM1
+// heap had 772 KB free in 9 pieces in the user's save state two minutes before, 3 KB then.
+// HeapAllocFrom (0x80006CD0: the game's heap record r3 - MEM1 0x80068088, VM 0x800680A4 -,
+// size r4 rounded to 32, report r5), HeapAlloc's only way into OSAllocFromHeap (0x80028AC4),
+// prints that line when the allocation fails with report set (OSCheckHeap's free count), calls
+// 0x800074F8(0, 3) and returns 0, which HeapAlloc's callers do not check. Callers that can live
+// with a failure pass flag 0x40000 (report 0): they still get 0, as on hardware. The others now
+// get a block of the extension: 8 MiB right after MEM1 (kMem1Ext, runtime.h), as if the
+// console had 32 MiB, but only once the game's own heap has no piece that fits - until then
+// its layout and history are the game's own, as on hardware. Each block has the SDK's 32-byte
+// cell header (prev and next 0, the cell's size), behind which HeapAlloc writes its fields as
+// for any block (size, flags, heap record: the MEM1 one); HeapFree gives them back here
+// instead of to OSFreeToHeap (they are in none of the SDK's lists). First fit by address, like
+// OSAlloc. Logged as "heap" lines with HeapAlloc's caller; kept in save states (version 4).
+constexpr u32 kHeapExtBase = 0x80000000u + kMem1Size, kHeapExtEnd = 0x80000000u + kMem1Mapped;
+constexpr u32 kMem1HeapRecord = 0x80068088u;
+static std::map<u32, u32> s_extFree, s_extUsed;  // cell address -> cell size (header included)
+static u32 s_extInUse = 0, s_extPeak = 0;
+struct ExtCell {
+    u32 cell, size;
+};  // (save states)
+
+static u32 heapExtAlloc(u32 size) {
+    if (s_extFree.empty() && s_extUsed.empty()) s_extFree[kHeapExtBase] = kMem1Ext;  // first use
+    if (size > kMem1Ext) return 0;
+    const u32 need = (size + 0x20 + 0x1F) & ~0x1Fu;
+    for (auto it = s_extFree.begin(); it != s_extFree.end(); ++it) {
+        if (it->second < need) continue;
+        const u32 cell = it->first, left = it->second - need;
+        u32 take = need;
+        s_extFree.erase(it);
+        if (left >= 0x40) s_extFree[cell + need] = left;  // (OSAlloc's smallest cell)
+        else take += left;
+        s_extUsed[cell] = take;
+        wr32(cell, 0), wr32(cell + 4, 0), wr32(cell + 8, take);
+        s_extInUse += take;
+        return cell + 0x20;
+    }
+    return 0;
+}
+
+static void heapExtFree(u32 p) {
+    const auto used = s_extUsed.find(p - 0x20);
+    if (used == s_extUsed.end()) {
+        logf("heap", "HeapFree of %08X in the heap extension: not a block of it (ignored)", p);
+        return;
+    }
+    u32 cell = used->first, size = used->second;
+    s_extUsed.erase(used);
+    s_extInUse -= size;
+    if (size >= 0x40000)  // (level data, at a mission's end)
+        logf("heap", "heap extension: %u KiB at %08X freed (%u KiB in use)", size >> 10, p, s_extInUse >> 10);
+    auto next = s_extFree.lower_bound(cell);
+    if (next != s_extFree.end() && cell + size == next->first) {
+        size += next->second;
+        next = s_extFree.erase(next);
+    }
+    if (next != s_extFree.begin()) {
+        if (auto prev = std::prev(next); prev->first + prev->second == cell) {
+            prev->second += size;
+            cell = 0;
+        }
+    }
+    if (cell) s_extFree[cell] = size;
+    if (!s_extInUse) logf("heap", "heap extension empty again (the game's heap has room)");
+}
+
+void hle_HeapAllocFrom(Ctx& c) {
+    const u32 heap = c.r[3], size = c.r[4], report = c.r[5];
+    if (heap != kMem1HeapRecord || !report) {
+        f_80006CD0_orig(c);
+        return;
+    }
+    // R2_HEAP_EXT_TEST=<n> (tests): every n-th of these goes to the extension with the heap not
+    // full - blocks there read from the disc, drawn from, run (code modules) and freed
+    static const u32 testEvery = [] {
+        const char* e = getenv("R2_HEAP_EXT_TEST");
+        return e ? u32(strtoul(e, nullptr, 10)) : 0u;
+    }();
+    static u32 testCount = 0;
+    if (!testEvery || ++testCount % testEvery) {
+        c.r[5] = 0;  // no report yet: the extension may take it
+        f_80006CD0_orig(c);
+        if (c.r[3]) return;
+    }
+    // HeapAlloc's frame is r1 (stwu -0x30): its caller's return address was saved at +0x34
+    const u32 caller = rd32(c.r[1] + 0x34);
+    const u32 before = s_extInUse;
+    if (const u32 p = heapExtAlloc(size)) {
+        // the first block since it was empty, then every new 256 KiB of peak use
+        if (!before || s_extInUse >= s_extPeak + 0x40000) {
+            logf("heap", "MEM1 heap full: %u bytes at %08X from the heap extension for %08X (%u KiB of %u in use)", size, p,
+                 caller, s_extInUse >> 10, kMem1Ext >> 10);
+            s_extPeak = std::max(s_extPeak, s_extInUse);
+        }
+        c.r[3] = p;
+        return;
+    }
+    logf("heap", "MEM1 heap full and the heap extension too (%u bytes for %08X, %u KiB in use)", size, caller,
+         s_extInUse >> 10);
+    c.r[3] = heap, c.r[4] = size, c.r[5] = report;
+    f_80006CD0_orig(c);  // the game's own report, and 0
+}
+
+// HeapFree (0x80007270, ptr r3): a port table's block frees the game's own; a block of the heap
+// extension goes back to it.
 void hle_HeapFree(Ctx& c) {
     const u32 p = c.r[3];
+    if (p >= kHeapExtBase && p < kHeapExtEnd) [[unlikely]] {
+        heapExtFree(p);
+        return;
+    }
     if (p >= kPortArena && p < kPortArena + kPortArenaSize) [[unlikely]] {
         PortTable* t = nullptr;
         for (auto& e : s_portTables)
@@ -1051,6 +1164,14 @@ void hleSaveState(state::Writer& w) {
     w.vec(s_weapons);
     for (const auto& t : s_portTables) w.pod(t.block), w.pod(t.size);  // (their data: memory.cpp)
     w.pod(s_tileListRecords), w.pod(s_heightRowsExtra);
+    // the heap extension's blocks (their data: memory.cpp, with MEM1)
+    std::vector<ExtCell> cells;
+    for (const auto* m : {&s_extFree, &s_extUsed}) {
+        cells.clear();
+        for (const auto& [cell, size] : *m) cells.push_back({cell, size});
+        w.vec(cells);
+    }
+    w.pod(s_extInUse), w.pod(s_extPeak);
 }
 
 void hleLoadState(state::Reader& r) {
@@ -1058,6 +1179,13 @@ void hleLoadState(state::Reader& r) {
     r.vec(s_weapons);
     for (auto& t : s_portTables) r.pod(t.block), r.pod(t.size);
     r.pod(s_tileListRecords), r.pod(s_heightRowsExtra);
+    std::vector<ExtCell> cells;
+    for (auto* m : {&s_extFree, &s_extUsed}) {
+        r.vec(cells);
+        m->clear();
+        for (const auto& e : cells) (*m)[e.cell] = e.size;
+    }
+    r.pod(s_extInUse), r.pod(s_extPeak);
 }
 
 // After a load (on the guest's fiber): caches of guest objects start over, a skip in progress

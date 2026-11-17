@@ -31,7 +31,8 @@ volatile bool g_pending = false;
 
 namespace {
 
-constexpr u32 kVersion = 3;  // 2: the port arena (memory.cpp); 3: RetroAchievements progress
+constexpr u32 kVersion = 4;  // 2: the port arena (memory.cpp); 3: RetroAchievements progress;
+                             // 4: MEM1's heap extension (memory.cpp, hle_game.cpp)
 struct Header {
     char magic[4];   // "R2ST"
     u32 version;

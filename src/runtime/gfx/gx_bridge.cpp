@@ -377,7 +377,7 @@ void sendArray(u32 n, u32 need) {
     if (a.sentSize && need <= a.sentSize) return;
     u32 size = a.sentSize ? a.sentSize : 256;
     while (size < need) size *= 2;
-    const u32 maxSize = kMem1Size - (a.base & 0x01FFFFFF);
+    const u32 maxSize = kMem1Mapped - (a.base & 0x01FFFFFF);
     if (size > maxSize) size = maxSize;
     u8* host = physPtr(a.base, size);
     if (!host) return;

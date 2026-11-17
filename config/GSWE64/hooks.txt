@@ -48,6 +48,9 @@ hle     CutsceneVideoDraw
 # Enlarged tables live in the port's arena, outside the game's heap: HeapFree maps them back
 hle     HeapAlloc
 hle     HeapFree
+# The game's heap full: an allocation that must not fail gets a block of the heap extension
+# (8 MiB after MEM1) instead of 0 (Vengeance on Kothlis); HeapFree gives such blocks back
+hle     HeapAllocFrom
 # Widescreen: the heightmap terrain's (Hoth) span table and the arrays laid out after it, by row count
 hle     TerrainRows
 hle     HeightTerrainSpans

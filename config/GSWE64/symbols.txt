@@ -47,6 +47,7 @@
 7FCD7D28 TargetingPass           # (pass r3 = 0..4) the targeting computer's part of a frame pass: TargetingRect, EFB copies of its screen area (GXSetTexCopySrc from 0x7FDF7CD8+0x130..0x136), the screen quad (TargetingDraw or 0x7FCD6FD4), the targets' TEV setup 0x7FCD62A0
 800070C4 HeapAlloc               # (size r3, flags r4) the game's heap: 32-byte block headers (+0x0 next, +0x4 prev, +0x8 block size, +0x10 data size); found reading a crash in HeapFree
 80007270 HeapFree                # (ptr r3): reads the header at ptr-0x20 (a corrupted one crashed here)
+80006CD0 HeapAllocFrom           # (heap record r3: MEM1 0x80068088 / VM 0x800680A4, size r4 rounded to 32, report r5): OSAllocFromHeap 0x80028AC4 on the record's OS heap (+0x18; VM first checks the pager's ARAM room 0x800094B0); a failure with report set prints "*** OUT OF MEMORY (size %d, free %d)! ***" (free: 0x80007338) and calls 0x800074F8(0, 3), returning 0. Only caller HeapAlloc: report = !(flags & 0x40000); HeapAlloc writes size/flags/record at block-0x10/-0xC/-0x8. Found reading HeapAlloc after the user's Kothlis crash
 7FD89210 TerrainSetup            # mission terrain (table 0x7FDF5A90): span array +0x120 = rows +0x11C (from the larger view distance) * 4 bytes, tile records [0x80095FA4] = [+4] * 12 bytes
 7FD89784 TerrainTeardown         # frees the terrain's buffers (mission end)
 7FCBAA0C TerrainSpans            # rasterizes the view footprint onto the terrain grid: one (left, right) s16 pair per row into [0x7FDF5BB0], as many rows as the footprint covers (no bound)
