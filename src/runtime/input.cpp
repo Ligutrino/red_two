@@ -297,6 +297,7 @@ void poll() {
             e.button = 0;
             e.triggerLeft = e.triggerRight = 0;
         }
+    gfx::touchApply(&st[0]);  // on-screen touch controls (Android), with or without a controller
     u32 scripted = 0;
     // script times count 59.94 Hz retraces, whatever the retrace rate (settings fps; it also
     // changes while a cinematic is skipped)

@@ -134,6 +134,7 @@ void pollEvents() {
         }
         if (e->type == AURORA_SDL_EVENT) {
             menuEvent(&e->sdl);
+            touchEvent(&e->sdl);
             audio::deviceEvent(&e->sdl);
         }
         // F11 or Alt+Enter: toggle fullscreen
@@ -305,6 +306,7 @@ void tileFrameEnd();
 void endFrame() {
     if (!s_inFrame) return;
     menuDraw();
+    touchDraw();
     const u64 endStart = tbNow();
     mods::textureFrame(false);  // (Aurora's replacement counters reset at the end of a frame)
     aurora_end_frame();

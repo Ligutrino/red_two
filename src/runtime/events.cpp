@@ -94,7 +94,11 @@ Event s_wakeEv, s_guestEv;
 void wakeTimer() { s_wakeEv.signal(); }
 void signalGuest() { s_guestEv.signal(); }
 void waitGuest(u32 ms) { s_guestEv.wait(u64(ms) * 1000); }
+#if defined(__aarch64__)
+void cpuRelax() { asm volatile("yield"); }
+#else
 void cpuRelax() { __builtin_ia32_pause(); }
+#endif
 
 void sleepUs(u64 us, bool wakeable) {
     if (wakeable) {

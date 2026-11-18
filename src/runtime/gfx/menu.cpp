@@ -1654,8 +1654,12 @@ void menuImGuiInit(const void*) {
     // share/red-two/font.ttf, a condensed DejaVu) or the system's DejaVu / Noto
     std::vector<std::string> fonts;
     if (const char* f = getenv("R2_FONT")) fonts.push_back(f);
-#ifdef _WIN32
+#if defined(_WIN32)
     fonts.push_back("C:\\Windows\\Fonts\\bahnschrift.ttf");
+#elif defined(__ANDROID__)
+    for (const char* f : {"/system/fonts/RobotoCondensed-Regular.ttf", "/system/fonts/Roboto-Regular.ttf",
+                          "/system/fonts/NotoSans-Regular.ttf", "/system/fonts/DroidSans.ttf"})
+        fonts.push_back(f);
 #else
     if (const char* base = SDL_GetBasePath()) {
         fonts.push_back(std::string(base) + "../share/red-two/font.ttf");
@@ -1684,7 +1688,7 @@ void menuEvent(const void* p) {
     const SDL_Event& e = *static_cast<const SDL_Event*>(p);
     if (rebindingNow()) return;  // rebinding takes these
     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
-        if (e.key.key == SDLK_F1) {
+        if (e.key.key == SDLK_F1 || e.key.key == SDLK_AC_BACK) {  // (AC_BACK: Android's back button / gesture)
             logf("menu", "F1: %s", s_open ? "close" : "open");
             s_usingPad = false;
             if (!s_open) s_padDevice = false;  // Controls shows the keyboard's

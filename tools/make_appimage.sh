@@ -2,6 +2,7 @@
 # Packs a Linux build (tools/build_linux.sh) into an AppImage for the Steam Deck and other
 # desktops:
 #   tools/make_appimage.sh --runtime <runtime-x86_64> [--build-dir build/linux] [--icon <png>] [--out <file>]
+# --icon: a 256x256 PNG (Red Two's own: res/red_two.png scaled down).
 # --runtime: the AppImage type 2 runtime (github.com/AppImage/type2-runtime, release
 # "continuous", runtime-x86_64); the squashfs image goes after it. Needs mksquashfs and patchelf.
 # The AppImage holds the recompiled game: it is for the person whose disc it was built from.
@@ -59,6 +60,14 @@ for f in /usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf /usr/share/fon
     fi
 done
 cp "$root/LICENSE" "$app/usr/share/red-two/LICENSE"
+python3 "$root/tools/third_party_notices.py" "$build" "$app/usr/share/red-two/THIRD_PARTY_NOTICES.txt"
+# the system libraries bundled above: their Debian copyright files
+for f in /usr/share/doc/libpng16-16*/copyright /usr/share/doc/libfreetype6/copyright /usr/share/doc/libbz2-1.0/copyright \
+         /usr/share/doc/libbrotli1/copyright; do
+    [ -f "$f" ] || continue
+    printf '\n%s\n%s (bundled from the build system)\n%s\n%s\n' "$(printf '=%.0s' $(seq 78))" "$(basename "$(dirname "$f")")" \
+        "$(printf '=%.0s' $(seq 78))" "$(cat "$f")" >> "$app/usr/share/red-two/THIRD_PARTY_NOTICES.txt"
+done
 
 cat > "$app/AppRun" <<'EOF'
 #!/bin/sh

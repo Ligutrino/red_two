@@ -150,6 +150,11 @@ void set(int item, bool on);  // applied at the game's next frame
 
 namespace gfx {
 bool menuOpen();  // gfx/menu.cpp: the settings menu has the controls (the game sees idle pads)
+// gfx/touch.cpp: on-screen touch controls (Android): every SDL event, drawn inside a frame,
+// merged into port 1's PADStatus (false: not in use)
+void touchEvent(const void* sdlEvent);
+void touchDraw();
+bool touchApply(void* padStatus);
 void setHudAnchoring(bool on);  // gfx/menu.cpp: widescreen HUD pieces at the screen edges (in flight)
 void noteWidenedAspect(float aspect);  // gfx/menu.cpp: a projection aspect a camera was widened to
 void buttonIconsUpdate();  // gfx/button_icons.cpp: Xbox button prompts per the setting and bindings

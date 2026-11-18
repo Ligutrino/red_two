@@ -17,13 +17,19 @@ New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item (Join-Path $BuildDir "red_two.exe"), (Join-Path $BuildDir "red_two.pdb") $stage
 Get-ChildItem $BuildDir -Filter *.dll | Copy-Item -Destination $stage
 Copy-Item (Join-Path $root "LICENSE") (Join-Path $stage "LICENSE.txt")
+python (Join-Path $root "tools\third_party_notices.py") $BuildDir (Join-Path $stage "THIRD_PARTY_NOTICES.txt")
+if ($LASTEXITCODE) { throw "third_party_notices.py failed" }
 @"
 Red Two - Star Wars: Rogue Squadron II - Rogue Leader, recompiled for PC
 
+Requirements
+  64-bit Windows 10 or 11, a CPU with AVX2 (Intel Haswell / AMD Zen or newer), a graphics card
+  with Direct3D 12 or Vulkan.
+
 Your own disc image
-  Red Two needs your Rogue Leader disc (USA, GSWE64) as .iso or .rvz (Dolphin's format).
-  Put it next to red_two.exe (any file name), or in %APPDATA%\Red Two\, or start
-  red_two.exe --disc "<path to the image>".
+  Red Two needs your Rogue Leader disc (USA, GSWE64, revision 0) as .iso, .gcm, .rvz or .wia
+  (Dolphin's formats). Put it next to red_two.exe (any file name), or in %APPDATA%\Red Two\,
+  or start red_two.exe --disc "<path to the image>".
 
 Playing
   F1 or the controller's Back/View button opens the menu: display, controls, cheats and the
@@ -35,6 +41,7 @@ Where things are
   Settings, save states, shader cache, session logs: %APPDATA%\Red Two\.
 "@ | Set-Content -Encoding utf8 (Join-Path $stage "README.txt")
 
+New-Item -ItemType Directory -Force (Split-Path -Parent ([IO.Path]::GetFullPath($Out))) | Out-Null
 if (Test-Path $Out) { Remove-Item -Force $Out }
 Compress-Archive -Path $stage -DestinationPath $Out -CompressionLevel Optimal
 "{0}: {1:N0} MB" -f $Out, ((Get-Item $Out).Length / 1MB)

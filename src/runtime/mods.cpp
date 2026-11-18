@@ -14,6 +14,9 @@
 
 #include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_stdinc.h>
+#ifdef __ANDROID__
+#include <SDL3/SDL_system.h>
+#endif
 #include <dolphin/gx/GXStruct.h>
 #include <aurora/texture.hpp>
 
@@ -121,6 +124,15 @@ void load() {
 std::string userDir() {
     static const std::string dir = [] {
         std::string d;
+#ifdef __ANDROID__
+        // Android: the app's folder in shared storage (Android/data/<package>/files), which a PC
+        // sees over USB, so texture packs, codes, saves and logs can be put there and taken
+        // out; the private internal folder only if there is no shared storage.
+        if (const char* ext = SDL_GetAndroidExternalStoragePath(); ext && *ext) {
+            d = std::string(ext) + "/";
+            return d;
+        }
+#endif
         if (char* p = SDL_GetPrefPath(nullptr, "Red Two")) {
             d = p;
             SDL_free(p);

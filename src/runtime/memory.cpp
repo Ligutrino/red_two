@@ -13,6 +13,10 @@
 #include <sys/mman.h>
 #include <ucontext.h>
 #include <unistd.h>
+#ifdef __ANDROID__
+#include <android/sharedmem.h>
+#include <link.h>
+#endif
 #endif
 
 #include <atomic>
@@ -161,10 +165,37 @@ static LONG CALLBACK onAccessViolation(EXCEPTION_POINTERS* ep) {
 }
 #else
 // SIGSEGV: guest memory as above; anything else goes to main.cpp's crash report
+#if defined(__aarch64__)
+// AArch64: the kernel puts the fault's syndrome (ESR) in a record of the signal frame's
+// reserved area; WnR (bit 6) says a data abort was a write.
+static bool faultWasWrite(const ucontext_t* uc) {
+    const u8* p = reinterpret_cast<const u8*>(uc->uc_mcontext.__reserved);
+    const u8* end = p + sizeof uc->uc_mcontext.__reserved;
+    while (p + 8 <= end) {
+        u32 magic, size;
+        memcpy(&magic, p, 4);
+        memcpy(&size, p + 4, 4);
+        if (!magic || size < 8) break;
+        if (magic == 0x45535201u && size >= 16) {  // ESR_MAGIC: {head, u64 esr}
+            u64 esr;
+            memcpy(&esr, p + 8, 8);
+            return (esr >> 6) & 1;
+        }
+        p += size;
+    }
+    return false;
+}
+#endif
 static void onSegv(int sig, siginfo_t* si, void* ucv) {
     const auto* uc = static_cast<const ucontext_t*>(ucv);
+#if defined(__aarch64__)
+    const bool write = faultWasWrite(uc);
+    const void* at = reinterpret_cast<const void*>(uc->uc_mcontext.pc);
+#else
     const bool write = (uc->uc_mcontext.gregs[REG_ERR] & 2) != 0;  // page fault error code: W
-    if (onGuestFault(u64(si->si_addr), write, reinterpret_cast<const void*>(uc->uc_mcontext.gregs[REG_RIP]))) return;
+    const void* at = reinterpret_cast<const void*>(uc->uc_mcontext.gregs[REG_RIP]);
+#endif
+    if (onGuestFault(u64(si->si_addr), write, at)) return;
     hostCrash(sig, si, ucv);
 }
 #endif
@@ -224,8 +255,14 @@ static u8* reserve(u64 fixed, u64 size) {
 }
 
 bool memInit() {
+#ifdef __ANDROID__
+    // (bionic has memfd_create from API 30; shared memory of the platform's own from 26)
+    s_mem1 = ASharedMemory_create("red_two_mem1", kMem1Size);
+    if (s_mem1 < 0) return false;
+#else
     s_mem1 = memfd_create("red_two_mem1", 0);
     if (s_mem1 < 0 || ftruncate(s_mem1, kMem1Size) != 0) return false;
+#endif
     u8* base = reserve(kFixedGuestBase, 0x100000000ull);
     if (!base) return false;
     for (u32 at : {0x80000000u, 0xC0000000u})
@@ -263,7 +300,36 @@ u8* physPtr(u32 phys, u32 len) {
 
 // The exe's identity: its code. A state holds return addresses into it, so it loads only into
 // the build that saved it.
-#ifndef _WIN32
+#if defined(__ANDROID__)
+// Android: the program is a shared library (libmain.so) the system loads at a random address,
+// so a state loads only into the session that made it (the base is part of the identity). Its
+// code: the executable segments of the object holding this function.
+HostLayout hostLayout() {
+    static u64 base = 0, hash = 0;
+    if (!base) {
+        dl_iterate_phdr(
+            [](dl_phdr_info* info, size_t, void*) -> int {
+                const u64 self = u64(&hostLayout);
+                for (int i = 0; i < info->dlpi_phnum; i++) {
+                    const auto& ph = info->dlpi_phdr[i];
+                    if (ph.p_type != PT_LOAD || !(ph.p_flags & PF_X)) continue;
+                    const u64 lo = info->dlpi_addr + ph.p_vaddr;
+                    if (self < lo || self >= lo + ph.p_memsz) continue;
+                    base = info->dlpi_addr;
+                    for (int j = 0; j < info->dlpi_phnum; j++) {
+                        const auto& p = info->dlpi_phdr[j];
+                        if (p.p_type == PT_LOAD && (p.p_flags & PF_X))
+                            hash ^= XXH3_64bits_withSeed(reinterpret_cast<const void*>(info->dlpi_addr + p.p_vaddr), p.p_filesz, u64(j));
+                    }
+                    return 1;
+                }
+                return 0;
+            },
+            nullptr);
+    }
+    return {base, hash, u64(g_base), u64(s_stacks)};
+}
+#elif !defined(_WIN32)
 extern "C" char __executable_start, etext;  // the linker's: the start of the image, the end of its code
 HostLayout hostLayout() {
     static u64 hash = XXH3_64bits(&__executable_start, size_t(&etext - &__executable_start));

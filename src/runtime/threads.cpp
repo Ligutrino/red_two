@@ -28,8 +28,17 @@
 #include "savestate.h"
 #include "table.h"
 
-// A fresh fiber starts here: rbx = the fiber, r12 = its entry function (initJb below).
-#ifdef _WIN32
+// A fresh fiber starts here: rbx = the fiber, r12 = its entry function (initJb below);
+// AArch64: x19 and x20.
+#if defined(__aarch64__)
+extern "C" __attribute__((naked)) void r2FiberTrampoline() {
+    asm volatile(
+        "mov x0, x19\n\t"
+        "mov x29, #0\n\t"  // (the end of the frame chain for unwinders)
+        "blr x20\n\t"
+        "brk #0\n\t");
+}
+#elif defined(_WIN32)
 extern "C" __attribute__((naked)) void r2FiberTrampoline() {
     asm volatile(
         "movq %rbx, %rcx\n\t"
@@ -164,10 +173,10 @@ void allocStack(HostFiber* f) {
 void fiberEntry(HostFiber* f);
 void initJb(HostFiber* f) {
     memset(&f->jb, 0, sizeof f->jb);
-    f->jb.gpr[0] = u64(f);                                  // rbx
-    f->jb.gpr[4] = (u64(f->hi) - 64) & ~15ull;              // rsp
-    f->jb.gpr[5] = u64(&fiberEntry);                        // r12
-    f->jb.gpr[9] = u64(&r2FiberTrampoline);                 // rip
+    f->jb.arg() = u64(f);
+    f->jb.sp() = (u64(f->hi) - 64) & ~15ull;
+    f->jb.entry() = u64(&fiberEntry);
+    f->jb.pc() = u64(&r2FiberTrampoline);
 }
 
 void loadAll(Ctx& c, u32 ctx) {
@@ -442,7 +451,7 @@ void threadsSaveState(state::Writer& w) {
         w.pod(f.ctx);
         w.pod(f.resumeCtx);
         w.pod(f.id);
-        const u8* sp = reinterpret_cast<const u8*>(f.jb.gpr[4]);
+        const u8* sp = reinterpret_cast<const u8*>(f.jb.sp());
         if (sp < f.lo || sp > f.hi) fatal("fiber %d is not on its stack (sp %p)", f.id, sp);
         w.pod(u64(f.hi - sp));
         w.bytes(sp, size_t(f.hi - sp));

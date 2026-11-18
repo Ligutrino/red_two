@@ -21,6 +21,7 @@
 
 #include "runtime.h"
 #include "achievements.h"
+#include "mods.h"
 #include "savestate.h"
 #include "settings.h"
 
@@ -64,9 +65,8 @@ std::string stateDir() {
         std::string d;
         if (const char* e = getenv("R2_STATE_DIR"); e && *e) d = e;
         else if (automated()) d = "build/test_cache/states";
-        else if (char* pref = SDL_GetPrefPath(nullptr, "Red Two")) {
-            d = std::string(pref) + "states";
-            SDL_free(pref);
+        else if (const std::string u = mods::userDir(); !u.empty()) {
+            d = u + "states";
         } else {
             d = "states";
         }

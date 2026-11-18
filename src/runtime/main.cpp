@@ -10,7 +10,18 @@
 #else
 #include <cxxabi.h>
 #include <dirent.h>
+#ifdef __ANDROID__
+// Android: SDL's Java activity loads libmain.so and calls SDL_main (main below, renamed)
+#include <android/log.h>
+#include <dlfcn.h>
+#include <jni.h>
+#include <unwind.h>
+#include <SDL3/SDL_hints.h>
+#include <SDL3/SDL_main.h>
+#include <SDL3/SDL_system.h>
+#else
 #include <execinfo.h>
+#endif
 #include <signal.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -62,6 +73,9 @@ void logf(const char* tag, const char* fmt, ...) {
     const double t = double(tbNow() - s_t0Tb) / double(kTbClock);
     fprintf(stderr, "[%9.3f %-6s] %s\n", t, tag, buf);
     fflush(stderr);
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_INFO, "RedTwo", "[%9.3f %-6s] %s", t, tag, buf);  // (adb logcat)
+#endif
 }
 
 void fatal(const char* fmt, ...) {
@@ -71,6 +85,9 @@ void fatal(const char* fmt, ...) {
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
     fprintf(stderr, "\n[%9.3f] FATAL: %s\n", double(tbNow() - s_t0Tb) / double(kTbClock), buf);
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_FATAL, "RedTwo", "FATAL: %s", buf);
+#endif
     fprintf(stderr, "%s", guestBacktrace().c_str());
     if (g_trace) {
         fprintf(stderr, "recent guest functions (oldest first):\n");
@@ -97,6 +114,70 @@ void quit(int code) {
 static char** s_argv = nullptr;
 #endif
 
+#ifdef __ANDROID__
+// Android: static methods of the activity (android/java/.../RedTwoActivity.java), called on
+// this thread (SDL attaches it to the Java VM).
+namespace android {
+struct Call {
+    JNIEnv* env = nullptr;
+    jclass cls = nullptr;
+    jmethodID m = nullptr;
+    Call(const char* name, const char* sig) {
+        env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+        jobject act = static_cast<jobject>(SDL_GetAndroidActivity());
+        if (!env || !act) return;
+        cls = env->GetObjectClass(act);
+        env->DeleteLocalRef(act);
+        if (cls) m = env->GetStaticMethodID(cls, name, sig);
+        if (!m) {
+            env->ExceptionClear();
+            logf("main", "Android: the activity has no method %s %s", name, sig);
+        }
+    }
+    ~Call() {
+        if (env && env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+        }
+        if (env && cls) env->DeleteLocalRef(cls);
+    }
+    std::string str(jstring s) {
+        if (!s) return {};
+        const char* c = env->GetStringUTFChars(s, nullptr);
+        std::string r = c ? c : "";
+        if (c) env->ReleaseStringUTFChars(s, c);
+        env->DeleteLocalRef(s);
+        return r;
+    }
+};
+std::string callString(const char* name) {
+    Call c(name, "()Ljava/lang/String;");
+    return c.m ? c.str(static_cast<jstring>(c.env->CallStaticObjectMethod(c.cls, c.m))) : std::string();
+}
+int callIntWithString(const char* name, const std::string& arg) {
+    Call c(name, "(Ljava/lang/String;)I");
+    if (!c.m) return -1;
+    jstring a = c.env->NewStringUTF(arg.c_str());
+    const int r = c.env->CallStaticIntMethod(c.cls, c.m, a);
+    c.env->DeleteLocalRef(a);
+    return c.env->ExceptionCheck() ? -1 : r;
+}
+void callVoidWithString(const char* name, const std::string& arg) {
+    Call c(name, "(Ljava/lang/String;)V");
+    if (!c.m) return;
+    jstring a = c.env->NewStringUTF(arg.c_str());
+    c.env->CallStaticVoidMethod(c.cls, c.m, a);
+    c.env->DeleteLocalRef(a);
+}
+bool callVoid(const char* name) {
+    Call c(name, "()V");
+    if (!c.m) return false;
+    c.env->CallStaticVoidMethod(c.cls, c.m);
+    return !c.env->ExceptionCheck();
+}
+}  // namespace android
+#endif
+
 void quitToDesktop() {
     state::finishWrites();  // a save state still being written
     cardFlushNow();         // (written once a retrace: the last one's writes may be pending)
@@ -106,7 +187,18 @@ void quitToDesktop() {
 // After a save import: the game read its save at boot, so a new instance (same program, same
 // arguments, same working folder) takes over and this one quits.
 void restartGame() {
-#ifndef _WIN32
+#if defined(__ANDROID__)
+    // Android: a small activity in a process of its own ends this one and starts the game
+    // again (RestartActivity.java); this thread waits for the end.
+    logf("main", "restarting");
+    fflush(stderr);
+    if (!android::callVoid("restartApp")) {
+        logf("main", "restart failed");
+        return;
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+    quit(0);
+#elif !defined(_WIN32)
     // Linux: the process replaces itself (same PID: Steam, gamescope and an AppImage's mount
     // stay with it). Its other threads and windows go with the old image.
     logf("main", "restarting");
@@ -160,6 +252,51 @@ void resetGame() {
 }
 
 #ifndef _WIN32
+#ifdef __ANDROID__
+// Android: the host call stack through the unwinder, names from the libraries' dynamic symbol
+// tables (dladdr), demangled; offsets into each library for addr2line / ndk-stack.
+void printHostStack(FILE* f, int skip) {
+    struct Walk {
+        void** cur;
+        void** end;
+    };
+    void* frames[48];
+    Walk w{frames, frames + 48};
+    _Unwind_Backtrace(
+        [](_Unwind_Context* ctx, void* arg) -> _Unwind_Reason_Code {
+            auto* s = static_cast<Walk*>(arg);
+            const uintptr_t pc = _Unwind_GetIP(ctx);
+            if (pc) {
+                if (s->cur == s->end) return _URC_END_OF_STACK;
+                *s->cur++ = reinterpret_cast<void*>(pc);
+            }
+            return _URC_NO_REASON;
+        },
+        &w);
+    const int n = int(w.cur - frames);
+    fprintf(f, "host call stack (thread %ld):\n", long(gettid()));
+    for (int i = skip + 1; i < n; i++) {
+        Dl_info di{};
+        const uintptr_t pc = uintptr_t(frames[i]);
+        if (!dladdr(frames[i], &di) || !di.dli_fname) {
+            fprintf(f, "  %p\n", frames[i]);
+            continue;
+        }
+        std::string name = di.dli_sname ? di.dli_sname : "?";
+        int status = 0;
+        if (char* dm = di.dli_sname ? abi::__cxa_demangle(di.dli_sname, nullptr, nullptr, &status) : nullptr) {
+            if (status == 0) name = dm;
+            free(dm);
+        }
+        const char* lib = strrchr(di.dli_fname, '/');
+        fprintf(f, "  %s+0x%lx (%s+0x%lx)\n", name.c_str(), (unsigned long)(pc - uintptr_t(di.dli_saddr)),
+                lib ? lib + 1 : di.dli_fname, (unsigned long)(pc - uintptr_t(di.dli_fbase)));
+        __android_log_print(ANDROID_LOG_ERROR, "RedTwo", "  %s+0x%lx (%s+0x%lx)", name.c_str(),
+                            (unsigned long)(pc - uintptr_t(di.dli_saddr)), lib ? lib + 1 : di.dli_fname,
+                            (unsigned long)(pc - uintptr_t(di.dli_fbase)));
+    }
+}
+#else
 // Linux: the host call stack through the C library's backtrace (names from the exe's dynamic
 // symbol table: linked with -rdynamic), demangled.
 void printHostStack(FILE* f, int skip) {
@@ -181,6 +318,7 @@ void printHostStack(FILE* f, int skip) {
     }
     free(names);
 }
+#endif
 
 // A crash outside guest memory (memory.cpp's SIGSEGV handler passes those on), SIGILL, SIGFPE.
 void hostCrash(int sig, void* info, void* uc) {
@@ -535,9 +673,8 @@ static std::string s_sessionLog;
 static void setupLogOutput(int, char**) {
     if (isatty(2) || getenv("R2_BACKGROUND") || getenv("R2_HEADLESS") || getenv("R2_INPUT") || getenv("R2_LOG_STDERR")) return;
     std::string dir;
-    if (char* pref = SDL_GetPrefPath(nullptr, "Red Two")) {
-        dir = std::string(pref) + "logs";
-        SDL_free(pref);
+    if (const std::string u = rt::mods::userDir(); !u.empty()) {
+        dir = u + "logs";
         mkdir(dir.c_str(), 0755);
         struct stat st{};
         if (stat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) dir.clear();
@@ -680,7 +817,9 @@ static std::string findDisc() {
         dirs.push_back(fs::path(std::u8string(pref, pref + strlen(pref))));
         SDL_free(pref);
     }
-#ifndef _WIN32
+#if defined(__ANDROID__)
+    dirs.push_back(fs::path(rt::mods::userDir()));  // Android/data/<package>/files (over USB)
+#elif !defined(_WIN32)
     if (const char* home = getenv("HOME")) {
         dirs.push_back(fs::path(home) / "Emulation/roms/gc");
         dirs.push_back(fs::path(home) / "Emulation/roms/gamecube");
@@ -705,10 +844,60 @@ static std::string findDisc() {
     return {};
 }
 
+#ifdef __ANDROID__
+// Android: the disc image picked in the system's document picker (any folder, a USB stick, a
+// cloud drive) - the one picked before (its permission kept), else the picker. The image is
+// read through the descriptor the picker's document gave ("fd:<n>", kept open).
+static std::string androidDisc() {
+    using rt::logf;
+    std::string uri = rt::android::callString("savedDiscUri");
+    bool asked = false;
+    for (;;) {
+        if (!uri.empty()) {
+            const int fd = rt::android::callIntWithString("openUriFd", uri);
+            if (fd >= 0) {
+                const std::string path = "fd:" + std::to_string(fd);
+                std::string err;
+                auto img = disc::open(path, err);
+                char id[8] = {};
+                if (img && img->read(0, id, 8) && !memcmp(id, "GSWE64", 6) && id[7] == 0) {
+                    rt::android::callVoidWithString("saveDiscUri", uri);
+                    logf("disc", "the picked disc %s", uri.c_str());
+                    return path;
+                }
+                close(fd);
+                logf("disc", "%s is not Rogue Leader (USA, GSWE64 revision 0)%s%s", uri.c_str(), err.empty() ? "" : ": ", err.c_str());
+                if (asked)
+                    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "Red Two",
+                                             "That file is not Star Wars: Rogue Squadron II - Rogue Leader (USA, GSWE64, revision 0). "
+                                             "Choose your disc image (.iso, .gcm, .rvz or .wia).",
+                                             nullptr);
+            } else {
+                logf("disc", "cannot open %s (moved or deleted?)", uri.c_str());
+            }
+        }
+        if (!asked)
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Red Two",
+                                     "Red Two needs your own disc image of Star Wars: Rogue Squadron II - Rogue Leader (USA, GSWE64) "
+                                     "as .iso, .gcm, .rvz or .wia.\n\nChoose it on the next screen; Red Two remembers it.",
+                                     nullptr);
+        asked = true;
+        uri = rt::android::callString("pickDisc");
+        if (uri.empty()) return {};  // canceled
+    }
+}
+#endif
+
 int main(int argc, char** argv) {
     using namespace rt;
 #ifndef _WIN32
     s_argv = argv;
+#endif
+#ifdef __ANDROID__
+    // relative paths (saves/, R2_* dumps) land in the app's shared storage folder
+    if (const std::string u = mods::userDir(); !u.empty()) chdir(u.c_str());
+    // the back button / gesture opens the menu (as F1) instead of closing the app
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
 #endif
     setupLogOutput(argc, argv);
     std::string disc;
@@ -779,6 +968,10 @@ int main(int argc, char** argv) {
     tableInit();
     if (disc.empty()) {  // no --disc: the usual places
         disc = findDisc();
+#ifdef __ANDROID__
+        if (disc.empty()) disc = androidDisc();
+        if (disc.empty()) fatal("no disc image picked");
+#endif
         if (disc.empty()) {
             std::string where;
             if (char* pref = SDL_GetPrefPath(nullptr, "Red Two")) {

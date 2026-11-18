@@ -5,7 +5,13 @@
 
 #include <zstd.h>
 
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <list>
 #include <unordered_map>
@@ -13,27 +19,41 @@
 
 namespace disc {
 
-#ifndef _WIN32
-#define _fseeki64 fseeko
-#define _ftelli64 ftello
-#endif
-
 namespace {
 
 uint32_t be32(const uint8_t* p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3]; }
 uint64_t be64(const uint8_t* p) { return uint64_t(be32(p)) << 32 | be32(p + 4); }
 
+#ifdef _WIN32
 bool seekRead(FILE* f, uint64_t off, void* dst, size_t len) {
     if (_fseeki64(f, int64_t(off), SEEK_SET) != 0) return false;
     return fread(dst, 1, len, f) == len;
 }
+uint64_t fileSize(FILE* f) {
+    _fseeki64(f, 0, SEEK_END);
+    return uint64_t(_ftelli64(f));
+}
+#else
+// POSIX: positioned reads, which leave the file offset alone - an image opened from a file
+// descriptor ("fd:<n>", Android's document picker) shares its offset with every dup of it.
+bool seekRead(FILE* f, uint64_t off, void* dst, size_t len) {
+    auto* p = static_cast<uint8_t*>(dst);
+    while (len) {
+        const ssize_t n = pread(fileno(f), p, len, off_t(off));
+        if (n <= 0) return false;
+        p += n, off += uint64_t(n), len -= size_t(n);
+    }
+    return true;
+}
+uint64_t fileSize(FILE* f) {
+    struct stat st{};
+    return fstat(fileno(f), &st) == 0 ? uint64_t(st.st_size) : 0;
+}
+#endif
 
 class Iso final : public Image {
 public:
-    explicit Iso(FILE* f) : f_(f) {
-        _fseeki64(f_, 0, SEEK_END);
-        size_ = uint64_t(_ftelli64(f_));
-    }
+    explicit Iso(FILE* f) : f_(f) { size_ = fileSize(f_); }
     ~Iso() override { fclose(f_); }
     bool read(uint64_t off, void* dst, uint32_t len) override {
         return off + len <= size_ && seekRead(f_, off, dst, len);
@@ -275,13 +295,22 @@ private:
 }  // namespace
 
 std::unique_ptr<Image> open(const std::string& path, std::string& error) {
-    FILE* f = fopen(path.c_str(), "rb");
+    FILE* f = nullptr;
+#ifndef _WIN32
+    // "fd:<n>": a file descriptor the caller keeps open (Android hands out documents that way;
+    // the image gets its own duplicate)
+    if (path.compare(0, 3, "fd:") == 0) {
+        const int fd = dup(atoi(path.c_str() + 3));
+        if (fd >= 0 && !(f = fdopen(fd, "rb"))) close(fd);
+    } else
+#endif
+        f = fopen(path.c_str(), "rb");
     if (!f) {
         error = "cannot open " + path;
         return nullptr;
     }
     char magic[4] = {};
-    fread(magic, 1, 4, f);
+    seekRead(f, 0, magic, 4);
     if (memcmp(magic, "RVZ\x01", 4) == 0 || memcmp(magic, "WIA\x01", 4) == 0) {
         auto r = std::make_unique<Rvz>();
         if (!r->init(f, error)) return nullptr;  // (the Rvz owns and closes f)

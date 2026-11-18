@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string>
 
+#include "mods.h"
 #include "runtime.h"
 
 namespace rt::settings {
@@ -87,10 +88,7 @@ void load() {
     const bool automated = envFlag("R2_BACKGROUND") || envFlag("R2_HEADLESS") || getenv("R2_INPUT");
     if (automated) s_settings.fastDisc = false;  // input scripts are timed for the drive's speed
     if (!automated) {
-        if (char* dir = SDL_GetPrefPath(nullptr, "Red Two")) {
-            s_path = std::string(dir) + "settings.ini";
-            SDL_free(dir);
-        }
+        if (const std::string dir = mods::userDir(); !dir.empty()) s_path = dir + "settings.ini";
     }
     if (!s_path.empty()) {
         if (FILE* f = fopen(s_path.c_str(), "r")) {
@@ -104,6 +102,15 @@ void load() {
             s_settings.fullscreen = true;
             s_settings.aspect = Aspect::Window;
             logf("config", "first start on a Steam Deck: fullscreen, aspect of the screen");
+        } else {
+#ifdef __ANDROID__
+            // the first start on Android: the picture as wide as the screen (wider phones get
+            // 21:9 and bars), rendered at 960 lines rather than the screen's own (a phone's GPU)
+            s_settings.fullscreen = true;
+            s_settings.aspect = Aspect::Window;
+            s_settings.resolution = Resolution::X2;
+            logf("config", "first start on Android: aspect of the screen, 960p");
+#endif
         }
     }
     // R2_SET="fps=120;aspect=1": overrides, e.g. for test runs

@@ -98,6 +98,48 @@ extern "C" __attribute__((naked)) void rt_longjmp(rt::JmpBuf*, int) {
         "jmpq *72(%rdi)\n\t");
 }
 
+#elif defined(__aarch64__)
+
+// AAPCS64: x0 = buffer. Layout (sjlj.h): x19-x28 at 0-72, x29 at 80, x30 at 88, sp at 96,
+// d8-d15 at 112-168. The return address (x30) is where rt_longjmp continues.
+extern "C" __attribute__((naked, returns_twice)) int rt_setjmp(rt::JmpBuf*) {
+    asm volatile(
+        "stp x19, x20, [x0, #0]\n\t"
+        "stp x21, x22, [x0, #16]\n\t"
+        "stp x23, x24, [x0, #32]\n\t"
+        "stp x25, x26, [x0, #48]\n\t"
+        "stp x27, x28, [x0, #64]\n\t"
+        "stp x29, x30, [x0, #80]\n\t"
+        "mov x9, sp\n\t"
+        "str x9, [x0, #96]\n\t"
+        "stp d8, d9, [x0, #112]\n\t"
+        "stp d10, d11, [x0, #128]\n\t"
+        "stp d12, d13, [x0, #144]\n\t"
+        "stp d14, d15, [x0, #160]\n\t"
+        "mov w0, #0\n\t"
+        "ret\n\t");
+}
+
+// x0 = buffer, w1 = value (0 becomes 1)
+extern "C" __attribute__((naked)) void rt_longjmp(rt::JmpBuf*, int) {
+    asm volatile(
+        "ldp x19, x20, [x0, #0]\n\t"
+        "ldp x21, x22, [x0, #16]\n\t"
+        "ldp x23, x24, [x0, #32]\n\t"
+        "ldp x25, x26, [x0, #48]\n\t"
+        "ldp x27, x28, [x0, #64]\n\t"
+        "ldp x29, x30, [x0, #80]\n\t"
+        "ldr x9, [x0, #96]\n\t"
+        "mov sp, x9\n\t"
+        "ldp d8, d9, [x0, #112]\n\t"
+        "ldp d10, d11, [x0, #128]\n\t"
+        "ldp d12, d13, [x0, #144]\n\t"
+        "ldp d14, d15, [x0, #160]\n\t"
+        "cmp w1, #0\n\t"
+        "csinc w0, w1, wzr, ne\n\t"
+        "ret\n\t");  // (to x30: a RET is not checked by branch target identification)
+}
+
 #else
-#error "sjlj.cpp: only x86-64 (Win64 and System V) is implemented"
+#error "sjlj.cpp: only x86-64 (Win64 and System V) and AArch64 are implemented"
 #endif

@@ -15,7 +15,9 @@
 
 namespace rt::mods {
 
-std::string userDir();      // %APPDATA%\Red Two\ (ends with a separator); "" if unknown
+// %APPDATA%\Red Two\, ~/.local/share/Red Two/, on Android the app's shared storage folder
+// (Android/data/<package>/files/); ends with a separator; "" if unknown
+std::string userDir();
 std::string texturesDir();  // where texture packs go (userDir()/textures/)
 
 // --- texture packs (mods.cpp) ------------------------------------------------------------

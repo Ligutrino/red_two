@@ -42,6 +42,9 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <winhttp.h>
+#elif defined(__ANDROID__)
+#include <jni.h>
+#include <SDL3/SDL_system.h>
 #else
 #include <dlfcn.h>
 #endif
@@ -123,6 +126,47 @@ bool httpFetch(const std::string& url, const std::string& post, const std::strin
         WinHttpCloseHandle(req);
     }
     if (con) WinHttpCloseHandle(con);
+    return ok;
+}
+#elif defined(__ANDROID__)
+// Android: Java's HttpURLConnection (RedTwoActivity.httpFetch): the system's TLS and
+// certificates. Worker threads are attached to the Java VM by SDL_GetAndroidJNIEnv.
+bool httpFetch(const std::string& url, const std::string& post, const std::string& type, int& status, std::string& body) {
+    JNIEnv* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+    jobject act = env ? static_cast<jobject>(SDL_GetAndroidActivity()) : nullptr;
+    if (!act) return false;
+    jclass cls = env->GetObjectClass(act);
+    env->DeleteLocalRef(act);
+    jmethodID m = env->GetStaticMethodID(cls, "httpFetch", "(Ljava/lang/String;[BLjava/lang/String;Ljava/lang/String;[I)[B");
+    if (!m) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(cls);
+        return false;
+    }
+    jstring jurl = env->NewStringUTF(url.c_str());
+    jbyteArray jpost = nullptr;
+    if (!post.empty()) {
+        jpost = env->NewByteArray(jsize(post.size()));
+        env->SetByteArrayRegion(jpost, 0, jsize(post.size()), reinterpret_cast<const jbyte*>(post.data()));
+    }
+    jstring jtype = env->NewStringUTF(type.empty() ? "application/x-www-form-urlencoded" : type.c_str());
+    jstring jua = env->NewStringUTF(s_userAgent.c_str());
+    jintArray jstatus = env->NewIntArray(1);
+    auto res = static_cast<jbyteArray>(env->CallStaticObjectMethod(cls, m, jurl, jpost, jtype, jua, jstatus));
+    bool ok = false;
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    } else if (res) {
+        jint st = 0;
+        env->GetIntArrayRegion(jstatus, 0, 1, &st);
+        status = int(st);
+        const jsize n = env->GetArrayLength(res);
+        body.assign(size_t(n), '\0');
+        if (n) env->GetByteArrayRegion(res, 0, n, reinterpret_cast<jbyte*>(body.data()));
+        ok = true;
+    }
+    for (jobject o : {jobject(res), jobject(jurl), jobject(jpost), jobject(jtype), jobject(jua), jobject(jstatus), jobject(cls)})
+        if (o) env->DeleteLocalRef(o);
     return ok;
 }
 #else
@@ -466,8 +510,10 @@ void ensureClient() {
     rc_client_set_unofficial_enabled(s_client, 0);
     char clause[64] = {};
     rc_client_get_user_agent_clause(s_client, clause, sizeof clause);
-#ifdef _WIN32
+#if defined(_WIN32)
     s_userAgent = std::string("RedTwo/1.0 (Windows) ") + clause;
+#elif defined(__ANDROID__)
+    s_userAgent = std::string("RedTwo/1.0 (Android) ") + clause;
 #else
     s_userAgent = std::string("RedTwo/1.0 (Linux) ") + clause;
 #endif

@@ -40,6 +40,14 @@ set(R2_GEN_FILES 96 CACHE STRING "number of generated code files")
 set(R2_GEN_JOBS 12 CACHE STRING "parallel compiles of generated code")
 set_property(GLOBAL APPEND PROPERTY JOB_POOLS r2gen=${R2_GEN_JOBS})
 
+# Android: the program is a shared library (libmain.so) SDL's Java activity loads; everything
+# in it position-independent. The recompiler has to run on the build machine: R2_HOST_RECOMP
+# names one built there (tools/build_android.ps1 passes build/windows/r2recomp.exe).
+if(ANDROID)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+set(R2_HOST_RECOMP "" CACHE FILEPATH "a recompiler built for the build machine (cross builds: Android)")
+
 # --- recompiler -------------------------------------------------------------------------
 add_executable(r2recomp
     src/recompiler/main.cpp
@@ -70,10 +78,19 @@ foreach(i RANGE ${_last})
     list(APPEND GEN_SOURCES "${GEN_DIR}/code_${_n}.cpp")
 endforeach()
 file(GLOB R2_CONFIG "${CMAKE_SOURCE_DIR}/config/GSWE64/*.txt")
+if(R2_HOST_RECOMP)
+    set(_r2_recomp "${R2_HOST_RECOMP}")
+    set(_r2_recomp_dep "${R2_HOST_RECOMP}")
+elseif(CMAKE_CROSSCOMPILING)
+    message(FATAL_ERROR "cross build: set R2_HOST_RECOMP to an r2recomp built for this machine")
+else()
+    set(_r2_recomp r2recomp)
+    set(_r2_recomp_dep r2recomp)
+endif()
 add_custom_command(
     OUTPUT ${GEN_SOURCES} "${GEN_DIR}/funcs.h"
-    COMMAND r2recomp "${R2_DOL}" "${CMAKE_SOURCE_DIR}/config/GSWE64" "${GEN_DIR}" --files ${R2_GEN_FILES}
-    DEPENDS r2recomp "${R2_DOL}" ${R2_CONFIG}
+    COMMAND ${_r2_recomp} "${R2_DOL}" "${CMAKE_SOURCE_DIR}/config/GSWE64" "${GEN_DIR}" --files ${R2_GEN_FILES}
+    DEPENDS ${_r2_recomp_dep} "${R2_DOL}" ${R2_CONFIG}
     COMMENT "Recompiling main.dol"
     VERBATIM)
 
@@ -85,6 +102,10 @@ if(MSVC)
     # clang-cl: generated code is huge and full of labels
     target_compile_options(r2game PRIVATE /O2 -Wno-unused-label -Wno-unused-variable -Wno-unused-but-set-variable
         -fno-strict-aliasing /GS-)
+elseif(ANDROID)
+    # Android (AArch64, position-independent): no stack protector either (as below)
+    target_compile_options(r2game PRIVATE -O2 -Wno-unused-label -Wno-unused-variable -Wno-unused-but-set-variable
+        -fno-strict-aliasing -fno-stack-protector)
 else()
     # Linux (clang): as for Windows - no stack protector (save states keep host stacks, whose
     # canaries differ per process), no CET (rt_longjmp jumps without the shadow stack), not
@@ -96,8 +117,12 @@ endif()
 # Zen and later: AVX2, FMA, MOVBE, BMI2, LZCNT) makes the PowerPC's fused multiply-adds one
 # instruction instead of a call into the C library and big-endian loads/stores one MOVBE.
 # Floating-point contraction stays off: the game's separate multiplies and adds round as on
-# the GameCube. Empty: the compiler's baseline (any x86-64).
-set(R2_ARCH "x86-64-v3" CACHE STRING "x86-64 level for the game and runtime code (empty: baseline)")
+# the GameCube. Empty: the compiler's baseline (any x86-64; ARM builds: always the baseline).
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    set(R2_ARCH "x86-64-v3" CACHE STRING "x86-64 level for the game and runtime code (empty: baseline)")
+else()
+    set(R2_ARCH "" CACHE STRING "x86-64 level for the game and runtime code (empty: baseline)")
+endif()
 if(R2_ARCH)
     if(MSVC)
         set(_r2_arch "/clang:-march=${R2_ARCH}")
@@ -127,7 +152,7 @@ target_include_directories(rcheevos PUBLIC extern/rcheevos/include)
 target_compile_definitions(rcheevos PUBLIC RC_CLIENT_SUPPORTS_HASH PRIVATE _CRT_SECURE_NO_WARNINGS)
 
 # --- runtime ----------------------------------------------------------------------------
-add_executable(red_two
+set(R2_RUNTIME_SOURCES
     src/runtime/main.cpp
     src/runtime/memory.cpp
     src/runtime/cpu.cpp
@@ -155,15 +180,33 @@ add_executable(red_two
     src/runtime/card_image.cpp
     src/runtime/dolphin_import.cpp
     src/runtime/gfx/menu.cpp
+    src/runtime/gfx/touch.cpp
     src/runtime/savestate.cpp
     src/runtime/hotkeys.cpp
     src/runtime/achievements.cpp)
+if(ANDROID)
+    add_library(red_two SHARED ${R2_RUNTIME_SOURCES})
+    set_target_properties(red_two PROPERTIES OUTPUT_NAME main)  # libmain.so, what SDLActivity loads
+else()
+    add_executable(red_two ${R2_RUNTIME_SOURCES})
+endif()
 target_include_directories(red_two PRIVATE src/runtime "${GEN_DIR}" extern/aurora/lib)
-# Program icon: your own res/icon.ico (not in the repository), built in when it exists.
-if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/res/icon.ico")
-    target_sources(red_two PRIVATE res/red_two.rc)
-    set_source_files_properties(res/red_two.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/res/icon.ico")
-    target_compile_definitions(red_two PRIVATE R2_HAS_ICON=1)
+# Program icon: your own res/icon.ico (not in the repository) when it exists, else Red Two's
+# own res/red_two.ico (no game artwork; what public builds use: -DR2_ICON=res/red_two.ico).
+if(EXISTS "${CMAKE_SOURCE_DIR}/res/icon.ico")
+    set(_r2_icon_default "${CMAKE_SOURCE_DIR}/res/icon.ico")
+else()
+    set(_r2_icon_default "${CMAKE_SOURCE_DIR}/res/red_two.ico")
+endif()
+set(R2_ICON "${_r2_icon_default}" CACHE FILEPATH "program icon (.ico, Windows)")
+if(WIN32 AND R2_ICON)
+    get_filename_component(_r2_icon "${R2_ICON}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+    if(EXISTS "${_r2_icon}")
+        configure_file(res/red_two.rc.in "${CMAKE_BINARY_DIR}/red_two.rc" @ONLY)
+        target_sources(red_two PRIVATE "${CMAKE_BINARY_DIR}/red_two.rc")
+        set_source_files_properties("${CMAKE_BINARY_DIR}/red_two.rc" PROPERTIES OBJECT_DEPENDS "${_r2_icon}")
+        target_compile_definitions(red_two PRIVATE R2_HAS_ICON=1)
+    endif()
 endif()
 target_compile_definitions(red_two PRIVATE ${R2_DEFS})
 target_compile_options(red_two PRIVATE ${_r2_arch} ${_r2_fp})
@@ -171,6 +214,13 @@ target_link_libraries(red_two PRIVATE r2game aurora::core aurora::gx aurora::vi 
     rcheevos PNG::PNG)
 if(WIN32)
     target_link_libraries(red_two PRIVATE winmm dbghelp winhttp)
+elseif(ANDROID)
+    # Android: position-independent (save states then load only within a session: the system
+    # puts the library anywhere), no stack protector (as the generated code), segments aligned
+    # for devices with 16 KiB pages. The C++ runtime is linked in (ANDROID_STL=c++_static).
+    target_compile_options(red_two PRIVATE -fno-strict-aliasing -fno-stack-protector)
+    target_link_options(red_two PRIVATE -Wl,-z,max-page-size=16384 -Wl,--no-undefined)
+    target_link_libraries(red_two PRIVATE android log dl)
 else()
     # Not a position-independent executable (save states hold return addresses into it, as
     # /DYNAMICBASE:NO on Windows); names in the dynamic symbol table for crash call stacks; the
