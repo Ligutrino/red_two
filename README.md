@@ -3,9 +3,13 @@
 A static recompilation of **Star Wars: Rogue Squadron II – Rogue Leader** (GameCube) for PC.
 
 The game's own PowerPC code is translated to C++ ahead of time and runs on a native runtime
-that stands in for the console's hardware. **No game code or data is included, and there are no
-prebuilt downloads**: you build it from your own disc image of the USA release (`GSWE64`,
-revision 0), and the build recompiles the game from it.
+that stands in for the console's hardware. **No game data is included**: you need your own disc
+image of the USA release (`GSWE64`, revision 0), for the downloads as for your own build.
+
+**Downloads**: Windows (zip) and Linux / Steam Deck (AppImage) builds are on the
+[Releases](../../releases) page. They contain the game's code in recompiled form, none of its data:
+put your disc image (`.iso`, `.gcm`, `.rvz` or `.wia`, any name) next to the program and start it.
+Or build Red Two yourself (below): the build recompiles the game from your disc.
 
 > Status: playable on Windows and Linux (also packaged as an AppImage for the Steam Deck):
 > menus, cutscenes and missions at full speed with graphics (Aurora), sound (an emulation of the
@@ -120,8 +124,8 @@ in `config/GSWE64/symbols.txt`.
 ## Legal
 
 Red Two is released under the [MIT License](LICENSE). It covers this repository's own code
-only: the code the build generates from your disc stays yours alone and must not be shared.
+only, not the game's code that a build (and the prebuilt downloads) contain in recompiled form.
 
-This project contains no code or assets from the game. Star Wars and Rogue Leader are
+This repository contains no code or assets from the game. Star Wars and Rogue Leader are
 trademarks of Lucasfilm Ltd.; GameCube is a trademark of Nintendo. This project is not
 affiliated with or endorsed by them.
