@@ -3,8 +3,9 @@
 A static recompilation of **Star Wars: Rogue Squadron II – Rogue Leader** (GameCube) for PC.
 
 The game's own PowerPC code is translated to C++ ahead of time and runs on a native runtime
-that stands in for the console's hardware. **No game data is included**: you need your own
-disc image of the USA release (`GSWE64`, revision 0).
+that stands in for the console's hardware. **No game code or data is included, and there are no
+prebuilt downloads**: you build it from your own disc image of the USA release (`GSWE64`,
+revision 0), and the build recompiles the game from it.
 
 > Status: playable on Windows and Linux (also packaged as an AppImage for the Steam Deck):
 > menus, cutscenes and missions at full speed with graphics (Aurora), sound (an emulation of the
@@ -95,8 +96,14 @@ as the screen. Settings, saves, states and logs live in `~/.local/share/Red Two/
 
 ## How it works
 
-See [CLAUDE.md](CLAUDE.md) for the architecture and what we learned about the game
-(it ships a second executable inside `main.dol` and runs it from its own virtual memory).
+`tools/rvz.py` and `src/common/disc_image.cpp` read the disc; the recompiler (`src/recompiler`)
+finds the game's functions in `main.dol` without symbols and writes them out as C++ - including the
+second executable the game hides inside `main.dol` and runs from its own demand-paged virtual
+memory. The runtime (`src/runtime`) stands in for the console: the CPU state and MMU, threads on
+host fibers, the GameCube's hardware at the register level (video, disc, audio DSP, ARAM, memory
+card, controllers), and a bridge that hands the GPU command stream to
+[Aurora](https://github.com/encounter/aurora) for rendering. Names we gave the game's functions are
+in `config/GSWE64/symbols.txt`.
 
 ## Legal
 
