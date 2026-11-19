@@ -1,5 +1,8 @@
 # Red Two
 
+[![release](https://img.shields.io/github/v/release/gminustwo/red_two?filter=v%2A&sort=semver&display_name=tag&label=release&color=orange)](https://github.com/gminustwo/red_two/releases/latest)
+[![downloads](https://img.shields.io/github/downloads/gminustwo/red_two/total?label=downloads&color=brightgreen)](https://github.com/gminustwo/red_two/releases)
+
 A static recompilation of **Star Wars: Rogue Squadron II – Rogue Leader** (GameCube) for PC.
 
 The game's own PowerPC code is translated to C++ ahead of time and runs on a native runtime
