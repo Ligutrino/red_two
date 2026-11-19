@@ -8,8 +8,13 @@ image of the USA release (`GSWE64`, revision 0), for the downloads as for your o
 
 **Downloads**: Windows (zip) and Linux / Steam Deck (AppImage) builds are on the
 [Releases](../../releases) page. They contain the game's code in recompiled form, none of its data:
-put your disc image (`.iso`, `.gcm`, `.rvz` or `.wia`, any name) next to the program and start it.
-Or build Red Two yourself (below): the build recompiles the game from your disc.
+start it and choose your disc image (`.iso`, `.gcm`, `.rvz` or `.wia`, wherever it is) on the
+launcher's disc page: type or paste its path, pick it in the file dialog, or find it in the
+built-in browser (controller-friendly). Red Two remembers it; one next to the program is also
+found by itself.
+Or build Red Two yourself (below): the build recompiles the game from your disc. The Windows zip
+is portable (everything of yours stays in its `user` folder) and brings the Visual C++ runtime
+with it; it needs a CPU with AVX2 (Intel Haswell / AMD Ryzen or newer) and says so otherwise.
 
 > Status: playable on Windows and Linux (also packaged as an AppImage for the Steam Deck):
 > menus, cutscenes and missions at full speed with graphics (Aurora), sound (an emulation of the
@@ -27,8 +32,10 @@ powershell -ExecutionPolicy Bypass -File tools\build.ps1 -Disc "<your Rogue Lead
 build\windows\red_two.exe --disc "<your Rogue Leader.rvz>"
 ```
 
-Without `--disc` the game looks for `orig\GSWE64.iso`, `orig\GSWE64.rvz`, `GSWE64.rvz` and
-`GSWE64.iso`. `tools\rvz.py` (Python + libzstd) can still extract a disc or convert it to ISO.
+Without `--disc` the game takes the disc chosen in the launcher before (F1 > DISPLAY > Game disc),
+else looks for `orig\GSWE64.iso`, `orig\GSWE64.rvz`, `GSWE64.rvz`, `GSWE64.iso` and any GSWE64
+image next to the program or in the user folder, else the launcher asks for it.
+`tools\rvz.py` (Python + libzstd) can still extract a disc or convert it to ISO.
 
 The code generated from your disc ends up in `build/` and is yours alone: never share it.
 
@@ -64,10 +71,21 @@ as the screen. Settings, saves, states and logs live in `~/.local/share/Red Two/
   Xbox-style pad the face buttons follow the GameCube positions: A = A (fire), X (left) = B,
   B (right) = X, Y = Y; LT/RT = L/R, RB = Z, right stick = C-stick, Menu = Start. Keyboard: WASD or arrows steer, Space = A (fire),
   Left Shift = B, E = X, Q = Y, R = Z, 1/2 = L/R, Enter = Start, IJKL = C-stick, TFGH = D-pad.
-- The game's button prompts show the Xbox controller's buttons (the one each GameCube button is
-  bound to, e.g. "PRESS (Y)" and SELECT CRAFT's "(B) > pilot"); F1 > Controls > Button prompts
-  switches back to the GameCube ones. The C-stick icon stays.
+- The game's button prompts show your controller's buttons (the one each GameCube button is
+  bound to, e.g. "PRESS (Y)" and SELECT CRAFT's "(B) > pilot"): the PlayStation symbols on a
+  PS3 / PS4 / PS5 controller, the Xbox buttons on any other. F1 > Controls > Button prompts
+  picks Automatic, Xbox, PlayStation or the original GameCube ones. The C-stick icon stays.
+- **Control stick** (F1 > Controls): stick sensitivity (25-200%) and a round deadzone (0-50%,
+  both sticks; the output grows from zero at its edge, so small aiming moves are smooth), with a
+  meter showing the stick and what the game gets.
 - F11 or Alt+Enter toggles fullscreen; `--fullscreen` starts that way.
+- **Graphics** (F1, DISPLAY): internal resolution up to 4K, 4x MSAA anti-aliasing (from the next
+  start; WebGPU offers no other sample count) and anisotropic filtering up to 16x.
+- **Where your files are**: on Windows a `user` folder next to `red_two.exe` (the zip has one)
+  holds settings, the memory card, save states, logs, texture packs, codes and the shader cache,
+  so the folder can live anywhere (another drive, a NAS). An install that has no `user` folder
+  but an older `%APPDATA%\Red Two` keeps using that one; create `user` to make it portable (its
+  first start copies the settings, controls and memory card over). Linux: `~/.local/share/Red Two/`.
 - **Cheats** (F1 > Cheats): invincibility, infinite lives, infinite bombs, perfect mission
   stats (the results screen says 0:01, every enemy destroyed, 100% accuracy, no friendlies or
   lives lost and 100% targeting computer efficiency, and the medal is awarded for those), and
@@ -83,18 +101,20 @@ as the screen. Settings, saves, states and logs live in `~/.local/share/Red Two/
   (8 slots; keyboard F5 / F8, F7 / F6). F1 > Controls has the slot, save / load buttons and the
   hotkeys, each any combination of buttons (or keys) held together: pick the row, press A, hold
   the buttons, let go. On a controller Back alone (released with nothing else pressed) still
-  opens the menu. States live in `%APPDATA%\Red Two\states` and also load after a restart, but
+  opens the menu. States live in the user folder's `states` and also load after a restart, but
   only into the same build of Red Two (a rebuild makes them "OLD"). The memory card is not part
   of a state: loading one does not undo the game's own saves.
-- Saves go to `saves/GSWE64_A.raw` (a Memory Card 59 in slot A; the game formats a new one).
-  `R2_CARD_A=<path>` uses another card image.
-- **Mods** (F1, MODS tab): texture packs in Dolphin's format go in
-  `%APPDATA%\Red Two\textures\` (a `GSWE64` folder inside, exactly as in Dolphin's
+- Saves go to the user folder's `saves/GSWE64_A.raw` (slot A; the game formats a new card). A
+  `.raw` card from Dolphin or Nintendont can be copied there as it is, whatever its size (59 to
+  2043 blocks). `R2_CARD_A=<path>` uses another card image.
+- **Mods** (F1, MODS tab): texture packs in Dolphin's format go in the user folder's
+  `textures\` (a `GSWE64` folder inside, exactly as in Dolphin's
   `Load\Textures`; `.dds` and `.png`, mip files and wildcards work), or stay wherever you unpacked
   them: MODS -> Texture pack folder opens a folder browser (d-pad / stick, A opens, X goes up, B
   back) - pick the pack's folder (the one holding `GSWE64`, or `GSWE64` itself), e.g. in Downloads
-  or on an SD card. Gecko / Action Replay codes and
-  patches go in `%APPDATA%\Red Two\codes.ini` (Dolphin's GameSettings format) and can be switched
+  or on an SD card. Back + D-pad up (F9) turns the texture packs off and on again at once, to
+  compare (rebindable in Controls). Gecko / Action Replay codes and
+  patches go in the user folder's `codes.ini` (Dolphin's GameSettings format) and can be switched
   in the menu. The game is recompiled ahead of time, so codes that change its code (Gecko C2
   "insert ASM", writes into code) cannot work; the menu marks them as not supported.
 - **Importing from Dolphin**: MODS -> IMPORT FROM DOLPHIN, or
@@ -107,7 +127,7 @@ as the screen. Settings, saves, states and logs live in `~/.local/share/Red Two/
   the game has used on this device before it starts; off, the game starts at once and objects may
   pop in while their shaders compile. "Ubershaders" (off) draws not-yet-compiled objects with a
   generic shader instead of skipping them.
-- `R2_NO_AUDIO=1` runs without sound. Every session writes a log to `%APPDATA%\Red Two\logs`
+- `R2_NO_AUDIO=1` runs without sound. Every session writes a log to the user folder's `logs`
   (Linux: `~/.local/share/Red Two/logs`); `--console` shows it in a console window on Windows.
 
 ## How it works

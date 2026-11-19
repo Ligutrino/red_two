@@ -2,7 +2,7 @@
 // replacement), cheat / patch codes in Dolphin's format (codes.cpp) and importing those and
 // memory card saves from a Dolphin installation (dolphin_import.cpp).
 //
-// Files live next to settings.ini (%APPDATA%\Red Two\):
+// Files live next to settings.ini (the user folder, userDir(): user\ next to red_two.exe):
 //   textures\GSWE64\...   texture packs, laid out as in Dolphin's Load\Textures
 //   (and wherever the setting textures_folder points: a pack left where it was unpacked)
 //   codes.ini             Gecko / Action Replay codes and patches ([Gecko], [Gecko_Enabled], ...)
@@ -16,9 +16,12 @@
 
 namespace rt::mods {
 
-// %APPDATA%\Red Two\, ~/.local/share/Red Two/, on Android the app's shared storage folder
+// Windows: the folder "user" next to red_two.exe (portable; else an existing %APPDATA%\Red Two\),
+// ~/.local/share/Red Two/, on Android the app's shared storage folder
 // (Android/data/<package>/files/); ends with a separator; "" if unknown
 std::string userDir();
+bool portable();           // userDir() is the folder next to the program (Windows; mods.cpp portableDir)
+std::string userDirNote(); // which user folder and why, for the session log
 std::string texturesDir();  // where texture packs go (userDir()/textures/)
 
 // --- texture packs (mods.cpp) ------------------------------------------------------------
@@ -41,6 +44,8 @@ struct PackInfo {
 };
 void texturesInit();               // after Aurora is up: load the packs if enabled
 void setTexturesEnabled(bool on);  // load / unload now (the menu)
+std::string toggleTexturesShown();  // the hotkey: packs hidden / shown at once; the message to show
+bool texturesHidden();              // hidden by the hotkey (until pressed again or reloaded)
 void reloadTextures();             // after an import: pick up new files
 const std::vector<PackInfo>& loadedPacks();
 // a replacement file of that name in the loaded packs (case-insensitive), "" if none

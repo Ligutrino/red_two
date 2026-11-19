@@ -3,6 +3,7 @@
 #include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_stdinc.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -16,7 +17,7 @@ namespace {
 
 Settings s_settings;
 std::string s_path;  // empty: do not persist (automated runs)
-const char* const kHotkeyNames[HkCount] = {"save_state", "load_state", "next_slot", "previous_slot"};
+const char* const kHotkeyNames[HkCount] = {"save_state", "load_state", "next_slot", "previous_slot", "toggle_textures"};
 
 bool parseBool(const std::string& v) { return v == "1" || v == "true" || v == "on" || v == "yes"; }
 
@@ -52,8 +53,11 @@ void set(const std::string& key, const std::string& value) {
     Settings& s = s_settings;
     const int n = atoi(value.c_str());
     if (key == "launcher") s.launcher = parseBool(value);
+    else if (key == "disc_path") s.discPath = value;
     else if (key == "fullscreen") s.fullscreen = parseBool(value);
     else if (key == "resolution") { if (n >= 0 && n < int(Resolution::Count)) s.resolution = Resolution(n); }
+    else if (key == "msaa") s.msaa = n >= 4 ? 4 : 1;
+    else if (key == "anisotropy") s.anisotropy = n >= 16 ? 16 : n >= 8 ? 8 : n >= 4 ? 4 : n >= 2 ? 2 : 1;
     else if (key == "aspect") {
         if (n >= 0 && n <= 3) s.aspect = Aspect(n);
         else if (n == 4) s.aspect = Aspect::R21_9;  // 32:9 (retired: kMaxAspect)
@@ -84,7 +88,13 @@ void set(const std::string& key, const std::string& value) {
     else if (key == "custom_textures") s.customTextures = parseBool(value);
     else if (key == "prefetch_textures") s.prefetchTextures = parseBool(value);
     else if (key == "textures_folder") s.texturesFolder = value;
-    else if (key == "xbox_buttons") s.xboxButtons = parseBool(value);
+    else if (key == "button_prompts") {
+        for (int i = 0; i < int(ButtonPrompts::Count); i++)
+            if (value == buttonPromptsName(ButtonPrompts(i))) s.buttonPrompts = ButtonPrompts(i);
+    } else if (key == "stick_deadzone") s.stickDeadzone = std::clamp(n, 0, 50);
+    else if (key == "stick_sensitivity") s.stickSensitivity = std::clamp(n, 25, 200);
+    else if (key == "xbox_buttons")  // (before button_prompts: on = Xbox or, now, PlayStation)
+        s.buttonPrompts = parseBool(value) ? ButtonPrompts::Auto : ButtonPrompts::GameCube;
     else if (key == "state_slot") s.stateSlot = n < 1 ? 1 : n > 8 ? 8 : n;
     else {
         for (int a = 0; a < HkCount; a++) {
@@ -118,6 +128,7 @@ Settings& get() { return s_settings; }
 void load() {
     const bool automated = envFlag("R2_BACKGROUND") || envFlag("R2_HEADLESS") || getenv("R2_INPUT");
     if (automated) s_settings.fastDisc = false;  // input scripts are timed for the drive's speed
+    if (const std::string note = mods::userDirNote(); !note.empty()) logf("config", "%s", note.c_str());
     if (!automated) {
         if (const std::string dir = mods::userDir(); !dir.empty()) s_path = dir + "settings.ini";
     }
@@ -166,16 +177,16 @@ void load() {
 // every setting on one line, for the session log
 std::string summary() {
     const Settings& s = s_settings;
-    char b[2048];
+    char b[4096];
     snprintf(b, sizeof b,
-             "launcher=%d fullscreen=%d resolution=%s aspect=%s fps=%d ubershaders=%d precompile_shaders=%d hud_edges=%d tile_menus=%d game_dither=%d "
+             "disc_path=%s launcher=%d fullscreen=%d resolution=%s msaa=%d anisotropy=%d aspect=%s fps=%d ubershaders=%d precompile_shaders=%d hud_edges=%d tile_menus=%d game_dither=%d "
              "show_fps=%d volume=%d background_audio=%d skip_logos=%d skip_cutscenes=%d fast_disc=%d invincible=%d "
              "infinite_lives=%d infinite_ammo=%d perfect_stats=%d all_craft=%d custom_textures=%d prefetch_textures=%d "
-             "textures_folder=%s xbox_buttons=%d state_slot=%d achievements=%d ra_user=%s ra_notifications=%d ra_encore=%d",
-             s.launcher, s.fullscreen, resolutionName(s.resolution), aspectName(s.aspect), s.fps, s.ubershaders, s.precompileShaders, s.hudEdges,
+             "textures_folder=%s button_prompts=%s stick_deadzone=%d stick_sensitivity=%d state_slot=%d achievements=%d ra_user=%s ra_notifications=%d ra_encore=%d",
+             s.discPath.empty() ? "-" : s.discPath.c_str(), s.launcher, s.fullscreen, resolutionName(s.resolution), s.msaa, s.anisotropy, aspectName(s.aspect), s.fps, s.ubershaders, s.precompileShaders, s.hudEdges,
              s.tileMenus, s.gameDither, s.showFps, s.volume, s.backgroundAudio, s.skipLogos, s.skipCutscenes,
              s.fastDisc, s.invincible, s.infiniteLives, s.infiniteAmmo, s.perfectStats, s.allCraft, s.customTextures,
-             s.prefetchTextures, s.texturesFolder.empty() ? "-" : s.texturesFolder.c_str(), s.xboxButtons, s.stateSlot, s.achievements, s.raUser.empty() ? "-" : s.raUser.c_str(),
+             s.prefetchTextures, s.texturesFolder.empty() ? "-" : s.texturesFolder.c_str(), buttonPromptsName(s.buttonPrompts), s.stickDeadzone, s.stickSensitivity, s.stateSlot, s.achievements, s.raUser.empty() ? "-" : s.raUser.c_str(),
              s.raNotifications, s.raEncore);
     return b;
 }
@@ -190,11 +201,17 @@ void save() {
         return;
     }
     fprintf(f, "# Red Two settings (also editable in game: F1 or the controller's Back/Select button)\n");
+    fprintf(f, "# your Rogue Leader disc image (chosen in the launcher); empty: one next to Red Two, else it asks\n");
+    fprintf(f, "disc_path=%s\n", s.discPath.c_str());
     fprintf(f, "# the launcher (these settings before the game starts); 0: straight into the game\n");
     fprintf(f, "launcher=%d\n", s.launcher);
     fprintf(f, "fullscreen=%d\n", s.fullscreen);
     fprintf(f, "# 0 window size, 1 480p, 2 960p, 3 1440p, 4 2160p (4K)\n");
     fprintf(f, "resolution=%d\n", int(s.resolution));
+    fprintf(f, "# multisample anti-aliasing: 1 off, 4 (4x); from the next start\n");
+    fprintf(f, "msaa=%d\n", s.msaa);
+    fprintf(f, "# anisotropic filtering forced on: 1 off (the game's own), 2, 4, 8, 16\n");
+    fprintf(f, "anisotropy=%d\n", s.anisotropy);
     fprintf(f, "# 0 4:3, 1 16:9, 2 16:10, 3 21:9, 5 match the window (at most 21:9)\n");
     fprintf(f, "aspect=%d\n", s.aspect == Aspect::Window ? 5 : int(s.aspect));
     fprintf(f, "fps=%d\n", s.fps);
@@ -226,8 +243,11 @@ void save() {
     fprintf(f, "prefetch_textures=%d\n", s.prefetchTextures);
     fprintf(f, "# another folder whose texture packs load too (the folder holding GSWE64, or GSWE64 itself); empty: none\n");
     fprintf(f, "textures_folder=%s\n", s.texturesFolder.c_str());
-    fprintf(f, "# on-screen button prompts: 1 as on an Xbox controller, 0 GameCube\n");
-    fprintf(f, "xbox_buttons=%d\n", s.xboxButtons);
+    fprintf(f, "# on-screen button prompts: auto (PlayStation symbols for a PlayStation controller, else Xbox), xbox, playstation, gamecube\n");
+    fprintf(f, "button_prompts=%s\n", buttonPromptsName(s.buttonPrompts));
+    fprintf(f, "# controller sticks: a round deadzone in %% of the travel (0-50, both sticks), the control stick's sensitivity in %% (25-200)\n");
+    fprintf(f, "stick_deadzone=%d\n", s.stickDeadzone);
+    fprintf(f, "stick_sensitivity=%d\n", s.stickSensitivity);
     fprintf(f, "# RetroAchievements (softcore): the account and its login token (not the password)\n");
     fprintf(f, "achievements=%d\n", s.achievements);
     fprintf(f, "ra_user=%s\n", s.raUser.c_str());
@@ -268,6 +288,15 @@ const char* aspectName(Aspect a) {
     case Aspect::R21_9: return "21:9 ultrawide";
     case Aspect::Window: return "Match window";
     default: return "?";
+    }
+}
+
+const char* buttonPromptsName(ButtonPrompts p) {
+    switch (p) {
+    case ButtonPrompts::Xbox: return "xbox";
+    case ButtonPrompts::PlayStation: return "playstation";
+    case ButtonPrompts::GameCube: return "gamecube";
+    default: return "auto";
     }
 }
 

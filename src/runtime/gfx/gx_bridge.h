@@ -5,7 +5,10 @@
 #include "../ctx.h"
 
 namespace rt::gfx {
-bool init(int argc, char** argv);  // window + renderer; registers the GX command sink
+// window + renderer; registers the GX command sink. disc: the image the game starts with (""
+// if none was found); without a usable one the launcher asks for it and disc is its choice.
+// discNote: why there is none (shown on the launcher's disc page).
+bool init(int argc, char** argv, std::string& disc, const std::string& discNote);
 void vblank();                     // once per emulated retrace (keeps the window responsive)
 u64 frames();                      // frames presented
 std::string stats();               // Aurora's per-frame statistics
@@ -21,4 +24,6 @@ void menuImGuiInit(const void* windowSize);  // Aurora's ImGui init callback: fo
 // menu.cpp: the launcher - the settings menu before the game boots (gx_bridge.cpp runLauncher)
 void launcherOpen();
 bool launcherFrame();  // one frame, inside an ImGui frame; true: the player started the game
+void launcherSetDisc(const std::string& path, const std::string& note);  // the disc found at start (also in game)
+std::string launcherDisc();  // the disc chosen (the launcher only starts the game with a usable one)
 }  // namespace rt::gfx

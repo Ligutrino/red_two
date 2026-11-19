@@ -832,6 +832,24 @@ void hle_TargetingPass(Ctx& c) {
     gatherBp(0x7E5C5200);
 }
 
+// The flight reticle (issue #10: "the crosshair is not a circle when using widescreen").
+// ReticleDraw (0x7FC6BFA8) draws its rings and side lines as 2D quads under an identity
+// orthographic projection, at the aim point it projected with the camera, which widescreen
+// already made wide - so the game's numbers are already right for the wide screen, and Aurora's
+// 4:3 layout for 2D squeezed the rings toward the middle a second time (about 0.75 as wide at
+// 16:9). Bracketed like the targeting computer, with another value: the bridge sends these as
+// screen space, identity projection included.
+void hle_ReticleDraw(Ctx& c) {
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        logf("wide", "flight reticle drawn in screen space");
+    }
+    gatherBp(0x7E5C5221);
+    f_7FC6BFA8_orig(c);
+    gatherBp(0x7E5C5220);
+}
+
 // Cutscene movies: CutsceneVideoDraw (0x7FD68C54) draws a movie object's quad (the Death Star's
 // explosion at the end of mission 1, the capital ship's in the Factor 5 intro), placed in the 3D
 // scene to cover the game's own view with a margin. Widescreen showed the scene past its edges

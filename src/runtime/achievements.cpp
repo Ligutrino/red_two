@@ -585,6 +585,13 @@ void init(const std::string& discPath) {
     startLogin();
 }
 
+// the disc the launcher ended up with (init had none, or another): hashed now
+void setDisc(const std::string& discPath) {
+    if (discPath == s_discPath || s_hashThread.joinable() || s_hashReady) return;
+    s_discPath = discPath;
+    if (settings::get().achievements) startHash();
+}
+
 void frame() {
     if (!s_client) return;
     std::vector<std::function<void()>> replies;

@@ -1,13 +1,16 @@
-// On-screen button prompts as on an Xbox controller (setting xbox_buttons, on by default).
+// On-screen button prompts as on an Xbox or PlayStation controller (setting button_prompts:
+// automatic by default - PlayStation symbols while port 1's controller is a PS3 / PS4 / PS5 pad,
+// Xbox buttons otherwise - or always one of them, or the game's own GameCube ones).
 //
 // The game's prompts ("PRESS [Y] FOR MISSION DESCRIPTION", SELECT CRAFT's "[X] > pilot") use
 // four 32x32 RGBA8 textures it loads with the front end: the GameCube A (green), B (red) and
 // the grey kidney-shaped X and Y (found by dumping memory around the Y icon, R2_TEX_DUMP and
 // R2_MEM_DUMP; the C-stick icon stays). Each is replaced through Aurora's texture replacement
 // registry (keyed by the XXH64 of its pixels, like a Dolphin texture pack, but with a priority
-// above any pack) by a round Xbox button drawn here: the face the GameCube button is bound to
-// on port 1's controller (Controls page; by default A = A, B = X, X = B, Y = Y on an Xbox pad,
-// the GameCube positions), so the prompt shows the button to press.
+// above any pack) by a round button drawn here: the face the GameCube button is bound to on
+// port 1's controller (Controls page; by default A = A, B = X, X = B, Y = Y on an Xbox pad, the
+// GameCube positions, and A = cross, B = circle, X = square, Y = triangle on a PlayStation one,
+// Aurora's standard layout), so the prompt shows the button to press.
 #include "../ctx.h"
 #include "../runtime.h"
 #include "../settings.h"
@@ -35,17 +38,31 @@ constexpr u32 kSize = 128;  // drawn at 4x the original 32x32 (the internal reso
 namespace {
 
 
+enum class Style { Xbox = 0, PlayStation };
+constexpr const char* kStyleNames[] = {"Xbox", "PlayStation"};
+
 struct Face {
     SDL_GamepadButton button;
-    char letter;
-    float r, g, b;
+    char glyph;        // Xbox: its letter; PlayStation: 'x' cross, 'o' circle, 's' square, 't' triangle
+    const char* name;  // (log lines, preview files)
+    float r, g, b;     // Xbox: the button's color; PlayStation: the symbol's
 };
-// Xbox face buttons: positions as SDL names them, letters and colors as on the controller
-constexpr Face kFaces[] = {
-    {SDL_GAMEPAD_BUTTON_SOUTH, 'A', 0.30f, 0.72f, 0.22f},
-    {SDL_GAMEPAD_BUTTON_EAST, 'B', 0.86f, 0.18f, 0.16f},
-    {SDL_GAMEPAD_BUTTON_WEST, 'X', 0.13f, 0.45f, 0.90f},
-    {SDL_GAMEPAD_BUTTON_NORTH, 'Y', 0.96f, 0.76f, 0.10f},
+// face buttons per style (Style order): positions as SDL names them
+constexpr Face kFaces[2][4] = {
+    {
+        // Xbox: letters and colors as on the controller
+        {SDL_GAMEPAD_BUTTON_SOUTH, 'A', "A", 0.30f, 0.72f, 0.22f},
+        {SDL_GAMEPAD_BUTTON_EAST, 'B', "B", 0.86f, 0.18f, 0.16f},
+        {SDL_GAMEPAD_BUTTON_WEST, 'X', "X", 0.13f, 0.45f, 0.90f},
+        {SDL_GAMEPAD_BUTTON_NORTH, 'Y', "Y", 0.96f, 0.76f, 0.10f},
+    },
+    {
+        // PlayStation: the symbols in their classic colors, on dark buttons
+        {SDL_GAMEPAD_BUTTON_SOUTH, 'x', "cross", 0.49f, 0.71f, 0.93f},
+        {SDL_GAMEPAD_BUTTON_EAST, 'o', "circle", 0.95f, 0.38f, 0.40f},
+        {SDL_GAMEPAD_BUTTON_WEST, 's', "square", 0.87f, 0.55f, 0.84f},
+        {SDL_GAMEPAD_BUTTON_NORTH, 't', "triangle", 0.26f, 0.82f, 0.70f},
+    },
 };
 
 struct GameIcon {
@@ -64,11 +81,10 @@ struct Seg {
     float x0, y0, x1, y1;
 };
 
-// letter strokes in a unit box (x -0.5..0.5, y -0.5..0.5 downwards)
+// letter / symbol strokes in a unit box (x -0.5..0.5, y -0.5..0.5 downwards)
 std::vector<Seg> letterStrokes(char c) {
     std::vector<Seg> s;
-    auto arc = [&](float cx, float cy, float r, float a0, float a1) {
-        constexpr int n = 14;
+    auto arc = [&](float cx, float cy, float r, float a0, float a1, int n = 14) {
         for (int i = 0; i < n; i++) {
             const float t0 = a0 + (a1 - a0) * float(i) / n, t1 = a0 + (a1 - a0) * float(i + 1) / n;
             s.push_back({cx + r * std::cos(t0), cy + r * std::sin(t0), cx + r * std::cos(t1), cy + r * std::sin(t1)});
@@ -90,6 +106,19 @@ std::vector<Seg> letterStrokes(char c) {
              {-0.29f, 0.5f, 0.07f, 0.5f}};
         arc(0.04f, -0.26f, 0.24f, -pi / 2, pi / 2);
         arc(0.07f, 0.24f, 0.26f, -pi / 2, pi / 2);
+        break;
+    // PlayStation symbols, sized to look alike (a square or triangle as wide as the circle looks bigger)
+    case 'x':
+        s = {{-0.43f, -0.43f, 0.43f, 0.43f}, {0.43f, -0.43f, -0.43f, 0.43f}};
+        break;
+    case 'o':
+        arc(0.f, 0.f, 0.45f, 0.f, 2.f * pi, 48);
+        break;
+    case 's':
+        s = {{-0.4f, -0.4f, 0.4f, -0.4f}, {0.4f, -0.4f, 0.4f, 0.4f}, {0.4f, 0.4f, -0.4f, 0.4f}, {-0.4f, 0.4f, -0.4f, -0.4f}};
+        break;
+    case 't':  // equilateral, its box a little above the middle (its centroid a little below)
+        s = {{0.f, -0.5f, 0.5f, 0.36f}, {0.5f, 0.36f, -0.5f, 0.36f}, {-0.5f, 0.36f, 0.f, -0.5f}};
         break;
     default:
         break;
@@ -116,11 +145,17 @@ void over(float* dst, float r, float g, float b, float a) {
     dst[3] = oa;
 }
 
-std::vector<u8> drawButton(const Face& f, u32 kSize = rt::gfx::kSize) {
+// Xbox: a button in the face's color with a white letter; PlayStation: a dark button with the
+// symbol in the face's color (and a lighter rim, so it does not vanish on dark screens)
+std::vector<u8> drawButton(const Face& f, Style style, u32 kSize = rt::gfx::kSize) {
     std::vector<u8> out(size_t(kSize) * kSize * 4);
+    const bool ps = style == Style::PlayStation;
     const float c = kSize * 0.5f, radius = kSize * 0.47f, rim = kSize * 0.045f;
-    const auto strokes = letterStrokes(f.letter);
-    const float letterH = kSize * 0.46f, half = kSize * 0.064f;
+    const auto strokes = letterStrokes(f.glyph);
+    const float letterH = kSize * 0.46f, half = kSize * (ps ? 0.056f : 0.064f);
+    const float bodyR = ps ? 0.16f : f.r, bodyG = ps ? 0.16f : f.g, bodyB = ps ? 0.18f : f.b;
+    const float inkR = ps ? f.r : 0.97f, inkG = ps ? f.g : 0.97f, inkB = ps ? f.b : 0.97f;
+    const float shadowR = ps ? 0.f : f.r * 0.25f, shadowG = ps ? 0.f : f.g * 0.25f, shadowB = ps ? 0.f : f.b * 0.25f;
     auto letterCover = [&](float px, float py) {  // pixel coordinates
         const float ux = (px - c) / letterH, uy = (py - c) / letterH;
         float d = 1e9f;
@@ -137,17 +172,17 @@ std::vector<u8> drawButton(const Face& f, u32 kSize = rt::gfx::kSize) {
                 // lit from the top: lighter above, darker below, a darker rim
                 const float shade = 0.82f + 0.32f * (-dy / radius) * 0.5f + 0.18f * (1.f - dist / radius);
                 float k = std::clamp(shade, 0.55f, 1.15f);
-                if (dist > radius - rim) k *= 0.62f;
-                over(p, std::min(f.r * k, 1.f), std::min(f.g * k, 1.f), std::min(f.b * k, 1.f), body);
+                if (dist > radius - rim) k *= ps ? 2.3f : 0.62f;
+                over(p, std::min(bodyR * k, 1.f), std::min(bodyG * k, 1.f), std::min(bodyB * k, 1.f), body);
                 // gloss: a soft ellipse over the upper half
                 const float gx = dx / (radius * 0.78f), gy = (py - (c - radius * 0.42f)) / (radius * 0.42f);
                 const float g = 1.f - (gx * gx + gy * gy);
-                if (g > 0.f) over(p, 1.f, 1.f, 1.f, std::min(g, 1.f) * 0.28f * body);
-                // the letter: white, with a shadow below it for contrast
+                if (g > 0.f) over(p, 1.f, 1.f, 1.f, std::min(g, 1.f) * (ps ? 0.18f : 0.28f) * body);
+                // the letter / symbol, with a shadow below it for contrast
                 const float shadow = letterCover(px - kSize * 0.012f, py - kSize * 0.022f);
-                if (shadow > 0.f) over(p, f.r * 0.25f, f.g * 0.25f, f.b * 0.25f, shadow * 0.55f * body);
+                if (shadow > 0.f) over(p, shadowR, shadowG, shadowB, shadow * 0.55f * body);
                 const float lc = letterCover(px, py);
-                if (lc > 0.f) over(p, 0.97f, 0.97f, 0.97f, lc * body);
+                if (lc > 0.f) over(p, inkR, inkG, inkB, lc * body);
             }
             u8* o = &out[(size_t(y) * kSize + x) * 4];
             for (int i = 0; i < 4; i++) o[i] = u8(std::lround(std::clamp(p[i], 0.f, 1.f) * 255.f));
@@ -155,13 +190,13 @@ std::vector<u8> drawButton(const Face& f, u32 kSize = rt::gfx::kSize) {
     return out;
 }
 
-const Face* faceFor(SDL_GamepadButton b) {
-    for (const Face& f : kFaces)
+const Face* faceFor(Style style, SDL_GamepadButton b) {
+    for (const Face& f : kFaces[int(style)])
         if (f.button == b) return &f;
     return nullptr;
 }
 
-// the Xbox face a GameCube button is bound to on port 1's controller (else the default)
+// the face a GameCube button is bound to on port 1's controller (else the default)
 SDL_GamepadButton boundFace(const GameIcon& icon) {
     const auto source = aurora::pad::port_controller(0);
     if (!source) return icon.defaultFace;
@@ -169,14 +204,24 @@ SDL_GamepadButton boundFace(const GameIcon& icon) {
     const aurora::binding::ControlId id = icon.name[0] == 'A' ? c.a : icon.name[0] == 'B' ? c.b : icon.name[0] == 'X' ? c.x : c.y;
     for (const auto& b : aurora::pad::bindings_for_control(aurora::pad::ProfileTarget::controller(source), id))
         if (const auto* btn = b.input.control.get_if<aurora::binding::PhysicalInput::GamepadButton>())
-            if (faceFor(btn->button)) return btn->button;
+            if (faceFor(Style::Xbox, btn->button)) return btn->button;  // (the same positions in every style)
     return icon.defaultFace;
+}
+
+// the style shown now: the setting's, or (automatic) port 1's controller's
+Style currentStyle() {
+    using settings::ButtonPrompts;
+    switch (settings::get().buttonPrompts) {
+    case ButtonPrompts::PlayStation: return Style::PlayStation;
+    case ButtonPrompts::Auto: return input::port1PlayStation() ? Style::PlayStation : Style::Xbox;
+    default: return Style::Xbox;
+    }
 }
 
 // Prompts baked into bigger textures: SELECT CRAFT's bottom row (608x48 CMPR: "[X] > pilot" at
 // the left, "[C-stick] > camera" at the right). The texture is rebuilt from the game's own copy
 // (or a loaded pack's DDS of it, e.g. an HD pack's 2432x192) with the GameCube icon blacked out
-// and the bound Xbox button drawn over it. rect: the icon's pixels in the original texture.
+// and the bound Xbox / PlayStation button drawn over it. rect: the icon's pixels in the original texture.
 // stretch: how much wider than tall the game shows the texture's pixels (the button is drawn
 // that much narrower so it comes out round).
 struct Baked {
@@ -195,6 +240,7 @@ struct BakedState {
     u32 bw = 0, bh = 0;
     std::vector<u8> composed;
     SDL_GamepadButton face = SDL_GAMEPAD_BUTTON_INVALID;
+    Style style = Style::Xbox;
     aurora::texture::ReplacementRegistration reg;
 };
 std::array<BakedState, std::size(kBaked)> s_baked;
@@ -279,14 +325,15 @@ std::vector<u8> upscale(const std::vector<u8>& src, u32 w, u32 h, u32 f) {
     return out;
 }
 
-std::array<std::vector<u8>, 4> s_pixels;  // per Xbox face (kFaces order); Aurora keeps a view
+std::array<std::array<std::vector<u8>, 4>, 2> s_pixels;  // per style and face (kFaces order); Aurora keeps a view
 std::vector<aurora::texture::ReplacementRegistration> s_registered;
 std::array<SDL_GamepadButton, 4> s_shown{};
+Style s_style = Style::Xbox;
 bool s_on = false;
 
-const std::vector<u8>& pixels(const Face& f) {
-    auto& p = s_pixels[size_t(&f - kFaces)];
-    if (p.empty()) p = drawButton(f);
+const std::vector<u8>& pixels(Style style, const Face& f) {
+    auto& p = s_pixels[int(style)][size_t(&f - kFaces[int(style)])];
+    if (p.empty()) p = drawButton(f, style);
     return p;
 }
 
@@ -296,11 +343,12 @@ void composeBaked(size_t i) {
     const Baked& b = kBaked[i];
     if (st.base.empty()) return;
     const SDL_GamepadButton face = s_on ? s_shown[size_t(b.icon)] : SDL_GAMEPAD_BUTTON_INVALID;
-    if (face == st.face) return;
+    if (face == st.face && s_style == st.style) return;
     if (st.reg.id) aurora::texture::unregister_replacement(st.reg);
     st.reg = {};
     st.face = face;
-    const Face* f = faceFor(face);
+    st.style = s_style;
+    const Face* f = faceFor(s_style, face);
     if (!f) return;
     const float sx = float(st.bw) / float(b.w), sy = float(st.bh) / float(b.h);
     st.composed = st.base;
@@ -311,9 +359,9 @@ void composeBaked(size_t i) {
     memcpy(bg, &st.base[(size_t(y0) * st.bw + (x0 > 2 ? x0 - 2 : 0)) * 4], 4);
     for (u32 y = y0; y < y1; y++)
         for (u32 x = x0; x < x1; x++) memcpy(&st.composed[(size_t(y) * st.bw + x) * 4], bg, 4);
-    // the Xbox button in its place, as tall as the rectangle
+    // the controller's button in its place, as tall as the rectangle
     const u32 d = std::max(8u, u32(std::min((b.x1 - b.x0) * sx * b.stretch, (b.y1 - b.y0) * sy)));
-    const std::vector<u8> sq = drawButton(*f, d);
+    const std::vector<u8> sq = drawButton(*f, s_style, d);
     const u32 dw = std::max(4u, u32(std::lround(float(d) / b.stretch)));  // narrower by the stretch
     std::vector<u8> btn(size_t(dw) * d * 4);
     for (u32 y = 0; y < d; y++)
@@ -342,9 +390,10 @@ void composeBaked(size_t i) {
                                              .height = st.bh,
                                              .mipCount = 1,
                                              .gxFormat = GX_TF_RGBA8_PC,
-                                             .label = "Xbox prompt"};
+                                             .label = s_style == Style::PlayStation ? "PlayStation prompt" : "Xbox prompt"};
     st.reg = aurora::texture::register_replacement(key, r, {.priority = 1000});
-    logf("gfx", "button prompts: %ux%u prompt texture rebuilt (%ux%u) with Xbox %c", b.w, b.h, st.bw, st.bh, f->letter);
+    logf("gfx", "button prompts: %ux%u prompt texture rebuilt (%ux%u) with %s %s", b.w, b.h, st.bw, st.bh,
+         kStyleNames[int(s_style)], f->name);
 }
 
 }  // namespace
@@ -381,38 +430,42 @@ void buttonIconsUpdate() {
     if (!previewed) {
         previewed = true;
         if (const char* dir = getenv("R2_BUTTON_PREVIEW"))
-            for (const Face& f : kFaces)
-                texdump::writePng(std::string(dir) + "/xbox_" + f.letter + ".png", kSize, kSize, pixels(f).data());
+            for (Style style : {Style::Xbox, Style::PlayStation})
+                for (const Face& f : kFaces[int(style)])
+                    texdump::writePng(std::string(dir) + (style == Style::Xbox ? "/xbox_" : "/playstation_") + f.name + ".png",
+                                      kSize, kSize, pixels(style, f).data());
     }
-    const bool on = settings::get().xboxButtons;
+    const bool on = settings::get().buttonPrompts != settings::ButtonPrompts::GameCube;
+    const Style style = on ? currentStyle() : Style::Xbox;
     std::array<SDL_GamepadButton, 4> want{};
     if (on)
         for (size_t i = 0; i < 4; i++) want[i] = boundFace(kIcons[i]);
-    if (on == s_on && want == s_shown) return;
+    if (on == s_on && want == s_shown && style == s_style) return;
     if (!s_registered.empty()) aurora::texture::unregister_replacements(s_registered);
     s_registered.clear();
     s_on = on;
     s_shown = want;
+    s_style = style;
     for (size_t i = 0; i < std::size(kBaked); i++) composeBaked(i);
     if (!on) {
         logf("gfx", "button prompts: GameCube");
         return;
     }
     for (size_t i = 0; i < 4; i++) {
-        const Face* f = faceFor(want[i]);
+        const Face* f = faceFor(style, want[i]);
         if (!f) continue;
-        const auto& px = pixels(*f);
+        const auto& px = pixels(style, *f);
         aurora::texture::TextureSourceKey key{.textureHash = kIcons[i].hash, .width = 32, .height = 32, .format = GX_TF_RGBA8};
         aurora::texture::RawTextureReplacement r{.bytes = {px.data(), px.size()},
                                                  .width = kSize,
                                                  .height = kSize,
                                                  .mipCount = 1,
                                                  .gxFormat = GX_TF_RGBA8_PC,
-                                                 .label = "Xbox button"};
+                                                 .label = style == Style::PlayStation ? "PlayStation button" : "Xbox button"};
         s_registered.push_back(aurora::texture::register_replacement(key, r, {.priority = 1000}));
     }
-    logf("gfx", "button prompts: Xbox (GameCube A/B/X/Y show %c %c %c %c)", faceFor(want[0])->letter,
-         faceFor(want[1])->letter, faceFor(want[2])->letter, faceFor(want[3])->letter);
+    logf("gfx", "button prompts: %s (GameCube A/B/X/Y show %s %s %s %s)", kStyleNames[int(style)], faceFor(style, want[0])->name,
+         faceFor(style, want[1])->name, faceFor(style, want[2])->name, faceFor(style, want[3])->name);
 }
 
 

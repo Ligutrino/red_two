@@ -76,6 +76,14 @@ bool automated() { return envFlag("R2_BACKGROUND") || envFlag("R2_HEADLESS") || 
 std::vector<PackInfo> s_packs;
 std::vector<aurora::texture::ReplacementGroup> s_groups;
 bool s_aurora = false;  // Aurora is up (textures can be registered)
+bool s_packsHidden = false;  // hidden by the hotkey (toggleTexturesShown)
+
+void showPacks(bool show) {
+    if (s_packsHidden == !show) return;
+    s_packsHidden = !show;
+    // (packs register at priority 0, the button prompts at 1000)
+    aurora::texture::set_replacement_priority_floor(show ? INT32_MIN : 1);
+}
 
 // the textures root this run uses ("" = none)
 std::string texturesRoot() {
@@ -132,9 +140,116 @@ void load() {
 
 }  // namespace
 
+#ifdef _WIN32
+namespace {
+namespace fs = std::filesystem;
+std::string s_userDirNote;  // what portableDir found or did, for the session log (userDirNote)
+bool s_portable = false;
+
+std::string utf8(const fs::path& p) {
+    const std::u8string s = p.u8string();
+    return std::string(s.begin(), s.end());
+}
+fs::path u8path(const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); }
+
+// A new portable folder takes over a previous install's small files: settings.ini and input.json
+// from %APPDATA%\Red Two (with its texture packs kept where they are, as the textures folder),
+// and the memory card from saves\ in the program's or the working folder (where 1.0 kept it).
+// Copies: the old ones stay.
+void migrate(const fs::path& user, const fs::path& appData, const fs::path& base) {
+    std::error_code ec;
+    std::string copied;
+    auto note = [&](const char* what) { copied += copied.empty() ? what : std::string(", ") + what; };
+    if (!fs::exists(user / "settings.ini", ec) && fs::exists(appData / "settings.ini", ec)) {
+        std::string text;
+        if (FILE* f = _wfopen((appData / "settings.ini").c_str(), L"rb")) {
+            char buf[4096];
+            for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, n);
+            fclose(f);
+        }
+        const fs::path packs = appData / "textures";
+        if (fs::is_directory(packs / "GSWE64", ec) || fs::is_directory(packs / "GSW", ec)) {
+            const std::string key = "\ntextures_folder=";
+            const size_t at = text.rfind(key), v = at + key.size();
+            const bool unset = at == std::string::npos || v >= text.size() || text[v] == '\r' || text[v] == '\n';
+            if (unset) {
+                text += "\ntextures_folder=" + utf8(packs) + "\n";  // (a later line wins)
+                note("texture packs (left in place)");
+            }
+        }
+        if (FILE* f = _wfopen((user / "settings.ini").c_str(), L"wb")) {
+            fwrite(text.data(), 1, text.size(), f);
+            fclose(f);
+            note("settings");
+        }
+    }
+    if (!fs::exists(user / "input.json", ec) && fs::exists(appData / "input.json", ec) &&
+        fs::copy_file(appData / "input.json", user / "input.json", ec))
+        note("controls");
+    if (!fs::exists(user / "saves" / "GSWE64_A.raw", ec))
+        for (const fs::path& dir : {base, fs::current_path(ec)}) {
+            const fs::path card = dir / "saves" / "GSWE64_A.raw";
+            if (dir.empty() || !fs::exists(card, ec)) continue;
+            fs::create_directories(user / "saves", ec);
+            if (fs::copy_file(card, user / "saves" / "GSWE64_A.raw", ec)) {
+                note("memory card");
+                break;
+            }
+        }
+    if (!copied.empty()) s_userDirNote += "; copied from the previous install: " + copied;
+}
+
+// Windows: portable. A folder named "user" next to red_two.exe (the release zip has one) holds
+// settings, the memory card, save states, session logs, the shader cache, texture packs and
+// codes, so the whole program folder can live anywhere (a NAS, a USB stick: issue #13). Without
+// one, an existing %APPDATA%\Red Two (an install from before) stays in use; a new install gets
+// the user folder, or %APPDATA%\Red Two where the program's folder cannot be written.
+std::string portableDir() {
+    const char* baseUtf8 = SDL_GetBasePath();
+    if (!baseUtf8 || !*baseUtf8) return {};
+    const fs::path base = u8path(baseUtf8);
+    const fs::path user = base / "user";
+    fs::path appData;
+    if (const wchar_t* a = _wgetenv(L"APPDATA"); a && *a) appData = fs::path(a) / "Red Two";
+    std::error_code ec;
+    bool fresh = false;
+    if (!fs::is_directory(user, ec)) {
+        if (!appData.empty() && fs::is_directory(appData, ec)) {
+            s_userDirNote = "user folder: " + utf8(appData) + " (an existing install; a folder named user next to red_two.exe makes it portable)";
+            return {};
+        }
+        if (!fs::create_directory(user, ec)) {
+            s_userDirNote = "user folder: cannot create " + utf8(user) + " (" + ec.message() + "): " + utf8(appData);
+            return {};
+        }
+        fresh = true;
+    }
+    s_portable = true;
+    s_userDirNote = "user folder: " + utf8(user) + " (portable)";
+    if (!appData.empty() && (fresh || !fs::exists(user / "settings.ini", ec))) migrate(user, appData, base);
+    return utf8(user) + "\\";
+}
+}  // namespace
+
+bool portable() {
+    userDir();
+    return s_portable;
+}
+std::string userDirNote() {
+    userDir();
+    return s_userDirNote;
+}
+#else
+bool portable() { return false; }
+std::string userDirNote() { return {}; }
+#endif
+
 std::string userDir() {
     static const std::string dir = [] {
         std::string d;
+#ifdef _WIN32
+        if (d = portableDir(); !d.empty()) return d;
+#endif
 #ifdef __ANDROID__
         // Android: the app's folder in shared storage (Android/data/<package>/files), which a PC
         // sees over USB, so texture packs, codes, saves and logs can be put there and taken
@@ -212,9 +327,32 @@ void texturesInit() {
 
 void setTexturesEnabled(bool on) {
     if (!s_aurora) return;
+    showPacks(true);
     if (on) load();
     else unload();
 }
+
+// The hotkey (hotkey_toggle_textures, Dolphin's "Toggle Custom Textures"): the packs hidden or
+// shown again at once, to compare. Aurora patch 0029 ignores registrations below a priority
+// floor: the packs' 0 while the button prompts (1000) stay; nothing is unloaded and prefetched
+// textures stay in memory. With custom textures off in the settings it turns them on (loads).
+std::string toggleTexturesShown() {
+    if (!s_aurora) return "TEXTURE PACKS: NOT AVAILABLE";
+    settings::Settings& s = settings::get();
+    if (!s.customTextures) {
+        s.customTextures = true;
+        settings::save();
+        setTexturesEnabled(true);
+        logf("mods", "texture packs: turned on by the hotkey");
+        return s_packs.empty() ? "NO TEXTURE PACK FOUND" : "TEXTURE PACKS ON";
+    }
+    if (s_packs.empty()) return "NO TEXTURE PACK FOUND";
+    showPacks(s_packsHidden);
+    logf("mods", "texture packs %s by the hotkey", s_packsHidden ? "hidden" : "shown");
+    return s_packsHidden ? "TEXTURE PACKS OFF" : "TEXTURE PACKS ON";
+}
+
+bool texturesHidden() { return s_packsHidden; }
 
 void reloadTextures() {
     if (s_aurora && settings::get().customTextures) load();

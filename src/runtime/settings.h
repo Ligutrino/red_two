@@ -1,4 +1,4 @@
-// Player settings: %APPDATA%\Red Two\settings.ini, edited in the in-game menu (F1 or the
+// Player settings: settings.ini in the user folder (mods::userDir), edited in the in-game menu (F1 or the
 // controller's Back/Select button, see gfx/menu.cpp). Automated runs (R2_BACKGROUND,
 // R2_HEADLESS, R2_INPUT) neither read nor write the file; R2_SET="key=value;..." overrides
 // any setting for them (and for the player's own runs).
@@ -18,10 +18,19 @@ enum class Aspect : int { R4_3 = 0, R16_9, R16_10, R21_9, Window, Count };
 // second and stopped with "FATAL VM ERROR: Out of ARAM memory"; at 21:9 its gameplay uses ~1014.
 inline constexpr float kMaxAspect = 64.f / 27.f;
 
+// The game's button prompts (gfx/button_icons.cpp): Auto shows PlayStation symbols while port 1's
+// controller is a PlayStation one and Xbox buttons otherwise; Xbox / PlayStation always those;
+// GameCube the game's own. settings.ini: button_prompts=auto|xbox|playstation|gamecube (the
+// older xbox_buttons=1/0 reads as auto / gamecube).
+enum class ButtonPrompts : int { Auto = 0, Xbox, PlayStation, GameCube, Count };
+
 struct Settings {
     // start: the launcher (the settings menu before the game boots, gfx/menu.cpp) or straight
     // into the game. On until the player turns it off; --launcher / R2_LAUNCHER=1 show it anyway.
     bool launcher = true;
+    // The game disc image chosen in the launcher (its disc page): used at every start unless
+    // --disc gives another; empty or unusable: found next to the program, else asked for.
+    std::string discPath;
     // display
     bool fullscreen = false;
     Resolution resolution = Resolution::Window;
@@ -33,6 +42,12 @@ struct Settings {
     bool gameDither = false;
     int fps = 60;  // 60, 90, 120 or 144: the emulated retrace rate
     bool showFps = false;
+    // Multisample anti-aliasing: 1 (off) or 4 samples (WebGPU allows no other count); Aurora sets
+    // it up when it starts, so a change applies from the next start
+    int msaa = 1;
+    // Anisotropic filtering forced on mipmapped, filtered textures: 1 (off: the game's own), 2, 4,
+    // 8 or 16 (Aurora patch 0030; applies at once)
+    int anisotropy = 1;
     // While a shader compiles, a generic one (Aurora's ubershader) draws the object instead of it
     // being skipped (Dolphin's hybrid ubershaders). Off by default (the user's call): it is the
     // shader that crashed the Steam Deck's driver before patch 0027, and with shaders compiled
@@ -72,16 +87,22 @@ struct Settings {
     // besides Red Two's own textures folder: e.g. a pack unpacked in ~/Downloads. Empty: none.
     std::string texturesFolder;
     // controls
-    bool xboxButtons = true;  // on-screen button prompts as on an Xbox controller (gfx/button_icons.cpp)
+    ButtonPrompts buttonPrompts = ButtonPrompts::Auto;  // the game's on-screen button prompts (gfx/button_icons.cpp)
+    // Controller sticks (input.cpp shapeStick): a round deadzone in % of the stick's travel that
+    // the output rescales from (both sticks), and the control stick's sensitivity in % (output =
+    // input x sensitivity, clamped: above 100 full deflection comes sooner, below it never does)
+    int stickDeadzone = 15;      // 0..50
+    int stickSensitivity = 100;  // 25..200
     // save states (savestate.cpp): the slot the hotkeys use, and the hotkeys (hotkeys.cpp), each a
     // combination held together: controller buttons by SDL name, keys by SDL key name, " + "
     // between them; empty = none
     int stateSlot = 1;
-    std::string hotkeyPad[4] = {"back + rightshoulder", "back + leftshoulder", "back + dpright", "back + dpleft"};
-    std::string hotkeyKeys[4] = {"F5", "F8", "F7", "F6"};
+    std::string hotkeyPad[5] = {"back + rightshoulder", "back + leftshoulder", "back + dpright", "back + dpleft", "back + dpup"};
+    std::string hotkeyKeys[5] = {"F5", "F8", "F7", "F6", "F9"};
 };
 // hotkey actions (the index into hotkeyPad / hotkeyKeys)
-enum HotkeyAction : int { HkSaveState = 0, HkLoadState, HkNextSlot, HkPrevSlot, HkCount };
+// (HkToggleTextures: texture packs hidden / shown at once, mods.cpp toggleTexturesShown)
+enum HotkeyAction : int { HkSaveState = 0, HkLoadState, HkNextSlot, HkPrevSlot, HkToggleTextures, HkCount };
 const char* hotkeyDefault(int action, bool pad);
 
 Settings& get();
@@ -91,6 +112,7 @@ std::string summary();  // every setting on one line (the session log)
 
 const char* resolutionName(Resolution r);
 const char* aspectName(Aspect a);
+const char* buttonPromptsName(ButtonPrompts p);  // as settings.ini writes it
 float resolutionScale(Resolution r);  // Aurora frame buffer scale; 0 = the window's own size
 float aspectValue(Aspect a);          // width / height (4:3 = the game's own); -1 = the window's
 inline constexpr int kFpsChoices[] = {60, 90, 120, 144};

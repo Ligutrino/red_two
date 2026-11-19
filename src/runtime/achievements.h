@@ -13,7 +13,8 @@ struct Reader;
 
 namespace rt::ra {
 
-void init(const std::string& discPath);  // main.cpp, after the settings and the disc
+void init(const std::string& discPath);  // main.cpp, after the settings (the disc may come later)
+void setDisc(const std::string& discPath);  // the launcher's choice when init had none
 void frame();                            // hw.cpp onVi: replies, then rc_client_do_frame
 void idle();                             // the launcher (no game running yet): replies, rc_client_idle
 

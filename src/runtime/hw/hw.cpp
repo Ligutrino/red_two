@@ -589,12 +589,25 @@ void cardInit(int slot, const std::string& path) {
     MemCard& m = s_card[slot];
     m = MemCard{};
     m.path = path;
+    // An image of another standard size (Dolphin's and Nintendont's cards are usually 251 or 2043
+    // blocks) is that card: the card ID reports its size, as CARDMount checks it against the
+    // header's (a 2 MiB card read as 4 Mbit was "corrupted data, needs to be formatted").
+    FILE* f = fopen(path.c_str(), "rb");
+    if (f && fseek(f, 0, SEEK_END) == 0) {
+        const long bytes = ftell(f);
+        for (u32 mbit = 4; mbit <= 128; mbit *= 2)
+            if (bytes == long(mbit) * 1024 * 1024 / 8) m.id = mbit;  // (latency and sector size bits 0)
+        if (bytes != long(m.id & 0xFC) * 1024 * 1024 / 8)
+            logf("card", "slot %c: %s has %ld bytes, no memory card size: read as a 4 Mbit (59-block) card", 'A' + slot,
+                 path.c_str(), bytes);
+        fseek(f, 0, SEEK_SET);
+    }
     const u32 size = (m.id & 0xFC) * 1024 * 1024 / 8;
     m.data.assign(size, 0xFF);  // erased flash
-    if (FILE* f = fopen(path.c_str(), "rb")) {
+    if (f) {
         fread(m.data.data(), 1, size, f);
         fclose(f);
-        logf("card", "slot %c: %s", 'A' + slot, path.c_str());
+        logf("card", "slot %c: %s (%u Mbit, %u blocks)", 'A' + slot, path.c_str(), m.id & 0xFC, size / 0x2000 - 5);
     } else if (FILE* f2 = fopen(path.c_str(), "wb")) {
         fwrite(m.data.data(), 1, size, f2);  // a new, unformatted card
         fclose(f2);
@@ -624,6 +637,9 @@ std::string cardImagePath(int slot) {
         return "saves/GSWE64_A.raw";
     }
     if (const std::string u = mods::userDir(); !u.empty()) return u + "saves/GSWE64_A.raw";
+#else
+    // Windows: the portable user folder's (else saves\ of the working folder, as before)
+    if (mods::portable()) return mods::userDir() + "saves\\GSWE64_A.raw";
 #endif
     return "saves/GSWE64_A.raw";
 }

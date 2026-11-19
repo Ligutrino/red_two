@@ -238,6 +238,17 @@ if(MSVC)
     # GUI subsystem (no console window), still entering through main(). No ASLR: those stacks
     # hold return addresses into the exe (savestate.h).
     target_link_options(red_two PRIVATE /STACK:16777216 /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup /DYNAMICBASE:NO)
+    # UTF-8 as the process code page (Windows 10 1903+): fopen and the A functions take the
+    # UTF-8 paths SDL gives (the program's folder, which may be anywhere: portable user folder)
+    target_sources(red_two PRIVATE res/red_two.manifest)
+    # A CPU without R2_ARCH's instructions gets a message box instead of a silent crash: the check
+    # is compiled for the baseline and runs before anything else (cpu_check.cpp)
+    if(R2_ARCH AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+        target_sources(red_two PRIVATE src/runtime/cpu_check.cpp)
+        set_source_files_properties(src/runtime/cpu_check.cpp PROPERTIES
+            COMPILE_OPTIONS "/clang:-march=x86-64" COMPILE_DEFINITIONS R2_CPU_CHECK=1)
+        target_link_options(red_two PRIVATE /INCLUDE:r2CpuCheck)
+    endif()
 endif()
 
 # Dawn and SDL3 are DLLs on Windows: copy them next to the executable.

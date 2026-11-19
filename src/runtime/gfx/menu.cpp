@@ -14,6 +14,7 @@
 // highlights, Bahnschrift (Windows' DIN-style face) for type.
 #include "gx_bridge.h"
 
+#include <SDL3/SDL_dialog.h>
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_joystick.h>
@@ -21,6 +22,7 @@
 #include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_video.h>
 #include <aurora/aurora.h>
+#include <aurora/input.hpp>
 #include <aurora/pad.hpp>
 #include <dolphin/gx/GXAurora.h>
 #include <dolphin/vi.h>
@@ -37,6 +39,7 @@
 #include <chrono>
 #include <filesystem>
 #include <future>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -226,6 +229,18 @@ bool s_nav[NavCount];    // this frame: pressed (or repeated, for directions)
 bool s_padPress[NavCount] = {};  // this frame's controller presses, also while they are not for navigating (typing)
 bool s_navFresh = true;  // just opened: buttons already held are not presses
 bool s_usingPad = false; // the last input came from a controller (button hints)
+// that controller's type (the hints name a PlayStation controller's buttons): the last one
+// pressed since the menu opened, else port 1's
+SDL_GamepadType s_padType = SDL_GAMEPAD_TYPE_UNKNOWN;
+bool s_padPsPressed = false;
+const char* padName(const char* xbox, const char* ps) { return input::isPlayStation(s_padType) ? ps : xbox; }
+const char* padBackName(bool upper = true) {  // the Back button's name on the controller
+    return s_padType == SDL_GAMEPAD_TYPE_PS5 ? (upper ? "CREATE" : "Create")
+         : s_padType == SDL_GAMEPAD_TYPE_PS4 ? (upper ? "SHARE" : "Share")
+         : s_padType == SDL_GAMEPAD_TYPE_PS3 ? (upper ? "SELECT" : "Select")
+                                             : (upper ? "BACK" : "Back");
+}
+const char* padStartName() { return padName("START", s_padType == SDL_GAMEPAD_TYPE_PS3 ? "START" : "OPTIONS"); }
 // this frame's press is a new one, not the repeat of a held direction: ON / OFF switches take
 // only these (a held d-pad / stick / arrow key repeats every 0.09 s, and on a switch row it
 // flipped the setting back and forth - the user's log: fast_disc 22 times in 1.4 s)
@@ -253,18 +268,33 @@ void readPads(bool held[NavCount]) {
         const int ly = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY);
         constexpr int kDead = 16000;
         const bool vertical = std::abs(ly) >= std::abs(lx);  // only the stick's main direction
-        held[NavUp] |= btn(SDL_GAMEPAD_BUTTON_DPAD_UP) || (vertical && ly < -kDead);
-        held[NavDown] |= btn(SDL_GAMEPAD_BUTTON_DPAD_DOWN) || (vertical && ly > kDead);
-        held[NavLeft] |= btn(SDL_GAMEPAD_BUTTON_DPAD_LEFT) || (!vertical && lx < -kDead);
-        held[NavRight] |= btn(SDL_GAMEPAD_BUTTON_DPAD_RIGHT) || (!vertical && lx > kDead);
-        held[NavAccept] |= btn(SDL_GAMEPAD_BUTTON_SOUTH);
-        held[NavBack] |= btn(SDL_GAMEPAD_BUTTON_EAST);
-        held[NavClear] |= btn(SDL_GAMEPAD_BUTTON_WEST);
-        held[NavPrevTab] |= btn(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
-        held[NavNextTab] |= btn(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
-        held[NavStart] |= btn(SDL_GAMEPAD_BUTTON_START);  // (the launcher: start the game)
+        bool mine[NavCount] = {};
+        mine[NavUp] = btn(SDL_GAMEPAD_BUTTON_DPAD_UP) || (vertical && ly < -kDead);
+        mine[NavDown] = btn(SDL_GAMEPAD_BUTTON_DPAD_DOWN) || (vertical && ly > kDead);
+        mine[NavLeft] = btn(SDL_GAMEPAD_BUTTON_DPAD_LEFT) || (!vertical && lx < -kDead);
+        mine[NavRight] = btn(SDL_GAMEPAD_BUTTON_DPAD_RIGHT) || (!vertical && lx > kDead);
+        mine[NavAccept] = btn(SDL_GAMEPAD_BUTTON_SOUTH);
+        mine[NavBack] = btn(SDL_GAMEPAD_BUTTON_EAST);
+        mine[NavClear] = btn(SDL_GAMEPAD_BUTTON_WEST);
+        mine[NavPrevTab] = btn(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+        mine[NavNextTab] = btn(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+        mine[NavStart] = btn(SDL_GAMEPAD_BUTTON_START);  // (the launcher: start the game)
+        bool any = false;
+        for (int k = 0; k < NavCount; k++) {
+            held[k] |= mine[k];
+            any |= mine[k];
+        }
+        if (any) {  // (button hints: this controller's names)
+            s_padType = SDL_GetGamepadType(g);
+            s_padPsPressed = true;
+        }
     }
     SDL_free(ids);
+    if (!s_padPsPressed) {  // nothing pressed since the menu opened: port 1's controller
+        const auto src = aurora::pad::port_controller(0);
+        SDL_Gamepad* g = src ? SDL_GetGamepadFromID(aurora::input::gamepad_for_source(src)) : nullptr;
+        s_padType = g ? SDL_GetGamepadType(g) : SDL_GAMEPAD_TYPE_UNKNOWN;
+    }
 }
 
 // this frame's presses; `enabled` false (a rebind in progress) still tracks what is held
@@ -364,6 +394,7 @@ SDL_Gamepad* targetGamepad() {
     const auto src = aurora::pad::port_controller(0);
     return src ? SDL_GetGamepadFromID(aurora::input::gamepad_for_source(src)) : nullptr;
 }
+
 
 // which output sign a binding produces for an axis control (0: both)
 int bindingSign(const aurora::binding::Binding& b) {
@@ -647,7 +678,59 @@ bool fpsRow(const char* text, int& fps, const char* help) {
 }
 
 // 0..100: a bar the mouse drags, left/right step 5
-bool percentRow(const char* text, int& v, const char* help) {
+// The Controls page's stick meter: port 1's control stick as it is (dot), the deadzone (shaded)
+// and what the game gets after the deadzone and sensitivity (gold), to tune both by eye.
+void stickMeter() {
+    static float rx = 0.f, ry = 0.f;
+    static bool pad = false;
+    if (input::JoystickAccess joy; joy) {  // (else the last reading: the input thread is scanning)
+        const auto src = aurora::pad::port_controller(0);
+        SDL_Gamepad* g = src ? SDL_GetGamepadFromID(aurora::input::gamepad_for_source(src)) : nullptr;
+        pad = g != nullptr;
+        if (g) {
+            rx = float(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX)) / 32767.f;
+            ry = float(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY)) / 32767.f;
+        }
+    }
+    if (static const char* test = getenv("R2_STICK_METER_TEST"); test && !pad)  // "x,y" (screenshots)
+        pad = sscanf(test, "%f,%f", &rx, &ry) == 2;
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float r = 54.f * s_ui, size = 2.f * r + 16.f * s_ui;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 c(p.x + s_valueX + r + 8.f * s_ui, p.y + size * 0.5f);
+    if (!pad) {
+        dl->AddText(ImVec2(p.x + 18.f * s_ui, p.y), kDim, "Connect a controller to see its control stick here.");
+        ImGui::Dummy(ImVec2(0.f, ImGui::GetFrameHeight()));
+        return;
+    }
+    const auto& st = settings::get();
+    const float dz = float(st.stickDeadzone) / 100.f;
+    float ox = rx, oy = ry;
+    input::shapeStick(ox, oy, true);
+    auto at = [&](float x, float y) {
+        const float m = std::sqrt(x * x + y * y), k = m > 1.05f ? 1.05f / m : 1.f;  // (a keyboard's diagonal)
+        return ImVec2(c.x + x * k * r, c.y + y * k * r);
+    };
+    dl->AddCircleFilled(c, r, IM_COL32(12, 22, 40, 220), 64);
+    dl->AddLine(ImVec2(c.x - r, c.y), ImVec2(c.x + r, c.y), alpha(kDim, 50), 1.f);
+    dl->AddLine(ImVec2(c.x, c.y - r), ImVec2(c.x, c.y + r), alpha(kDim, 50), 1.f);
+    dl->AddCircle(c, r, alpha(kGold, 110), 64, 1.5f);
+    if (dz > 0.f) {
+        dl->AddCircleFilled(c, r * dz, alpha(kAmber, 45), 48);
+        dl->AddCircle(c, r * dz, alpha(kAmber, 150), 48, 1.f);
+    }
+    dl->AddLine(c, at(ox, oy), alpha(kGold, 140), 2.f * s_ui);
+    dl->AddCircleFilled(at(rx, ry), 4.f * s_ui, kText, 16);
+    dl->AddCircleFilled(at(ox, oy), 6.f * s_ui, kGold, 16);
+    char buf[96];
+    snprintf(buf, sizeof buf, "STICK %3.0f%%   TO THE GAME %3.0f%%", std::min(1.f, std::sqrt(rx * rx + ry * ry)) * 100.f,
+             std::min(1.f, std::sqrt(ox * ox + oy * oy)) * 100.f);
+    dl->AddText(ImVec2(c.x + r + 24.f * s_ui, c.y - ImGui::GetFontSize() * 0.5f), kDim, buf);
+    ImGui::Dummy(ImVec2(0.f, size));
+}
+
+// a bar from lo to hi percent (steps of `step` from the controller / keys, any value by mouse)
+bool percentRow(const char* text, int& v, const char* help, int lo = 0, int hi = 100, int step = 5) {
     const bool sel = rowBegin(text, help);
     const float w = 380.f * s_ui, h = ImGui::GetFrameHeight();
     const ImVec2 p = ImGui::GetCursorScreenPos();
@@ -657,18 +740,19 @@ bool percentRow(const char* text, int& v, const char* help) {
     ImGui::PopID();
     const float x0 = p.x + 14.f * s_ui, x1 = p.x + w - 14.f * s_ui, cy = p.y + h * 0.5f;
     int nv = v;
-    if (active) nv = int(std::lround(std::clamp((ImGui::GetIO().MousePos.x - x0) / (x1 - x0), 0.f, 1.f) * 100.f));
-    if (sel && s_in.dx > 0) nv = std::min(100, (v / 5 + 1) * 5);
-    if (sel && s_in.dx < 0) nv = std::max(0, ((v + 4) / 5 - 1) * 5);
+    if (active)
+        nv = lo + int(std::lround(std::clamp((ImGui::GetIO().MousePos.x - x0) / (x1 - x0), 0.f, 1.f) * float(hi - lo)));
+    if (sel && s_in.dx > 0) nv = std::min(hi, lo + ((v - lo) / step + 1) * step);
+    if (sel && s_in.dx < 0) nv = std::max(lo, lo + ((v - lo + step - 1) / step - 1) * step);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     valueFrame(dl, p, ImVec2(p.x + w, p.y + h), sel, hot || active);
-    const float th = 6.f * s_ui, fx = x0 + (x1 - x0) * float(nv) / 100.f;
+    const float th = 6.f * s_ui, fx = x0 + (x1 - x0) * float(nv - lo) / float(hi - lo);
     dl->AddRectFilled(ImVec2(x0, cy - th * 0.5f), ImVec2(x1, cy + th * 0.5f), IM_COL32(30, 52, 86, 255), th * 0.5f);
     for (int i = 1; i < 10; i++) {
         const float x = x0 + (x1 - x0) * float(i) / 10.f;
         dl->AddLine(ImVec2(x, cy - th * 1.4f), ImVec2(x, cy + th * 1.4f), alpha(kDim, 60), 1.f);
     }
-    if (nv > 0)
+    if (nv > lo)
         dl->AddRectFilledMultiColor(ImVec2(x0, cy - th * 0.5f), ImVec2(fx, cy + th * 0.5f), alpha(kAmber, 200), kGold, kGold,
                                     alpha(kAmber, 200));
     dl->AddCircleFilled(ImVec2(fx, cy), th * 1.5f, sel || active ? kGold : kText, 16);
@@ -735,13 +819,35 @@ bool confirmRow(const char* text, const char* caption, const char* again, bool& 
     return true;
 }
 
+// (the game disc's page and the browser come further down)
+bool discReady();
+void discPageOpen();
+void pageDisc();
+bool discPageShown();
+bool discBrowserShown();
+std::string discRowText();
+void pageBrowse(settings::Settings& s);
+
 void pageDisplay(settings::Settings& s) {
+    if (discBrowserShown()) {
+        pageBrowse(s);
+        return;
+    }
+    if (discPageShown()) {
+        pageDisc();
+        return;
+    }
     heading("GAME");
     if (s_launcher) {
-        if (buttonRow("Start game", "LAUNCH", "Start Rogue Leader with these settings. The controller's START button "
-                      "does this from any page.", kAmber)) {
-            logf("menu", "launcher: start");
-            s_launch = true;
+        if (buttonRow("Start game", discReady() ? "LAUNCH" : "CHOOSE THE DISC FIRST",
+                      "Start Rogue Leader with these settings. The controller's START button does this from any page.",
+                      kAmber)) {
+            if (discReady()) {
+                logf("menu", "launcher: start");
+                s_launch = true;
+            } else {
+                discPageOpen();
+            }
         }
     } else {
         if (confirmRow("Reset game", "RESET", "PRESS AGAIN: RESET", s_confirmReset,
@@ -757,6 +863,11 @@ void pageDisplay(settings::Settings& s) {
             resetGame(true);
         }
     }
+    if (buttonRow("Game disc", discRowText().c_str(),
+                  s_launcher ? "Your Rogue Leader disc image: where it is, or choose another."
+                             : "Your Rogue Leader disc image: where it is, or choose another (from the next start).",
+                  discReady() ? kText : kAmber))
+        discPageOpen();
     if (toggleRow("Show launcher at start", s.launcher,
                   s_launcher ? "Off: from the next start Red Two goes straight into the game. The launcher comes back "
                                "with this switch in the in-game menu (F1 or the controller's Back)."
@@ -773,6 +884,34 @@ void pageDisplay(settings::Settings& s) {
     if (enumRow("Internal resolution", s.resolution, settings::resolutionName,
                 "What the game renders at. Window size follows the window; 4K renders 2160 lines whatever the window size."))
         s_changed = s_display = true;
+    {
+        // MSAA: Aurora sets it up when it starts (WebGPU has 1 or 4 samples only)
+        static const int startMsaa = s.msaa;  // (what this session runs with)
+        const bool sel = rowBegin("Anti-aliasing", s.msaa != startMsaa
+                                                       ? "Smooths the edges of 3D objects (4x MSAA). TAKES EFFECT AT THE NEXT START."
+                                                       : "Smooths the edges of 3D objects (4x MSAA). Takes effect at the next start.");
+        const int cur = s.msaa >= 4 ? 1 : 0;
+        const char* text = cur ? (startMsaa >= 4 ? "4x MSAA" : "4x MSAA (NEXT START)") : (startMsaa >= 4 ? "OFF (NEXT START)" : "OFF");
+        const int next = choiceStep(cur, 2, selector("msaa", text, cur > 0, cur < 1, sel), sel);
+        if (next != cur) {
+            s.msaa = next ? 4 : 1;
+            s_changed = true;
+        }
+    }
+    {
+        static const int kLevels[] = {1, 2, 4, 8, 16};
+        static const char* const kNames[] = {"OFF", "2x", "4x", "8x", "16x"};
+        const bool sel = rowBegin("Anisotropic filtering",
+                                  "Keeps textures sharp at steep angles (the ground ahead, the Death Star's surface). "
+                                  "Off: only where the game asks for it.");
+        int cur = 0;
+        while (cur < 4 && kLevels[cur] < s.anisotropy) cur++;
+        const int next = choiceStep(cur, 5, selector("aniso", kNames[cur], cur > 0, cur < 4, sel), sel);
+        if (next != cur) {
+            s.anisotropy = kLevels[next];
+            s_changed = s_display = true;
+        }
+    }
     if (enumRow("Aspect ratio", s.aspect, settings::aspectName,
                 "Widescreen widens the 3D view and fills the screen in cutscenes. At most 21:9: a wider window "
                 "gets bars at the sides."))
@@ -890,8 +1029,17 @@ bool textRow(const char* text, std::string& value, bool password, const char* he
         const bool clicked = ImGui::InvisibleButton("##textbox", ImVec2(w, h));
         ImDrawList* dl = ImGui::GetWindowDrawList();
         valueFrame(dl, p, ImVec2(p.x + w, p.y + h), sel, ImGui::IsItemHovered());
-        const std::string shown = value.empty() ? std::string(sel ? "PRESS A / ENTER TO TYPE" : "-")
-                                                : password ? std::string(std::min<size_t>(value.size(), 24), '*') : value;
+        std::string shown = value.empty() ? std::string(sel ? "PRESS A / ENTER TO TYPE" : "-")
+                                          : password ? std::string(std::min<size_t>(value.size(), 24), '*') : value;
+        // a long value (a path) shows its end: "...\Rogue Leader (USA).rvz"
+        const float room = w - 28.f * s_ui;
+        if (ImGui::CalcTextSize(shown.c_str()).x > room) {
+            size_t cut = 0;
+            while (cut < shown.size() && ImGui::CalcTextSize(("..." + shown.substr(cut)).c_str()).x > room)
+                do cut++;
+                while (cut < shown.size() && (u8(shown[cut]) & 0xC0) == 0x80);  // (whole UTF-8 characters)
+            shown = "..." + shown.substr(cut);
+        }
         const ImVec2 ts = ImGui::CalcTextSize(shown.c_str());
         dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(p.x + 14.f * s_ui, p.y + (h - ts.y) * 0.5f),
                     value.empty() ? kDim : (sel ? kGold : kText), shown.c_str());
@@ -1096,7 +1244,14 @@ std::string fitText(const std::string& text, float w) {
 struct BrowseEntry {
     std::string name, path;
     bool pack = false;  // named GSWE64 / GSW, or holding such a folder
+    // the disc browser's image files: Rogue Leader (USA) or not, and what it is / why not
+    bool file = false, ok = false;
+    std::string help;
 };
+// what the browser picks: a texture pack folder (MODS) or the game disc image (DISPLAY's disc page)
+enum class BrowseMode { Textures, Disc };
+BrowseMode s_browseMode = BrowseMode::Textures;
+int s_browseSection = 0;                 // the page it is shown on (Mods / Display)
 bool s_browsing = false;
 std::string s_browseDir;                 // the folder shown
 std::string s_browseParent;              // its parent ("" at a root)
@@ -1104,7 +1259,7 @@ std::vector<BrowseEntry> s_browseList;   // its folders
 std::vector<BrowseEntry> s_browsePlaces; // home, Downloads, SD cards / drives
 std::string s_browseNote;                // what choosing it loads
 std::string s_browseError;               // why it could not be listed
-int s_browseReturnRow = 0;               // the MODS page's row to go back to
+int s_browseReturnRow = 0;               // the page's row to go back to
 bool s_browseLeft = false;               // left this frame: the page's rows were the browser's
 
 std::filesystem::path u8path(const std::string& s) { return std::filesystem::path(std::u8string(s.begin(), s.end())); }
@@ -1170,16 +1325,41 @@ void browseOpen(const std::string& dir) {
     for (fs::directory_iterator it(p, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end;
          it.increment(ec)) {
         std::error_code e2;
-        if (!it->is_directory(e2)) continue;  // (links to folders count)
         const std::string name = u8str(it->path().filename());
         if (name.empty() || name[0] == '.') continue;  // hidden
         const std::string path = u8str(it->path());
+        if (!it->is_directory(e2)) {  // (links to folders count)
+            // the disc browser: image files, each looked at (its header: which game it is)
+            if (s_browseMode != BrowseMode::Disc || !it->is_regular_file(e2)) continue;
+            std::string ext = u8str(it->path().extension());
+            for (auto& ch : ext) ch = char(tolower(static_cast<unsigned char>(ch)));
+            if (ext != ".iso" && ext != ".gcm" && ext != ".rvz" && ext != ".wia") continue;
+            BrowseEntry e{name, path};
+            e.file = true;
+            std::string what;
+            const std::string problem = discProblem(path, &what);
+            e.ok = problem.empty();
+            e.help = e.ok ? what : problem;
+            s_browseList.push_back(std::move(e));
+            continue;
+        }
+        if (s_browseMode == BrowseMode::Disc) {
+            s_browseList.push_back({name, path});
+            continue;
+        }
         const auto kind = mods::textureFolderKind(path);
         s_browseList.push_back({name, path, kind == mods::FolderKind::Pack || kind == mods::FolderKind::HoldsPack});
     }
     if (ec) s_browseError = "Cannot read this folder: " + ec.message();
-    std::sort(s_browseList.begin(), s_browseList.end(),
-              [](const BrowseEntry& a, const BrowseEntry& b) { return SDL_strcasecmp(a.name.c_str(), b.name.c_str()) < 0; });
+    // (disc images first: Rogue Leader before the rest)
+    std::sort(s_browseList.begin(), s_browseList.end(), [](const BrowseEntry& a, const BrowseEntry& b) {
+        if (a.file != b.file) return a.file;
+        if (a.ok != b.ok) return a.ok;
+        return SDL_strcasecmp(a.name.c_str(), b.name.c_str()) < 0;
+    });
+    s_rowSel[s_browseSection] = 0;
+    s_scrollToSel = true;
+    if (s_browseMode == BrowseMode::Disc) return;
     std::string pack;
     switch (mods::textureFolderKind(s_browseDir, &pack)) {
     case mods::FolderKind::Pack: s_browseNote = "This is a texture pack folder: its textures load."; break;
@@ -1189,15 +1369,15 @@ void browseOpen(const std::string& dir) {
                        "inside it.";
         break;
     }
-    s_rowSel[Mods] = 0;
-    s_scrollToSel = true;
 }
 
-void browseStart(const settings::Settings& s) {
+// the browser on a page (the folder given, else Downloads, else home)
+void browseBegin(BrowseMode mode, int section, std::string start) {
     std::error_code ec;
-    s_browseReturnRow = s_rowSel[Mods];
+    s_browseMode = mode;
+    s_browseSection = section;
+    s_browseReturnRow = s_rowSel[section];
     s_browsePlaces = browsePlaces();
-    std::string start = s.texturesFolder;
     if (start.empty() || !std::filesystem::is_directory(u8path(start), ec)) {
         const char* dl = SDL_GetUserFolder(SDL_FOLDER_DOWNLOADS);
         const char* home = SDL_GetUserFolder(SDL_FOLDER_HOME);
@@ -1207,11 +1387,13 @@ void browseStart(const settings::Settings& s) {
     browseOpen(start);
 }
 
+void browseStart(const settings::Settings& s) { browseBegin(BrowseMode::Textures, Mods, s.texturesFolder); }
+
 void browseClose() {
     if (!s_browsing) return;
     s_browsing = false;
     s_browseLeft = true;
-    s_rowSel[Mods] = s_browseReturnRow;
+    s_rowSel[s_browseSection] = s_browseReturnRow;
     s_scrollToSel = true;
 }
 
@@ -1246,21 +1428,262 @@ void browseChoose(settings::Settings& s) {
     logf("menu", "texture folder chosen: %s (%zu textures)", s.texturesFolder.c_str(), n);
 }
 
+// --- the game disc (DISPLAY: the launcher's first page) ------------------------------------
+// The disc image the game boots from: --disc, else the one chosen here before (setting
+// disc_path), else one found next to the program or in the user folder (main.cpp). With none (or
+// one that is not Rogue Leader, USA, revision 0) the launcher opens on the disc page and the game
+// cannot start until one is chosen: a path typed or pasted, the system's file dialog, or the
+// browser (folders and disc images; it works with a controller and in the Steam Deck's Game
+// Mode, where no system dialog shows). In game a new choice applies from the next start.
+std::string s_discPath;     // the disc in use (the launcher: the one the game will start with)
+std::string s_discWhat;     // what it is (discProblem)
+std::string s_discProblem;  // why s_discPath cannot be used ("" if it can)
+std::string s_discNote;     // why the launcher asks (main.cpp: a chosen disc that went away, ...)
+std::string s_discError;    // the last choice that was refused, and why
+std::string s_discEdit;     // the path row's text
+bool s_discPage = false;    // the disc page instead of DISPLAY's rows
+bool s_discChanged = false; // chosen in game: for the next start
+int s_discReturnRow = 0;
+
+bool discReady() { return !s_discPath.empty() && s_discProblem.empty(); }
+
+void discPageOpen() {
+    if (s_discPage) return;
+    s_discReturnRow = s_rowSel[Display];
+    s_discPage = true;
+    s_discError.clear();
+    s_discEdit = s_discPath;
+    s_rowSel[Display] = 0;
+    s_scrollToSel = true;
+    s_section = Display;
+}
+
+void discPageClose() {
+    s_discPage = false;
+    s_browseLeft = true;  // (DISPLAY's own rows again next frame)
+    s_rowSel[Display] = s_discReturnRow;
+    s_scrollToSel = true;
+}
+
+// a path the player chose: kept when it is the disc (and remembered for the next starts)
+bool discChoose(const std::string& path) {
+    std::string what;
+    std::string p = path;
+    while (!p.empty() && (p.back() == ' ' || p.back() == '"')) p.pop_back();  // (a pasted "quoted path")
+    while (!p.empty() && (p.front() == ' ' || p.front() == '"')) p.erase(p.begin());
+    const std::string problem = discProblem(p, &what);
+    if (!problem.empty()) {
+        s_discError = p + ": " + problem;
+        logf("menu", "disc refused: %s", s_discError.c_str());
+        return false;
+    }
+    s_discError.clear();
+    const bool changed = p != s_discPath;
+    s_discPath = p;
+    s_discWhat = what;
+    s_discProblem.clear();
+    s_discNote.clear();
+    s_discEdit = p;
+    settings::get().discPath = p;
+    settings::save();
+    if (changed && !s_launcher) s_discChanged = true;
+    logf("menu", "disc chosen: %s (%s)", p.c_str(), what.c_str());
+    if (s_launcher) s_rowSel[Display] = 0;  // (Start game, at the top of the disc page)
+    return true;
+}
+
+// the system's file dialog (SDL_ShowOpenFileDialog: Windows' own, a desktop portal on Linux):
+// its answer comes on another thread
+std::mutex s_dialogMutex;
+bool s_dialogOpen = false, s_dialogDone = false, s_dialogFailed = false;
+std::string s_dialogFile, s_dialogErrorText;
+
+void discDialogOpen() {
+    if (s_dialogOpen) return;
+    static const SDL_DialogFileFilter filters[] = {{"GameCube disc images (.iso, .gcm, .rvz, .wia)", "iso;gcm;rvz;wia"},
+                                                   {"All files", "*"}};
+    std::string start;
+    if (!s_discPath.empty()) start = u8str(u8path(s_discPath).parent_path());
+    if (start.empty()) {
+        const char* dl = SDL_GetUserFolder(SDL_FOLDER_DOWNLOADS);
+        start = dl ? dl : "";
+    }
+    s_dialogOpen = true;
+    logf("menu", "disc: file dialog");
+    SDL_ShowOpenFileDialog(
+        [](void*, const char* const* files, int) {
+            std::lock_guard lk(s_dialogMutex);
+            s_dialogDone = true;
+            s_dialogFailed = files == nullptr;
+            if (!files) s_dialogErrorText = SDL_GetError();
+            else s_dialogFile = files[0] ? files[0] : "";
+        },
+        nullptr, aurora_get_window(), filters, 2, start.empty() ? nullptr : start.c_str(), false);
+}
+
+void discDialogPoll() {
+    std::string file;
+    {
+        std::lock_guard lk(s_dialogMutex);
+        if (!s_dialogDone) return;
+        s_dialogDone = s_dialogOpen = false;
+        if (s_dialogFailed) {
+            s_discError = "No file dialog here (" + s_dialogErrorText + "): use Find it below.";
+            logf("menu", "disc: file dialog failed: %s", s_dialogErrorText.c_str());
+            return;
+        }
+        file = s_dialogFile;
+    }
+    if (!file.empty()) discChoose(file);  // (empty: canceled)
+}
+
+// a disc drawn next to the status: gold when ready
+void drawDiscIcon(ImDrawList* dl, ImVec2 c, float r, bool ready) {
+    const ImU32 col = ready ? kGold : alpha(kDim, 160);
+    dl->AddCircleFilled(c, r, ready ? IM_COL32(40, 34, 18, 255) : IM_COL32(20, 26, 40, 255), 48);
+    for (int i = 1; i <= 3; i++) dl->AddCircle(c, r * (0.45f + 0.17f * float(i)), alpha(col, 40 + 25 * i), 48, 1.f);
+    dl->PathArcTo(c, r * 0.82f, -2.4f, -1.3f, 16);
+    dl->PathStroke(alpha(kText, ready ? 120 : 50), 0, 3.f * s_ui);  // (a highlight)
+    dl->AddCircle(c, r, col, 48, 2.f * s_ui);
+    dl->AddCircleFilled(c, r * 0.18f, IM_COL32(8, 12, 22, 255), 24);
+    dl->AddCircle(c, r * 0.3f, alpha(col, 160), 24, 1.5f * s_ui);
+}
+
+void pageDisc() {
+    discDialogPoll();
+    const bool ready = discReady();
+    heading("GAME DISC");
+    // the status: a disc, READY / what is wrong, what it is and where
+    {
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float w = ImGui::GetContentRegionAvail().x, h = 118.f * s_ui, r = 42.f * s_ui;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), IM_COL32(10, 18, 34, 200), 6.f * s_ui);
+        dl->AddRect(p, ImVec2(p.x + w, p.y + h), alpha(ready ? kGold : kAmber, ready ? 110 : 70), 6.f * s_ui, 0, 1.f);
+        drawDiscIcon(dl, ImVec2(p.x + 20.f * s_ui + r, p.y + h * 0.5f), r, ready);
+        const float tx = p.x + 40.f * s_ui + 2.f * r, tw = w - (tx - p.x) - 16.f * s_ui;
+        const char* title = ready ? "READY" : s_discPath.empty() ? "NO DISC IMAGE YET" : "THIS IS NOT THE DISC";
+        drawText(dl, s_fontBig ? s_fontBig : s_font, 30.f * s_ui, ImVec2(tx, p.y + 14.f * s_ui), ready ? kGold : kAmber,
+                 title, 3.f * s_ui);
+        const std::string line1 = ready ? s_discWhat
+                                  : s_discPath.empty() ? std::string("Choose your Rogue Leader disc image below.")
+                                                       : s_discProblem;
+        const float px1 = ImGui::GetFontSize() * 0.8f, px2 = ImGui::GetFontSize() * 0.7f;
+        dl->AddText(ImGui::GetFont(), px1, ImVec2(tx, p.y + 56.f * s_ui), kText,
+                    fitText(line1.c_str(), tw * ImGui::GetFontSize() / px1).c_str());
+        dl->AddText(ImGui::GetFont(), px2, ImVec2(tx, p.y + 84.f * s_ui), kDim,
+                    fitText(s_discPath.c_str(), tw * ImGui::GetFontSize() / px2).c_str());
+        ImGui::Dummy(ImVec2(w, h + 6.f * s_ui));
+    }
+    const std::string message = !s_discError.empty() ? s_discError
+                                : s_discChanged     ? std::string("Red Two starts with this disc from the next start "
+                                                                  "(Back to launcher restarts now).")
+                                                    : s_discNote;
+    if (!message.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, vec(!s_discError.empty() ? kAmber : kHolo));
+        ImGui::TextWrapped("%s", message.c_str());
+        ImGui::PopStyleColor();
+    }
+    if (s_launcher && ready &&
+        buttonRow("Start game", "LAUNCH", "Start Rogue Leader with this disc. The controller's START button does this "
+                                          "from any page.", kAmber)) {
+        logf("menu", "launcher: start (disc page)");
+        s_launch = true;
+    }
+    if (textRow("Path", s_discEdit, false,
+                "Type or paste the full path of your disc image (Ctrl+V), then Enter. Quotes around it are fine."))
+        discChoose(s_discEdit);
+    if (buttonRow("Choose the file", s_dialogOpen ? "OPEN..." : "BROWSE",
+                  "Pick the image in your system's file dialog. On a Steam Deck in Game Mode use Find it below."))
+        discDialogOpen();
+    if (buttonRow("Find it", "OPEN", "Look through your folders here, with the controller or the keyboard: Rogue Leader "
+                                     "images are marked."))
+        browseBegin(BrowseMode::Disc, Display, s_discPath.empty() ? std::string() : u8str(u8path(s_discPath).parent_path()));
+    if ((!s_launcher || ready) &&
+        buttonRow(s_launcher ? "Other settings" : "Back", "DONE", "Back to the rest of this page (B / Esc too)."))
+        discPageClose();
+    ImGui::Dummy(ImVec2(0, 8.f * s_ui));
+    ImGui::PushStyleColor(ImGuiCol_Text, vec(kDim));
+    ImGui::TextWrapped("Red Two plays from your own disc image of Star Wars: Rogue Squadron II - Rogue Leader for the "
+                       "GameCube (USA, GSWE64, revision 0): an .iso, .gcm, .rvz or .wia file, as Dolphin uses them. "
+                       "Choose it once; Red Two remembers where it is.");
+    ImGui::PopStyleColor();
+}
+
+bool discPageShown() { return s_discPage; }
+bool discBrowserShown() { return s_browsing && s_browseMode == BrowseMode::Disc; }
+
+// the GAME row's value: the image's file name (or what is wrong)
+std::string discRowText() {
+    if (s_discPath.empty()) return "CHOOSE";
+    if (!s_discProblem.empty()) return "NOT USABLE: CHOOSE";
+    const std::string name = u8str(u8path(s_discPath).filename());
+    return fitText(name, 330.f * s_ui);
+}
+
+// main.cpp (through gx_bridge.cpp): the disc the game starts with, and why the launcher asks for one
+void discSet(const std::string& path, const std::string& note) {
+    s_discPath = path;
+    s_discNote = note;
+    s_discWhat.clear();
+    s_discProblem = path.empty() ? std::string() : discProblem(path, &s_discWhat);
+    s_discEdit = path;
+}
+
+// B / Esc inside the menu: out of the folder browser, then off the disc page (true: handled)
+bool menuStepBack() {
+    if (s_browsing) {
+        browseClose();
+        return true;
+    }
+    if (s_discPage && (!s_launcher || discReady())) {
+        discPageClose();
+        return true;
+    }
+    return false;
+}
+
 void pageBrowse(settings::Settings& s) {
-    heading("CHOOSE A TEXTURE PACK FOLDER");
+    const bool disc = s_browseMode == BrowseMode::Disc;
+    heading(disc ? "FIND YOUR DISC IMAGE" : "CHOOSE A TEXTURE PACK FOLDER");
     ImGui::PushStyleColor(ImGuiCol_Text, vec(kHolo));
     ImGui::TextWrapped("%s", s_browseDir.c_str());
     ImGui::PopStyleColor();
     std::string go;  // (opened after the rows: they read the list)
-    if (folderRow("Use this folder", "SELECT", s_browseNote.c_str(), kAmber)) {
+    if (!disc && folderRow("Use this folder", "SELECT", s_browseNote.c_str(), kAmber)) {
         browseChoose(s);
         return;
     }
     if (!s_browseParent.empty() && folderRow(".. (parent folder)", "UP", "Back up one folder (X / Backspace too).")) go = s_browseParent;
-    heading("FOLDERS");
-    if (s_browseList.empty()) ImGui::TextDisabled("%s", s_browseError.empty() ? "No folders here." : s_browseError.c_str());
+    size_t images = 0;
+    for (const BrowseEntry& e : s_browseList) images += e.file;
+    if (disc) {
+        heading("DISC IMAGES");
+        if (!images) ImGui::TextDisabled("No .iso, .gcm, .rvz or .wia files here.");
+        if (!s_discError.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, vec(kAmber));
+            ImGui::TextWrapped("%s", s_discError.c_str());
+            ImGui::PopStyleColor();
+        }
+    }
     for (size_t i = 0; i < s_browseList.size(); i++) {
         const BrowseEntry& e = s_browseList[i];
+        if (!e.file) continue;
+        ImGui::PushID(int(i));
+        const bool picked =
+            folderRow(e.name.c_str(), e.ok ? "ROGUE LEADER" : "NOT THIS ONE", e.help.c_str(), e.ok ? kAmber : kDim);
+        ImGui::PopID();
+        if (picked && discChoose(e.path)) {
+            browseClose();
+            return;
+        }
+    }
+    heading("FOLDERS");
+    if (s_browseList.size() == images)
+        ImGui::TextDisabled("%s", s_browseError.empty() ? "No folders here." : s_browseError.c_str());
+    for (size_t i = 0; i < s_browseList.size(); i++) {
+        const BrowseEntry& e = s_browseList[i];
+        if (e.file) continue;
         ImGui::PushID(int(i));
         if (folderRow(e.name.c_str(), e.pack ? "TEXTURE PACK" : "OPEN",
                       e.pack ? "A Rogue Leader texture pack (GSWE64): open it, then Use this folder." : "Open this folder.",
@@ -1291,7 +1714,7 @@ void modsPoll() {
 void pageMods(settings::Settings& s) {
     dolphinScanPoll();
     modsPoll();
-    if (s_browsing) {
+    if (s_browsing && s_browseMode == BrowseMode::Textures) {
         pageBrowse(s);
         return;
     }
@@ -1313,6 +1736,11 @@ void pageMods(settings::Settings& s) {
             help = "Replacement textures in Dolphin's format: from Red Two's textures folder and the texture pack folder below.";
         else if (packs.empty()) help = "No texture pack loaded: choose your pack's folder below (Texture pack folder).";
         else help = std::to_string(mods::loadedTextureCount()) + " replacement textures loaded (Dolphin's format).";
+        if (s.customTextures && !packs.empty())
+            help += mods::texturesHidden() ? " HIDDEN by the texture pack hotkey: press it again to show them."
+                                           : " The texture pack hotkey (" + hotkeys::label(settings::HkToggleTextures, true) + " / " +
+                                                 hotkeys::label(settings::HkToggleTextures, false) +
+                                                 ", Controls page) hides and shows them.";
         if (toggleRow("Custom textures", s.customTextures, help.c_str())) {
             s_changed = true;
             mods::setTexturesEnabled(s.customTextures);
@@ -1476,15 +1904,34 @@ void pageControls() {
     hotkeys::captureTick();
     if (s_hotkeyWasCapturing && !hotkeys::capturing()) s_navBackTb = tbNow() + kTbClock / 4;  // (its release is no menu press)
     s_hotkeyWasCapturing = hotkeys::capturing();
+    heading("CONTROL STICK");
+    {
+        settings::Settings& st = settings::get();
+        if (percentRow("Stick sensitivity", st.stickSensitivity,
+                       "How much the control stick steers: below 100% finer aiming (full deflection is never "
+                       "reached), above it full deflection comes sooner. The meter below shows the result.",
+                       25, 200, 5))
+            s_changed = true;
+        if (percentRow("Stick deadzone", st.stickDeadzone,
+                       "How far a stick moves before anything happens (both sticks; round, and the output grows from "
+                       "zero at its edge). Raise it if the craft drifts with the stick let go.",
+                       0, 50, 1))
+            s_changed = true;
+        stickMeter();
+    }
     heading("ON-SCREEN BUTTONS");
     {
         settings::Settings& st = settings::get();
-        const bool sel = rowBegin("Button prompts", "The buttons the game shows in its prompts: as on an Xbox controller "
-                                                    "(the button each GameCube button is bound to), or the original GameCube ones.");
-        const int cur = st.xboxButtons ? 0 : 1;
-        const int next = choiceStep(cur, 2, selector("prompts", cur == 0 ? "XBOX" : "GAMECUBE", cur > 0, cur < 1, sel), sel);
+        const bool sel = rowBegin("Button prompts", "The buttons the game shows in its prompts (the button each GameCube "
+                                                    "button is bound to): Automatic shows PlayStation symbols with a "
+                                                    "PlayStation controller and Xbox buttons otherwise; or the original GameCube ones.");
+        static const char* const kNames[] = {"AUTOMATIC", "XBOX", "PLAYSTATION", "GAMECUBE"};
+        constexpr int n = int(settings::ButtonPrompts::Count);
+        static_assert(std::size(kNames) == n);
+        const int cur = int(st.buttonPrompts);
+        const int next = choiceStep(cur, n, selector("prompts", kNames[cur], cur > 0, cur < n - 1, sel), sel);
         if (next != cur) {
-            st.xboxButtons = next == 0;
+            st.buttonPrompts = settings::ButtonPrompts(next);
             s_changed = true;
             buttonIconsUpdate();
         }
@@ -1544,16 +1991,19 @@ void pageControls() {
         ImGui::TextDisabled("%s", name ? name : "Controller");
     }
     heading("HOTKEYS");
-    static const char* const kHotkeyNames[settings::HkCount] = {"Save state", "Load state", "Next slot", "Previous slot"};
+    static const char* const kHotkeyNames[settings::HkCount] = {"Save state", "Load state", "Next slot", "Previous slot",
+                                                                "Texture packs on / off"};
     for (int a = 0; a < settings::HkCount; a++) {
         ImGui::PushID(100 + a);
         const bool capturing = hotkeys::captureAction() == a || s_pendingHotkey == a;
         const std::string text = capturing ? std::string("HOLD, THEN LET GO...")
                                            : hotkeys::label(a, s_padDevice);
         const bool idle = !rebindingNow();
+        const std::string padHelp = std::string("Press ") + padName("A", "Cross") +
+                                    " (or click), then hold the buttons together - " + padBackName(false) + " + " + padName("RB", "R1") +
+                                    " - and let go. " + padName("X", "Square") + " or a right-click clears it.";
         const bool pressed = buttonRow(kHotkeyNames[a], text.c_str(),
-                                       s_padDevice ? "Press A (or click), then hold the buttons together - Back + RB - and let "
-                                                     "go. X or a right-click clears it."
+                                       s_padDevice ? padHelp.c_str()
                                                    : "Press Enter (or click), then hold the keys together and let go. Delete "
                                                      "or a right-click clears it. Esc cancels.",
                                        capturing ? kGold : kText);
@@ -1569,10 +2019,10 @@ void pageControls() {
         const bool capturing = s_captureRow == i || s_pendingCapture == i;
         const std::string text = capturing ? std::string("PRESS A KEY OR BUTTON...") : bindingText(row);
         const bool idle = s_captureRow < 0 && s_pendingCapture < 0 && s_pendingHotkey < 0 && !hotkeys::capturing();
-        const bool pressed = buttonRow(row.name, text.c_str(),
-                                       "Press A / Enter (or click), then the new key or button. X / Delete or a right-click "
-                                       "clears it. Back / Esc cancels.",
-                                       capturing ? kGold : kText);
+        const std::string help = std::string("Press ") + padName("A", "Cross") +
+                                 " / Enter (or click), then the new key or button. " + padName("X", "Square") +
+                                 " / Delete or a right-click clears it. " + padBackName(false) + " / Esc cancels.";
+        const bool pressed = buttonRow(row.name, text.c_str(), help.c_str(), capturing ? kGold : kText);
         const bool sel = s_rowSel[s_section] == s_row - 1;
         if (pressed && idle) s_pendingCapture = i;  // listens once the click / A / Enter is released
         if (idle && (ImGui::IsItemClicked(ImGuiMouseButton_Right) || (sel && s_in.clear))) clearRow(row);
@@ -1643,9 +2093,9 @@ void tabBar() {
                  on ? kGold : (hot ? kText : kDim), kSectionNames[i], tr, on ? alpha(kAmber, 40) : 0);
     }
     const float cy = p.y + h * 0.5f;
-    keyCap(dl, ImVec2(p.x + capW * 0.5f, cy), s_usingPad ? "LB" : "Q",
+    keyCap(dl, ImVec2(p.x + capW * 0.5f, cy), s_usingPad ? padName("LB", "L1") : "Q",
            s_navKey[NavPrevTab].held || ImGui::IsKeyDown(ImGuiKey_Q));
-    keyCap(dl, ImVec2(p.x + avail - capW * 0.5f, cy), s_usingPad ? "RB" : "E",
+    keyCap(dl, ImVec2(p.x + avail - capW * 0.5f, cy), s_usingPad ? padName("RB", "R1") : "E",
            s_navKey[NavNextTab].held || ImGui::IsKeyDown(ImGuiKey_E));
     const float ruleY = p.y + h + 12.f * s_ui;
     dl->AddLine(ImVec2(p.x, ruleY), ImVec2(p.x + avail, ruleY), alpha(kGold, 60), 1.f);
@@ -1658,13 +2108,14 @@ bool drawMenu(settings::Settings& s, float t) {
     const bool rebinding = rebindingNow();
     pollNav(!rebinding && !s_textEditing);  // (typing: the text field takes the keys)
     if (s_nav[NavBack]) {
-        if (!s_browsing && !s_launcher) return false;
-        if (s_browsing) browseClose();  // (the folder browser: back to the MODS page)
+        // (the folder browser, then the disc page: back a step; the in-game menu otherwise closes)
+        if (!menuStepBack() && !s_launcher) return false;
         s_nav[NavBack] = false;
     }
     if (s_launcher && s_nav[NavStart] && !s_textEditing) {
         logf("menu", "launcher: controller START");
-        s_launch = true;
+        if (discReady()) s_launch = true;
+        else discPageOpen();
     }
     if (s_nav[NavPrevTab]) switchSection((s_section + SectionCount - 1) % SectionCount);
     if (s_nav[NavNextTab]) switchSection((s_section + 1) % SectionCount);
@@ -1724,13 +2175,15 @@ bool drawMenu(settings::Settings& s, float t) {
     const float footY = b.y - pad * 0.8f;
     const float helpY = footY - 40.f * s_ui;
     bg->AddLine(ImVec2(a.x + pad, helpY - 12.f * s_ui), ImVec2(b.x - pad, helpY - 12.f * s_ui), alpha(kGold, 50), 1.f);
-    std::string hint = s_usingPad ? "LB / RB  TABS      D-PAD / STICK  MOVE, CHANGE      A  SELECT"
+    // (a PlayStation controller's buttons by their names: cross, circle, square, L1 / R1, ...)
+    const std::string accept = padName("A", "CROSS"), back = padName("B", "CIRCLE"), clear = padName("X", "SQUARE");
+    std::string hint = s_usingPad ? std::string(padName("LB / RB", "L1 / R1")) + "  TABS      D-PAD / STICK  MOVE, CHANGE      " + accept + "  SELECT"
                                   : "Q / E  TABS      ARROWS  MOVE, CHANGE      ENTER  SELECT";
-    if (s_section == Controls) hint += s_usingPad ? "      X  CLEAR" : "      DEL  CLEAR";
-    if (s_launcher) hint += s_usingPad ? "      START  LAUNCH" : "";
-    else hint += s_usingPad ? "      B / BACK  CLOSE" : "      ESC / F1  CLOSE";
-    if (s_section == Mods && s_browsing)
-        hint = s_usingPad ? "D-PAD / STICK  MOVE      A  OPEN, SELECT      X  PARENT FOLDER      B  BACK"
+    if (s_section == Controls) hint += s_usingPad ? "      " + clear + "  CLEAR" : "      DEL  CLEAR";
+    if (s_launcher) hint += s_usingPad ? std::string("      ") + padStartName() + "  LAUNCH" : "";
+    else hint += s_usingPad ? "      " + back + " / " + padBackName() + "  CLOSE" : "      ESC / F1  CLOSE";
+    if (s_browsing && s_section == s_browseSection)
+        hint = s_usingPad ? "D-PAD / STICK  MOVE      " + accept + "  OPEN, SELECT      " + clear + "  PARENT FOLDER      " + back + "  BACK"
                           : "ARROWS  MOVE      ENTER  OPEN, SELECT      BACKSPACE  PARENT FOLDER      ESC  BACK";
     drawText(bg, s_font, 16.f * s_ui, ImVec2(a.x + pad, footY), kDim, hint.c_str(), 2.f * s_ui);
 
@@ -1944,6 +2397,7 @@ void padSelfTest() {
 void setOpen(bool open) {
     if (!open) cancelCapture();
     if (!open) browseClose();
+    if (!open && s_discPage) discPageClose();
     if (open) s_dolphinStale = true;  // Dolphin's files may have changed meanwhile
     s_confirmSave = false;
     s_confirmQuit = false;
@@ -1952,6 +2406,7 @@ void setOpen(bool open) {
     s_confirmLogout = false;
     s_textEditing = false;
     if (open) s_raDolphin = -1;  // (Dolphin may have logged in meanwhile)
+    if (open) s_padPsPressed = false;  // (the hints name port 1's controller's buttons until a press)
     s_open = open;
     s_focus = open;
     s_navFresh = true;
@@ -1974,7 +2429,11 @@ void launcherOpen() {
     s_usingPad = SDL_HasGamepad();  // (button hints; the first input decides after that)
     s_padDevice = s_usingPad && aurora::pad::port_controller(0) != 0;  // (the Controls page's device)
     setOpen(true);
+    if (!discReady()) discPageOpen();  // (no disc yet: that first)
 }
+
+void launcherSetDisc(const std::string& path, const std::string& note) { discSet(path, note); }
+std::string launcherDisc() { return s_discPath; }
 
 // one frame of the launcher, inside an ImGui frame; true: the player started the game
 bool launcherFrame() {
@@ -1988,9 +2447,28 @@ bool launcherFrame() {
     // R2_LAUNCHER_AUTO=<seconds> (tests): start the game that long after the launcher opened
     static const char* autoEnv = getenv("R2_LAUNCHER_AUTO");
     static const u64 openedTb = tbNow();
+    // R2_LAUNCHER_DISC=<path> (tests): that path entered on the disc page 1 s after it opened
+    static const char* discEnv = getenv("R2_LAUNCHER_DISC");
+    static bool discDone = false;
+    if (discEnv && !discDone && double(tbNow() - openedTb) / double(kTbClock) >= 1.0) {
+        discDone = true;
+        logf("menu", "launcher: R2_LAUNCHER_DISC %s: %s", discEnv, discChoose(discEnv) ? "taken" : "refused");
+    }
+    // R2_LAUNCHER_BROWSE=<folder> (screenshots): the disc browser on that folder
+    static const char* browseEnv = getenv("R2_LAUNCHER_BROWSE");
+    static bool browseDone = false;
+    if (browseEnv && !browseDone) {
+        browseDone = true;
+        discPageOpen();
+        browseBegin(BrowseMode::Disc, Display, browseEnv);
+    }
     if (autoEnv && double(tbNow() - openedTb) / double(kTbClock) >= atof(autoEnv)) {
         logf("menu", "launcher: R2_LAUNCHER_AUTO start");
         s_launch = true;
+    }
+    if (s_launch && !discReady()) {  // (no game without its disc)
+        s_launch = false;
+        discPageOpen();
     }
     if (!s_launch) return false;
     s_launcher = s_launch = false;
@@ -2058,9 +2536,8 @@ void menuImGuiInit(const void*) {
 void menuEvent(const void* p) {
     const SDL_Event& e = *static_cast<const SDL_Event*>(p);
     if (rebindingNow()) return;  // rebinding takes these
-    if (s_launcher) {  // no opening or closing: Esc only leaves the folder browser
-        if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_ESCAPE && s_browsing && !s_textEditing)
-            browseClose();
+    if (s_launcher) {  // no opening or closing: Esc only leaves the folder browser / the disc page
+        if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_ESCAPE && !s_textEditing) menuStepBack();
         return;
     }
     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
@@ -2070,9 +2547,7 @@ void menuEvent(const void* p) {
             if (!s_open) s_padDevice = false;  // Controls shows the keyboard's
             setOpen(!s_open);
         } else if (e.key.key == SDLK_ESCAPE && s_open && !s_textEditing) {
-            if (s_browsing) {
-                browseClose();  // (the folder browser: back to the MODS page)
-            } else {
+            if (!menuStepBack()) {  // (the folder browser / the disc page: back a step)
                 logf("menu", "Esc: close");
                 setOpen(false);
             }
@@ -2136,6 +2611,7 @@ void applyDisplaySettings() {
     VISetFrameBufferScale(settings::resolutionScale(s.resolution));
     applyDisplayAspect();
     AuroraSetUberShaders(uberShaderMode());
+    AuroraSetForcedAnisotropy(u16(s.anisotropy));  // (Aurora patch 0030)
     // widescreen: letterboxed cinematics fill the screen (4:3 keeps the original bars)
     AuroraSetLetterboxFill(s.aspect != settings::Aspect::R4_3);
     if (SDL_Window* w = aurora_get_window()) {
@@ -2228,6 +2704,12 @@ void menuDraw() {
         if (const char* row = getenv("R2_MENU_ROW")) s_rowSel[s_section] = std::max(0, atoi(row));
         s_usingPad = envFlag("R2_MENU_PAD");
         s_padDevice = envFlag("R2_MENU_PAD");  // (the Controls page shows the controller)
+        // R2_MENU_PAD=ps: a PlayStation controller's button names in the hints (automated runs
+        // read no controllers in the menu)
+        if (const char* v = getenv("R2_MENU_PAD"); v && !strcmp(v, "ps")) {
+            s_padType = SDL_GAMEPAD_TYPE_PS5;
+            s_padPsPressed = true;
+        }
     }
 
     // presented frames per second (half-second window)
