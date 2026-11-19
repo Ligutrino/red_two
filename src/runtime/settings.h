@@ -11,6 +11,8 @@ enum class Resolution : int { Window = 0, X1, X2, X3, X4K, Count };  // internal
 // settings.ini keeps the numbers of the old list: 0 4:3, 1 16:9, 2 16:10, 3 21:9, 4 (was 32:9:
 // now 21:9), 5 match the window
 enum class Aspect : int { R4_3 = 0, R16_9, R16_10, R21_9, Window, Count };
+// gyro aiming (gyro.cpp): when the controller's gyro steers. Held / Paused / Toggle use gyroButton.
+enum class GyroMode : int { Off = 0, Always, Held, Toggle, Paused, Count };
 
 // The widest aspect rendered (21:9); a wider window gets bars at the sides. Wider views make the
 // game's cameras cull for more of the world and it keeps more in its virtual memory, which ARAM
@@ -93,6 +95,14 @@ struct Settings {
     // input x sensitivity, clamped: above 100 full deflection comes sooner, below it never does)
     int stickDeadzone = 15;      // 0..50
     int stickSensitivity = 100;  // 25..200
+    // Gyro aiming (gyro.cpp): turning and tilting the controller (the Steam Deck itself) steers the
+    // craft in flight, on top of the stick. The button is an SDL gamepad button name (misc3 is the
+    // Deck's left stick touch); sensitivities are percent (100: the craft turns as far as the
+    // controller is turned).
+    GyroMode gyroMode = GyroMode::Off;
+    std::string gyroButton = "misc3";
+    int gyroSpeedX = 100, gyroSpeedY = 100;
+    bool gyroInvertY = false;
     // save states (savestate.cpp): the slot the hotkeys use, and the hotkeys (hotkeys.cpp), each a
     // combination held together: controller buttons by SDL name, keys by SDL key name, " + "
     // between them; empty = none
@@ -113,6 +123,8 @@ std::string summary();  // every setting on one line (the session log)
 const char* resolutionName(Resolution r);
 const char* aspectName(Aspect a);
 const char* buttonPromptsName(ButtonPrompts p);  // as settings.ini writes it
+const char* gyroModeName(GyroMode m);
+inline constexpr int kGyroSpeedMin = 10, kGyroSpeedMax = 400;
 float resolutionScale(Resolution r);  // Aurora frame buffer scale; 0 = the window's own size
 float aspectValue(Aspect a);          // width / height (4:3 = the game's own); -1 = the window's
 inline constexpr int kFpsChoices[] = {60, 90, 120, 144};

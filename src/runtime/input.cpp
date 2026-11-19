@@ -21,6 +21,7 @@
 #include <thread>
 #include <vector>
 
+#include "gyro.h"
 #include "hw/gx_fifo.h"
 #include "hotkeys.h"
 #include "runtime.h"
@@ -321,6 +322,7 @@ void init(bool pads) {
             .onEvent = [](const aurora::input::InputEvent&, void*) { return aurora::input::EventResult::Pass; },
             .pointerMode = [](void*) { return aurora::input::PointerMode::AutoHide; },
         });
+        gyro::init();
         std::thread(joystickThread).detach();
         scanTest();
     }
@@ -338,6 +340,15 @@ void poll() {
     if (!s_ready) return;
     s_vblank++;
     PADStatus st[PAD_CHANMAX] = {};
+    // the sticks' deadzone and sensitivity (settings), then gyro aiming on port 1's main stick (its
+    // own scale: not through the thumb's deadzone and sensitivity)
+    auto shape = [&st] {
+        for (auto& e : st)
+            if (e.err == PAD_ERR_NONE) {
+                shapeStickS8(e.stickX, e.stickY, true);
+                shapeStickS8(e.substickX, e.substickY, false);
+            }
+    };
     if (!s_pads) {
         for (auto& e : st) e.err = PAD_ERR_NO_CONTROLLER;
     } else if (JoystickAccess joy; joy) {
@@ -347,15 +358,13 @@ void poll() {
         PADRead(st);
         memcpy(s_lastPads, st, sizeof st);
         applyRumble();
+        shape();
+        gyro::apply(st[0], true);
     } else {
         memcpy(st, s_lastPads, sizeof st);
+        shape();
+        gyro::apply(st[0], false);
     }
-    if (s_pads)  // deadzone and sensitivity (settings)
-        for (auto& e : st)
-            if (e.err == PAD_ERR_NONE) {
-                shapeStickS8(e.stickX, e.stickY, true);
-                shapeStickS8(e.substickX, e.substickY, false);
-            }
     // a hotkey's modifier (Back) is down, or a hotkey just fired: its buttons are not the game's
     if (hotkeys::muteGame())
         for (auto& e : st) {

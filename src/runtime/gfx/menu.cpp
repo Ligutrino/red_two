@@ -47,6 +47,7 @@
 #include "../hw/musyx_dsp.h"
 #include "../mods.h"
 #include "../achievements.h"
+#include "../gyro.h"
 #include "../runtime.h"
 #include "../savestate.h"
 #include "../settings.h"
@@ -762,6 +763,19 @@ bool percentRow(const char* text, int& v, const char* help, int lo = 0, int hi =
     ImGui::PushStyleColor(ImGuiCol_Text, sel ? vec(kGold) : vec(kText));
     ImGui::Text("%d%%", nv);
     ImGui::PopStyleColor();
+    if (nv == v) return false;
+    v = nv;
+    return true;
+}
+
+// gyro sensitivity: percent in steps of 10
+bool gyroSpeedRow(const char* text, int& v, const char* help) {
+    const bool sel = rowBegin(text, help);
+    char buf[16];
+    snprintf(buf, sizeof buf, "%d%%", v);
+    int step = selector(text, buf, v > settings::kGyroSpeedMin, v < settings::kGyroSpeedMax, sel);
+    if (sel) step += s_in.dx;
+    const int nv = std::clamp(v + step * 10, settings::kGyroSpeedMin, settings::kGyroSpeedMax);
     if (nv == v) return false;
     v = nv;
     return true;
@@ -1936,6 +1950,44 @@ void pageControls() {
             buttonIconsUpdate();
         }
     }
+    heading("GYRO AIMING");
+    {
+        settings::Settings& st = settings::get();
+        const std::string pad = gyro::controllerName();
+        std::string help = "Turn and tilt the controller to steer the craft in flight, on top of the stick (menus, the pause "
+                           "screen and cutscenes are left alone). ";
+        help += pad.empty() ? "No controller with a gyro found. On a Steam Deck: Steam Input hides it - turn Steam Input off "
+                              "for Red Two (Properties > Controller)."
+                            : "Gyro: " + pad + ".";
+        if (enumRow("Gyro aiming", st.gyroMode, settings::gyroModeName, help.c_str())) s_changed = true;
+    }
+    {
+        settings::Settings& st = settings::get();
+        const bool sel = rowBegin("Gyro button", "The button for While held, Button toggles and Off while held. The Steam "
+                                                 "Deck's stick touches are its sticks' touch sensors: Left stick touch keeps "
+                                                 "the gyro on while your thumb rests on the stick you fly with.");
+        constexpr int n = int(std::size(gyro::kButtons));
+        int cur = -1;
+        for (int i = 0; i < n; i++)
+            if (st.gyroButton == gyro::kButtons[i].sdlName) cur = i;
+        const char* label = cur >= 0 ? gyro::kButtons[cur].label : st.gyroButton.c_str();  // (one set in settings.ini)
+        const int shown = std::max(cur, 0);
+        const int next = choiceStep(shown, n, selector("gyrobutton", label, shown > 0, shown < n - 1, sel), sel);
+        if (next != shown || (cur < 0 && sel && (s_in.dx || s_in.accept))) {
+            st.gyroButton = gyro::kButtons[next].sdlName;
+            s_changed = true;
+        }
+    }
+    if (gyroSpeedRow("Gyro turning", settings::get().gyroSpeedX,
+                     "How far the craft turns left / right for a turn of the controller: 100% as far as the controller "
+                     "(up to the craft's own limit)."))
+        s_changed = true;
+    if (gyroSpeedRow("Gyro pitch", settings::get().gyroSpeedY,
+                     "How far the nose goes up / down for a tilt of the controller: 100% as far as the controller."))
+        s_changed = true;
+    if (toggleRow("Invert gyro pitch", settings::get().gyroInvertY,
+                  "Off: tilting the top of the controller toward you raises the nose. On: it lowers it."))
+        s_changed = true;
     heading("SAVE STATES");
     {
         settings::Settings& st = settings::get();

@@ -173,6 +173,7 @@ set(R2_RUNTIME_SOURCES
     src/runtime/gfx/tex_dump.cpp
     src/runtime/gfx/button_icons.cpp
     src/runtime/input.cpp
+    src/runtime/gyro.cpp
     src/runtime/settings.cpp
     src/runtime/hle_game.cpp
     src/runtime/mods.cpp

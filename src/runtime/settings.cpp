@@ -95,6 +95,11 @@ void set(const std::string& key, const std::string& value) {
     else if (key == "stick_sensitivity") s.stickSensitivity = std::clamp(n, 25, 200);
     else if (key == "xbox_buttons")  // (before button_prompts: on = Xbox or, now, PlayStation)
         s.buttonPrompts = parseBool(value) ? ButtonPrompts::Auto : ButtonPrompts::GameCube;
+    else if (key == "gyro") { if (n >= 0 && n < int(GyroMode::Count)) s.gyroMode = GyroMode(n); }
+    else if (key == "gyro_button") s.gyroButton = value;
+    else if (key == "gyro_speed_x") s.gyroSpeedX = std::clamp(n, kGyroSpeedMin, kGyroSpeedMax);
+    else if (key == "gyro_speed_y") s.gyroSpeedY = std::clamp(n, kGyroSpeedMin, kGyroSpeedMax);
+    else if (key == "gyro_invert_y") s.gyroInvertY = parseBool(value);
     else if (key == "state_slot") s.stateSlot = n < 1 ? 1 : n > 8 ? 8 : n;
     else {
         for (int a = 0; a < HkCount; a++) {
@@ -182,11 +187,12 @@ std::string summary() {
              "disc_path=%s launcher=%d fullscreen=%d resolution=%s msaa=%d anisotropy=%d aspect=%s fps=%d ubershaders=%d precompile_shaders=%d hud_edges=%d tile_menus=%d game_dither=%d "
              "show_fps=%d volume=%d background_audio=%d skip_logos=%d skip_cutscenes=%d fast_disc=%d invincible=%d "
              "infinite_lives=%d infinite_ammo=%d perfect_stats=%d all_craft=%d custom_textures=%d prefetch_textures=%d "
-             "textures_folder=%s button_prompts=%s stick_deadzone=%d stick_sensitivity=%d state_slot=%d achievements=%d ra_user=%s ra_notifications=%d ra_encore=%d",
+             "textures_folder=%s button_prompts=%s stick_deadzone=%d stick_sensitivity=%d gyro=%s gyro_button=%s gyro_speed=%d/%d gyro_invert_y=%d state_slot=%d achievements=%d ra_user=%s ra_notifications=%d ra_encore=%d",
              s.discPath.empty() ? "-" : s.discPath.c_str(), s.launcher, s.fullscreen, resolutionName(s.resolution), s.msaa, s.anisotropy, aspectName(s.aspect), s.fps, s.ubershaders, s.precompileShaders, s.hudEdges,
              s.tileMenus, s.gameDither, s.showFps, s.volume, s.backgroundAudio, s.skipLogos, s.skipCutscenes,
              s.fastDisc, s.invincible, s.infiniteLives, s.infiniteAmmo, s.perfectStats, s.allCraft, s.customTextures,
-             s.prefetchTextures, s.texturesFolder.empty() ? "-" : s.texturesFolder.c_str(), buttonPromptsName(s.buttonPrompts), s.stickDeadzone, s.stickSensitivity, s.stateSlot, s.achievements, s.raUser.empty() ? "-" : s.raUser.c_str(),
+             s.prefetchTextures, s.texturesFolder.empty() ? "-" : s.texturesFolder.c_str(), buttonPromptsName(s.buttonPrompts), s.stickDeadzone, s.stickSensitivity, gyroModeName(s.gyroMode),
+             s.gyroButton.c_str(), s.gyroSpeedX, s.gyroSpeedY, s.gyroInvertY, s.stateSlot, s.achievements, s.raUser.empty() ? "-" : s.raUser.c_str(),
              s.raNotifications, s.raEncore);
     return b;
 }
@@ -248,6 +254,14 @@ void save() {
     fprintf(f, "# controller sticks: a round deadzone in %% of the travel (0-50, both sticks), the control stick's sensitivity in %% (25-200)\n");
     fprintf(f, "stick_deadzone=%d\n", s.stickDeadzone);
     fprintf(f, "stick_sensitivity=%d\n", s.stickSensitivity);
+    fprintf(f, "# gyro aiming in flight: 0 off, 1 always, 2 while the button is held, 3 the button toggles it, 4 off while held\n");
+    fprintf(f, "gyro=%d\n", int(s.gyroMode));
+    fprintf(f, "# SDL gamepad button name: misc3 / misc4 the Steam Deck's left / right stick touch, paddle1-4 R4 L4 R5 L5\n");
+    fprintf(f, "gyro_button=%s\n", s.gyroButton.c_str());
+    fprintf(f, "# percent (%d-%d): turning (left / right) and pitch (up / down)\n", kGyroSpeedMin, kGyroSpeedMax);
+    fprintf(f, "gyro_speed_x=%d\n", s.gyroSpeedX);
+    fprintf(f, "gyro_speed_y=%d\n", s.gyroSpeedY);
+    fprintf(f, "gyro_invert_y=%d\n", s.gyroInvertY);
     fprintf(f, "# RetroAchievements (softcore): the account and its login token (not the password)\n");
     fprintf(f, "achievements=%d\n", s.achievements);
     fprintf(f, "ra_user=%s\n", s.raUser.c_str());
@@ -297,6 +311,17 @@ const char* buttonPromptsName(ButtonPrompts p) {
     case ButtonPrompts::PlayStation: return "playstation";
     case ButtonPrompts::GameCube: return "gamecube";
     default: return "auto";
+    }
+}
+
+const char* gyroModeName(GyroMode m) {
+    switch (m) {
+    case GyroMode::Off: return "Off";
+    case GyroMode::Always: return "Always on";
+    case GyroMode::Held: return "While held";
+    case GyroMode::Toggle: return "Button toggles";
+    case GyroMode::Paused: return "Off while held";
+    default: return "?";
     }
 }
 
