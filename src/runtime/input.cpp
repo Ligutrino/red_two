@@ -11,7 +11,9 @@
 #include <aurora/pad.hpp>
 #include <dolphin/pad.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -22,6 +24,7 @@
 #include "hw/gx_fifo.h"
 #include "hotkeys.h"
 #include "runtime.h"
+#include "settings.h"
 
 namespace rt::input {
 
@@ -222,6 +225,8 @@ void followActiveController() {  // JoystickAccess held
     s_active = std::move(now);
 }
 
+bool s_port1PlayStation = false;  // port 1's controller is a PlayStation one (button prompts)
+
 // the session log says which controller port 1 has whenever that changes (automatic or taken over)
 void logPort1() {  // JoystickAccess held
     static aurora::input::SourceId s_logged = 0;
@@ -229,13 +234,66 @@ void logPort1() {  // JoystickAccess held
     if (src == s_logged) return;
     s_logged = src;
     SDL_Gamepad* g = src ? SDL_GetGamepadFromID(aurora::input::gamepad_for_source(src)) : nullptr;
+    const SDL_GamepadType type = g ? SDL_GetGamepadType(g) : SDL_GAMEPAD_TYPE_UNKNOWN;
+    s_port1PlayStation = isPlayStation(type);
+    const char* typeName = SDL_GetGamepadStringForType(type);
     if (g)
-        logf("input", "port 1 controller: '%s' (vid %04x, pid %04x)", SDL_GetGamepadName(g), SDL_GetGamepadVendor(g),
-             SDL_GetGamepadProduct(g));
+        logf("input", "port 1 controller: '%s' (vid %04x, pid %04x, type %s)", SDL_GetGamepadName(g), SDL_GetGamepadVendor(g),
+             SDL_GetGamepadProduct(g), typeName ? typeName : "standard");
     else
         logf("input", "port 1 controller: none (keyboard only)");
 }
+
+// Aurora's stick deadzone works on each axis alone and cuts without rescaling: with its default
+// (24%) an axis jumped from 0 to a quarter of its travel as the stick left the deadzone, and
+// small aiming moves snapped to the axes ("jittery, not smooth": issue #9). It is turned off for
+// every controller (the profile's useDeadzones, once per controller and session) and shapeStick
+// applies the settings instead.
+void disableAuroraDeadzones() {  // JoystickAccess held
+    static std::vector<aurora::input::SourceId> s_done;
+    for (u32 port = 0; port < 4; port++) {
+        const auto src = aurora::pad::port_controller(port);
+        if (!src || std::find(s_done.begin(), s_done.end(), src) != s_done.end()) continue;
+        s_done.push_back(src);
+        const auto target = aurora::pad::ProfileTarget::controller(src);
+        const aurora::pad::Profile* prof = aurora::pad::profile(target);
+        aurora::pad::ProfileSettings s = prof ? prof->settings : aurora::pad::ProfileSettings{};
+        if (!s.useDeadzones) continue;
+        s.useDeadzones = false;
+        if (!aurora::pad::set_settings(target, s)) logf("input", "port %u: Aurora's stick deadzone could not be turned off", port + 1);
+    }
+}
+
+void shapeStickS8(s8& x, s8& y, bool mainStick) {
+    float fx = float(x) / 127.f, fy = float(y) / 127.f;
+    shapeStick(fx, fy, mainStick);
+    x = s8(std::lround(fx * 127.f));
+    y = s8(std::lround(fy * 127.f));
+}
 }  // namespace
+
+// A round deadzone (settings stick_deadzone) the output rescales from, so it starts at 0 at the
+// deadzone's edge and keeps its direction, then the control stick's sensitivity; x, y in -1..1
+// (a keyboard's diagonal reaches past 1: it stays full on both axes).
+void shapeStick(float& x, float& y, bool mainStick) {
+    const auto& s = settings::get();
+    const float dz = float(std::clamp(s.stickDeadzone, 0, 50)) / 100.f;
+    const float sens = mainStick ? float(std::clamp(s.stickSensitivity, 25, 200)) / 100.f : 1.f;
+    const float m = std::sqrt(x * x + y * y);
+    if (m <= dz || m <= 0.f) {
+        x = y = 0.f;
+        return;
+    }
+    const float k = (m - dz) / (1.f - dz) / m * sens;
+    x = std::clamp(x * k, -1.f, 1.f);
+    y = std::clamp(y * k, -1.f, 1.f);
+}
+
+bool isPlayStation(int sdlGamepadType) {
+    return sdlGamepadType == SDL_GAMEPAD_TYPE_PS3 || sdlGamepadType == SDL_GAMEPAD_TYPE_PS4 ||
+           sdlGamepadType == SDL_GAMEPAD_TYPE_PS5;
+}
+bool port1PlayStation() { return s_port1PlayStation; }
 
 JoystickAccess::JoystickAccess() : m_held(s_joyMutex.try_lock()) {}
 JoystickAccess::~JoystickAccess() {
@@ -285,12 +343,19 @@ void poll() {
     } else if (JoystickAccess joy; joy) {
         followActiveController();
         logPort1();
+        disableAuroraDeadzones();
         PADRead(st);
         memcpy(s_lastPads, st, sizeof st);
         applyRumble();
     } else {
         memcpy(st, s_lastPads, sizeof st);
     }
+    if (s_pads)  // deadzone and sensitivity (settings)
+        for (auto& e : st)
+            if (e.err == PAD_ERR_NONE) {
+                shapeStickS8(e.stickX, e.stickY, true);
+                shapeStickS8(e.substickX, e.substickY, false);
+            }
     // a hotkey's modifier (Back) is down, or a hotkey just fired: its buttons are not the game's
     if (hotkeys::muteGame())
         for (auto& e : st) {

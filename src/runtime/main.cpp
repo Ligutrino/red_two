@@ -423,6 +423,33 @@ bool discOpen(const std::string& path) {
 
 bool discRead(u64 off, void* dst, u32 len) { return s_image && s_image->read(off, dst, len); }
 
+std::string discProblem(const std::string& path, std::string* what) {
+    if (path.empty()) return "No disc image chosen.";
+    std::string err;
+    const auto img = disc::open(path, err);
+    if (!img) return "Cannot read it as a disc image (.iso, .gcm, .rvz or .wia): " + err;
+    u8 hdr[0x60] = {};
+    if (!img->read(0, hdr, sizeof hdr)) return "Cannot read it: the file is too short or damaged.";
+    // (the GameCube disc magic word at 0x1C)
+    if (hdr[0x1C] != 0xC2 || hdr[0x1D] != 0x33 || hdr[0x1E] != 0x9F || hdr[0x1F] != 0x3D)
+        return "This is not a GameCube disc image.";
+    const std::string id(reinterpret_cast<const char*>(hdr), 6);
+    std::string name(reinterpret_cast<const char*>(hdr + 0x20), strnlen(reinterpret_cast<const char*>(hdr + 0x20), 0x40));
+    while (!name.empty() && (name.back() == ' ' || u8(name.back()) < 0x20)) name.pop_back();
+    for (char& ch : name)
+        if (u8(ch) < 0x20 || u8(ch) > 0x7E) ch = '?';
+    if (what) {
+        char size[32];
+        snprintf(size, sizeof size, "%.2f GiB", double(img->size()) / double(1ull << 30));
+        *what = (name.empty() ? std::string("a disc") : name) + " (" + id + (hdr[7] ? ", revision " + std::to_string(hdr[7]) : "") +
+                "), " + img->kind() + " image, " + size;
+    }
+    if (id == "GSWE64") return hdr[7] == 0 ? std::string() : "This is revision " + std::to_string(hdr[7]) + " of the disc; Red Two was made from revision 0.";
+    if (id.compare(0, 3, "GSW") == 0)
+        return "This is Rogue Leader for another region (" + id + "); Red Two needs the USA release (GSWE64).";
+    return "This is " + (name.empty() ? std::string("another game") : name) + " (" + id + "), not Rogue Leader (USA, GSWE64).";
+}
+
 static u32 be32(const u8* p) { return (u32(p[0]) << 24) | (u32(p[1]) << 16) | (u32(p[2]) << 8) | p[3]; }
 
 struct DiscFile {
@@ -746,10 +773,8 @@ static void setupLogOutput(int argc, char** argv) {
     const HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
     if (h && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN) return;
     std::string dir;
-    if (const char* appdata = getenv("APPDATA")) {
-        dir = std::string(appdata) + "\\Red Two";
-        CreateDirectoryA(dir.c_str(), nullptr);
-        dir += "\\logs";
+    if (const std::string u = rt::mods::userDir(); !u.empty()) {  // (the portable folder or %APPDATA%\Red Two)
+        dir = u + "logs";
         CreateDirectoryA(dir.c_str(), nullptr);
         if (GetFileAttributesA(dir.c_str()) == INVALID_FILE_ATTRIBUTES) dir.clear();
     }
@@ -819,13 +844,9 @@ static std::string findDisc() {
     std::vector<fs::path> dirs = {fs::current_path()};
     if (const char* base = SDL_GetBasePath()) dirs.push_back(fs::path(std::u8string(base, base + strlen(base))));
     if (const char* ai = getenv("APPIMAGE")) dirs.push_back(fs::path(ai).parent_path());
-    if (char* pref = SDL_GetPrefPath(nullptr, "Red Two")) {
-        dirs.push_back(fs::path(std::u8string(pref, pref + strlen(pref))));
-        SDL_free(pref);
-    }
-#if defined(__ANDROID__)
-    dirs.push_back(fs::path(rt::mods::userDir()));  // Android/data/<package>/files (over USB)
-#elif !defined(_WIN32)
+    // the user folder (the portable one; Android/data/<package>/files, reachable over USB)
+    if (const std::string u = rt::mods::userDir(); !u.empty()) dirs.push_back(fs::path(std::u8string(u.begin(), u.end())));
+#if !defined(_WIN32) && !defined(__ANDROID__)
     if (const char* home = getenv("HOME")) {
         dirs.push_back(fs::path(home) / "Emulation/roms/gc");
         dirs.push_back(fs::path(home) / "Emulation/roms/gamecube");
@@ -972,35 +993,46 @@ int main(int argc, char** argv) {
     s_t0Tb = tbNow();
     if (!memInit()) fatal("could not reserve the guest address space");
     tableInit();
-    if (disc.empty()) {  // no --disc: the usual places
-        disc = findDisc();
-#ifdef __ANDROID__
-        if (disc.empty()) disc = androidDisc();
-        if (disc.empty()) fatal("no disc image picked");
-#endif
-        if (disc.empty()) {
-            std::string where;
-            if (char* pref = SDL_GetPrefPath(nullptr, "Red Two")) {
-                where = pref;
-                SDL_free(pref);
-            }
-            const std::string msg =
-                "Red Two needs your own disc image of Star Wars: Rogue Squadron II - Rogue Leader (USA, GSWE64) as .iso or "
-                ".rvz.\n\nPut it next to Red Two or in\n" + where +
-                "\n(any file name), or start Red Two with --disc <path to the image>.";
-            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Red Two: no disc image", msg.c_str(), nullptr);
-            fatal("no disc image: pass --disc <your Rogue Leader .iso or .rvz>");
+    // The disc: --disc, else the one chosen in the launcher before (setting disc_path), else the
+    // usual places (findDisc: next to the program, the user folder, ...). None, or one that is not
+    // Rogue Leader (USA, revision 0): the launcher (gfx::init) asks for it before anything boots.
+    const bool gfxOn = !envFlag("R2_NO_GFX");
+    std::string discNote;  // why the launcher asks
+    if (!disc.empty()) {
+        if (const std::string problem = discProblem(disc); !problem.empty()) {
+            logf("disc", "--disc %s: %s", disc.c_str(), problem.c_str());
+            if (!gfxOn) fatal("--disc %s: %s", disc.c_str(), problem.c_str());
+            discNote = "The disc image given with --disc (" + disc + ") cannot be used: " + problem;
+            disc.clear();
+        }
+    } else if (const std::string saved = settings::get().discPath; !saved.empty()) {
+        if (const std::string problem = discProblem(saved); problem.empty()) {
+            disc = saved;
+        } else {
+            logf("disc", "the disc chosen before, %s: %s", saved.c_str(), problem.c_str());
+            discNote = "The disc image chosen before (" + saved + ") cannot be used now: " + problem;
         }
     }
+    if (disc.empty()) disc = findDisc();
+#ifdef __ANDROID__
+    if (disc.empty()) disc = androidDisc();
+    if (disc.empty()) fatal("no disc image picked");
+#endif
+    if (disc.empty() && !gfxOn) fatal("no disc image: pass --disc <your Rogue Leader .iso or .rvz>");
+    ra::init(disc);  // RetroAchievements: logs in meanwhile, hashes the disc once it is known (if enabled)
+    // the window first: its launcher asks for the disc if there is none (and the game boots after it)
+    if (gfxOn) {
+        if (!gfx::init(argc, argv, disc, discNote) && disc.empty()) fatal("no window, and no disc image to start");
+        ra::setDisc(disc);  // (the launcher's choice)
+    } else {
+        input::init(false);  // scripted input still works without a renderer
+    }
     if (!discOpen(disc)) fatal("cannot open the disc image %s", disc.c_str());
-    ra::init(disc);  // RetroAchievements: hashes the disc and logs in meanwhile (if enabled)
     loadFst();
     Ctx* boot = nullptr;
     threadsInit(boot);
     Ctx& c = *boot;
     const u32 entry = bootDisc();
-    if (!envFlag("R2_NO_GFX")) gfx::init(argc, argv);
-    else input::init(false);  // scripted input still works without a renderer
     if (envFlag("R2_RESTART_TEST")) {  // the save importer's restart, once (the new instance runs on)
 #ifdef _WIN32
         _putenv("R2_RESTART_TEST=");

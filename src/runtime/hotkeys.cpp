@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "hw/gx_fifo.h"
+#include "mods.h"
 #include "runtime.h"
 #include "savestate.h"
 #include "settings.h"
@@ -196,6 +197,7 @@ void fire(int action) {
         gfx::toast(buf);
         break;
     }
+    case settings::HkToggleTextures: gfx::toast(mods::toggleTexturesShown()); break;
     default: break;
     }
 }
@@ -293,6 +295,17 @@ void selfTest() {
 
 void tick() {
     static const bool test = envFlag("R2_HOTKEY_TEST");
+    // R2_TEXTURE_TOGGLE_TEST=<seconds>: the texture pack hotkey's action once, then (automated
+    // runs take no hotkeys)
+    if (static const char* tt = getenv("R2_TEXTURE_TOGGLE_TEST"); tt) {
+        static const u64 t0 = tbNow();
+        static bool done = false;
+        if (!done && double(tbNow() - t0) / double(kTbClock) >= atof(tt)) {
+            done = true;
+            logf("hotkey", "texture toggle test");
+            fire(settings::HkToggleTextures);
+        }
+    }
     selfTest();
     refreshModifiers();
     const bool enabled = !gfx::menuOpen() && !s_cap.active && (!automated() || test);
@@ -308,7 +321,10 @@ void tick() {
                 covered = o != a && sat[o][d] && combo(o, d).size() > combo(a, d).size() && contains(combo(o, d), combo(a, d));
             if (covered) continue;
             logf("hotkey", "%s: %s", label(a, d == 0).c_str(),
-                 a == settings::HkSaveState ? "save state" : a == settings::HkLoadState ? "load state" : "slot");
+                 a == settings::HkSaveState         ? "save state"
+                 : a == settings::HkLoadState      ? "load state"
+                 : a == settings::HkToggleTextures ? "texture packs"
+                                                   : "slot");
             fire(a);
             if (d == 0) s_mutedUntilUp = combo(a, d);
         }

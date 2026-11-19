@@ -912,10 +912,14 @@ void sendProjection(float shiftX = 0.f, bool mirror = false, float axis = 0.f) {
 // inside it go to Aurora as screen space (GX_AURORA_SET_SCREEN_SPACE_2D).
 constexpr u8 kScreenSpaceMarker = 0x7E;
 constexpr u32 kScreenSpaceMagic = 0x5C5200;
-bool s_screenSpaceWindow = false, s_screenSpaceSent = false;
+// hle_ReticleDraw's bracket (the flight reticle): every orthographic draw, the identity
+// projection included - the reticle's own (issue #10)
+constexpr u32 kScreenSpaceAllMagic = 0x5C5220;
+bool s_screenSpaceWindow = false, s_screenSpaceAllWindow = false, s_screenSpaceSent = false;
 
 void screenSpace2D() {
-    const bool want = s_screenSpaceWindow && s_projKnown && s_xfProj[6] != 0 && asFloat(s_xfProj[0]) != 1.f;
+    const bool ortho = s_projKnown && s_xfProj[6] != 0;
+    const bool want = ortho && ((s_screenSpaceWindow && asFloat(s_xfProj[0]) != 1.f) || s_screenSpaceAllWindow);
     if (want == s_screenSpaceSent) return;
     s_screenSpaceSent = want;
     static int logs = 0;
@@ -1591,6 +1595,10 @@ void onCommand(const u8* p, u32 len) {
             s_screenSpaceWindow = raw & 1;  // hle_TargetingPass's bracket: not for the GPU (and
             return;                         // a pending BP mask stays for the game's next write)
         }
+        if (reg == kScreenSpaceMarker && (raw & 0xFFFFFE) == kScreenSpaceAllMagic) {
+            s_screenSpaceAllWindow = raw & 1;  // hle_ReticleDraw's bracket
+            return;
+        }
         if (reg == kScreenSpaceMarker && (raw & 0xFFFFFE) == kFillMagic) {
             s_fillWindow = raw & 1;  // hle_CutsceneVideoDraw's bracket
             return;
@@ -1763,7 +1771,7 @@ void logCallback(AuroraLogLevel level, const char* module, const char* message, 
 
 }  // namespace
 
-bool init(int argc, char** argv) {
+bool init(int argc, char** argv, std::string& disc, const std::string& discNote) {
     AuroraConfig cfg{};
     cfg.appName = "Red Two";
     // Pipeline cache and other Aurora files: %APPDATA%\Red Two for the player. Automated runs
@@ -1773,6 +1781,7 @@ bool init(int argc, char** argv) {
     static std::string cacheDir;
     if (const char* dir = getenv("R2_CACHE_DIR")) cacheDir = dir;
     else if (envFlag("R2_BACKGROUND") || envFlag("R2_HEADLESS") || getenv("R2_INPUT")) cacheDir = "build/test_cache/";
+    else if (mods::portable()) cacheDir = mods::userDir();  // (else Aurora's own: %APPDATA%\Red Two, the same)
     if (!cacheDir.empty()) {
         std::error_code ec;
         std::filesystem::create_directories(cacheDir, ec);
@@ -1780,6 +1789,7 @@ bool init(int argc, char** argv) {
         cfg.userPath = cacheDir.c_str();  // controller/keyboard bindings (input.json) too
     }
     cfg.desiredBackend = BACKEND_AUTO;
+    cfg.msaa = settings::get().msaa >= 4 ? 4 : 1;  // (WebGPU: 1 or 4 samples)
     cfg.vsync = false;  // the game paces itself on the emulated retrace
     s_testClear = envFlag("R2_GFX_TEST");
     if (const char* d = getenv("R2_GX_DUMP")) {
@@ -1875,7 +1885,13 @@ bool init(int argc, char** argv) {
     static const char* backends[] = {"auto", "D3D11", "D3D12", "Metal", "Vulkan", "OpenGL", "OpenGL ES", "WebGPU", "null"};
     logf("gfx", "Aurora up: %s backend, window %ux%u", backends[info.backend], info.windowSize.width, info.windowSize.height);
     input::init(true);  // (before the launcher: the controllers drive it)
-    if (launcherWanted(argc, argv)) runLauncher();
+    // the launcher; also when there is no usable disc (it asks for one: setting off or not)
+    launcherSetDisc(disc, discNote);
+    if (disc.empty() || launcherWanted(argc, argv)) {
+        if (disc.empty()) logf("disc", "none found: the launcher asks for it%s%s", discNote.empty() ? "" : ": ", discNote.c_str());
+        runLauncher();
+        disc = launcherDisc();
+    }
     precompileShaders();
     s_enabled = true;
     gxSetSink(onCommand);

@@ -120,6 +120,10 @@ void deliverException(Ctx& c, u32 exc, u32 pc);
 // --- devices --------------------------------------------------------------------------
 bool discOpen(const std::string& path);
 bool discRead(u64 off, void* dst, u32 len);
+// main.cpp: whether an image is the disc Red Two needs (Rogue Leader, USA, GSWE64 revision 0):
+// "" if so, else why not in a sentence; *what: what it is ("Star Wars Rogue Squadron II (GSWE64),
+// RVZ image, 1.4 GiB") when it could be read
+std::string discProblem(const std::string& path, std::string* what = nullptr);
 std::string discFileAt(u64 off);  // "path+0xoffset" of the disc file containing off (debugging)
 void hwInit();
 void viFrameHook();  // called once per guest frame (XFB handoff)
@@ -167,7 +171,7 @@ void touchDraw();
 bool touchApply(void* padStatus);
 void setHudAnchoring(bool on);  // gfx/menu.cpp: widescreen HUD pieces at the screen edges (in flight)
 void noteWidenedAspect(float aspect);  // gfx/menu.cpp: a projection aspect a camera was widened to
-void buttonIconsUpdate();  // gfx/button_icons.cpp: Xbox button prompts per the setting and bindings
+void buttonIconsUpdate();  // gfx/button_icons.cpp: Xbox / PlayStation button prompts per the setting, controller and bindings
 void buttonIconsNoteTexture(u32 fmt, u32 w, u32 h, const u8* data, u32 bytes);  // a bound texture (baked prompts)
 void setMenuTiling(bool on);    // gfx/gx_bridge.cpp: widescreen menu backgrounds tiled into the sides
 }
@@ -176,6 +180,10 @@ namespace input {
 void init(bool pads);  // pads: Aurora PAD (after the window exists); false = R2_INPUT script only
 void poll();  // once per frame: Aurora pads/keyboard -> SI controller state
 void rumble(int chan, u32 cmd);  // SI motor bits: 0 stop, 1 rumble, 2 hard stop
+bool isPlayStation(int sdlGamepadType);  // an SDL_GamepadType of a PS3 / PS4 / PS5 controller
+bool port1PlayStation();  // port 1's controller is a PlayStation one (as of the last poll; button prompts)
+// the settings' stick deadzone (round, rescaled) and, for the control stick, sensitivity; -1..1
+void shapeStick(float& x, float& y, bool mainStick);
 // The game thread may call SDL's controller API while this is held. Not held: the input thread
 // is updating the controllers, maybe a device scan of seconds - use the previous state instead.
 class JoystickAccess {

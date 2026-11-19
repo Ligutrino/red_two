@@ -42,6 +42,8 @@ hle     CameraHFovAtan
 hle     MTXPerspective
 # Widescreen: the targeting computer's screen is a 2D quad at corners projected from 3D
 hle     TargetingPass
+# Widescreen: the flight reticle is 2D quads at the aim point projected with the (wide) camera
+hle     ReticleDraw
 # Widescreen: cutscene movies (quads in the 3D scene sized for the game's view) fill the screen
 hle     CutsceneVideoDraw
 # Widescreen: the terrain's span array is sized for the 4:3 view; wider views overflowed it.
