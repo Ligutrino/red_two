@@ -1,0 +1,83 @@
+name: Bug report
+description: Something crashes, freezes, looks wrong, sounds wrong or doesn't respond.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! A few details make a problem much quicker to find and fix. One problem per issue, please.
+        **The session log helps most**: see "Session log" below for where it is.
+
+  - type: input
+    id: version
+    attributes:
+      label: Red Two version
+      description: Shown under the menu's title (F1, or the controller's Back / Select button), e.g. "VERSION 1.2", and on the log's first line.
+      placeholder: "1.2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows (the release zip)
+        - Steam Deck (the AppImage)
+        - Linux desktop (the AppImage)
+        - Built from source
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you saw or heard, and what you expected instead.
+      placeholder: "The game froze for a second every few seconds, and the sound crackled."
+    validations:
+      required: true
+
+  - type: textarea
+    id: where
+    attributes:
+      label: Where, and how to make it happen
+      description: The mission (or menu, cutscene, launcher) and the moment. Does it happen every time? The steps to get there help a lot.
+      placeholder: |
+        Battle of Hoth, the first AT-AT, wrapping it with the tow cable. Every time.
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Session log
+      description: |
+        Every start writes a log, named by date and time. Drag the one from the session where it happened into this box.
+        - **Windows**: the `user\logs` folder next to `red_two.exe` (an older install without a `user` folder: `%APPDATA%\Red Two\logs`)
+        - **Steam Deck / Linux**: `~/.local/share/Red Two/logs`
+
+        It lists your settings, the frame rate every 30 seconds, and what the game was doing in a freeze or a crash. It also shows folder paths, which can include your user name: edit those out if you like.
+      placeholder: "Drop red_two_<date>_<time>.log here"
+
+  - type: textarea
+    id: setup
+    attributes:
+      label: Your setup
+      description: Your controller (and whether you start Red Two through Steam), your display and the aspect ratio you play at, a texture pack if you use one, your PC's CPU and graphics card.
+      placeholder: "DualSense over Bluetooth, started from Steam; 3440x1440, 21:9, 120 fps; HD texture pack; Ryzen 7 5800X, RTX 3070"
+
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots or video
+      description: For anything you can see, a screenshot or a short clip (drag it in) shows it best.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you send it
+      options:
+        - label: I'm playing my own disc image of the USA release (GSWE64, revision 0)
+          required: true
+        - label: I looked at the open issues, and this one isn't there yet
