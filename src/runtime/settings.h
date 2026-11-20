@@ -36,6 +36,8 @@ struct Settings {
     // start: the launcher (the settings menu before the game boots, gfx/menu.cpp) or straight
     // into the game. On until the player turns it off; --launcher / R2_LAUNCHER=1 show it anyway.
     bool launcher = true;
+    // At start, ask GitHub whether a newer release is out (update.cpp); the menu offers it.
+    bool checkUpdates = true;
     // The game disc image chosen in the launcher (its disc page): used at every start unless
     // --disc gives another; empty or unusable: found next to the program, else asked for.
     std::string discPath;
