@@ -49,6 +49,11 @@ Red Two folder (on another drive, a NAS, a USB stick) and it comes along.
 Updating: unzip the new version, then copy this folder over the new one's.
 "@ | Set-Content -Encoding utf8 (Join-Path $stage "user\README.txt")
 Copy-Item (Join-Path $root "LICENSE") (Join-Path $stage "LICENSE.txt")
+# The starter shader list (tools\make_shader_seed.py): Aurora merges it into the player's shader
+# cache at every start, so a new install compiles those shaders before the game begins.
+$seed = Join-Path $root "build\initial_pipeline_cache.db"
+if (Test-Path $seed) { Copy-Item $seed $stage }
+else { Write-Warning "no build\initial_pipeline_cache.db: the zip has no starter shader list (python tools\make_shader_seed.py)" }
 python (Join-Path $root "tools\third_party_notices.py") $BuildDir (Join-Path $stage "THIRD_PARTY_NOTICES.txt")
 if ($LASTEXITCODE) { throw "third_party_notices.py failed" }
 @"

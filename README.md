@@ -144,8 +144,10 @@ report one problem per issue. What to have at hand:
   first page.
 - **What happened and where**: the mission (or menu, cutscene) and the moment, whether it happens
   every time, and how to get there.
-- **The session log**: every start writes one, named by date and time. Attach the one from the
-  session where it happened (drag it into the issue):
+- **The session log (required)**: a bug report needs the log of the play session where the
+  problem happened. Every start of Red Two writes a new one, named by the date and time it
+  started, so if you started Red Two again afterwards, the newest log is from that later start:
+  pick the right one by its date and time, and drag it into the issue. It's in:
   - Windows: `user\logs` next to `red_two.exe` (an older install without a `user` folder:
     `%APPDATA%\Red Two\logs`)
   - Steam Deck / Linux: `~/.local/share/Red Two/logs`

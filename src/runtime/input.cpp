@@ -478,21 +478,129 @@ void bumperTest(const PADStatus& p1) {  // JoystickAccess held
     SDL_SetJoystickVirtualAxis(joy, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, Sint16(std::lround(-32768.0 + s.rt * 65535.0)));
 }
 
-void shapeStickS8(s8& x, s8& y, bool mainStick) {
-    float fx = float(x) / 127.f, fy = float(y) / 127.f;
-    shapeStick(fx, fy, mainStick);
-    x = s8(std::lround(fx * 127.f));
-    y = s8(std::lround(fy * 127.f));
+// R2_STICK_TEST=<seconds> (automated runs, with R2_BG_PADS=1; R2_GYRO_LOG=1 logs the craft's
+// turn rate meanwhile): a virtual gamepad takes port 1 and holds its left stick right at several
+// deflections, 3 s each; what port 1 got and the turn rate expected are logged for each.
+void stickTest(const PADStatus& p1) {  // JoystickAccess held
+    static const double start = getenv("R2_STICK_TEST") ? atof(getenv("R2_STICK_TEST")) : -1.0;
+    if (start < 0) return;
+    static const auto t0 = std::chrono::steady_clock::now();
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() - start;
+    static SDL_Joystick* joy = nullptr;
+    static int step = -1;
+    static const float kDefl[] = {0.f, 0.2f, 0.35f, 0.5f, 0.65f, 0.8f, 0.9f, 1.f, 0.f};
+    constexpr int kN = int(std::size(kDefl));
+    if (step >= kN) return;
+    if (!joy) {
+        SDL_VirtualJoystickDesc desc;
+        SDL_INIT_INTERFACE(&desc);
+        desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+        desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
+        desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+        desc.name = "Red Two stick test pad";
+        const SDL_JoystickID id = SDL_AttachVirtualJoystick(&desc);
+        joy = id ? SDL_OpenJoystick(id) : nullptr;
+        logf("input", "stick test: virtual gamepad %s", joy ? "attached" : SDL_GetError());
+        if (!joy) step = 99;
+        return;
+    }
+    if (t < 0) return;
+    const int now = int(t / 3.0);
+    if (now <= step) return;
+    if (step >= 0) {
+        s8 rx = 0, ry = 0;
+        float rate = 0.f;
+        mainStickToGame(kDefl[step], 0.f, rx, ry, &rate);
+        logf("input", "stick test (%s): stick %3.0f%% -> port 1 x %d, turn rate expected %3.0f%%",
+             settings::stickCurveName(settings::get().stickCurve), kDefl[step] * 100.f, p1.stickX, rate * 100.f);
+    }
+    step = now;
+    if (step < kN) SDL_SetJoystickVirtualAxis(joy, SDL_GAMEPAD_AXIS_LEFTX, Sint16(std::lround(kDefl[step] * 32767.f)));
 }
+
 }  // namespace
+
+// --- the control stick as the game takes it (issues #9, #20: "small movements barely do anything,
+// then a sudden jump") ---
+// The game's PADClamp (the SDK's, ClampRegion r13-0x51C0) takes 15 units off each axis and limits
+// the stick to an octagon of 72 (40 each on the diagonal), and in flight the craft turns and
+// pitches at half the stick's fraction up to 80% of it, then three times as steep to its maximum
+// (measured for gyro.cpp: X-wing, Death Star Attack, both axes). Aurora reports a controller's
+// travel as -127..127: on top of the settings' deadzone the clamp's 15 left the first quarter of
+// the travel dead, 87 was full at 73% of it, and the game's steep last fifth - 40% to 100% of the
+// turn rate - was a tenth of the stick's travel. Now the travel past the deadzone is the game's
+// range (15 put back in front, full at full), and the rate follows the stick by settings
+// stick_curve: Smooth (deflection^1.5), Linear, or the game's own curve (GameCube).
+constexpr int kStickDead = 15, kStickMax = 72, kStickXY = 40;
+constexpr int kSubMax = 59, kSubXY = 31;  // the C-stick's (the SDK's ClampRegion, read from the game's copy)
+float gameStickResponse(float g) {  // the craft's rate (fraction of its maximum) for a stick fraction
+    const float a = std::min(std::fabs(g), 1.f);
+    return std::copysign(a <= 0.8f ? a * 0.5f : 0.4f + (a - 0.8f) * 3.f, g);
+}
+float gameStickInverse(float r) {
+    const float a = std::min(std::fabs(r), 1.f);
+    return std::copysign(a <= 0.4f ? a * 2.f : 0.8f + (a - 0.4f) / 3.f, r);
+}
+void gameStickClamp(int& x, int& y, int max = kStickMax, int xy = kStickXY) {  // the SDK's ClampStick
+    const int sx = x < 0 ? -1 : 1, sy = y < 0 ? -1 : 1;
+    x = std::abs(x) <= kStickDead ? 0 : std::abs(x) - kStickDead;
+    y = std::abs(y) <= kStickDead ? 0 : std::abs(y) - kStickDead;
+    if (x == 0 && y == 0) return;
+    const int d = y <= x ? xy * x + (max - xy) * y : xy * y + (max - xy) * x;
+    if (xy * max < d) {
+        x = xy * max * x / d;
+        y = xy * max * y / d;
+    }
+    x *= sx;
+    y *= sy;
+}
+
+// a fraction of a stick's range (-1..1) as a raw value: the clamp's 15 in front, full at full
+s8 stickRaw(float v, int max) {
+    const int u = int(std::lround(std::fabs(v) * float(max)));
+    return u ? s8(v < 0 ? -(kStickDead + u) : kStickDead + u) : 0;
+}
+
+void cStickToGame(float x, float y, s8& rawX, s8& rawY, float* gameX, float* gameY) {
+    shapeStick(x, y, false);  // its deadzone and sensitivity
+    rawX = stickRaw(x, kSubMax);
+    rawY = stickRaw(y, kSubMax);
+    if (gameX || gameY) {
+        int cx = rawX, cy = rawY;
+        gameStickClamp(cx, cy, kSubMax, kSubXY);
+        if (gameX) *gameX = float(cx) / float(kSubMax);
+        if (gameY) *gameY = float(cy) / float(kSubMax);
+    }
+}
+
+void mainStickToGame(float x, float y, s8& rawX, s8& rawY, float* rateX, float* rateY) {
+    shapeStick(x, y, true);  // deadzone and sensitivity
+    const float m = std::min(1.f, std::sqrt(x * x + y * y));
+    float g[2] = {0.f, 0.f};
+    if (m > 0.f) {
+        const auto curve = settings::get().stickCurve;
+        const float target = curve == settings::StickCurve::Smooth ? std::pow(m, 1.5f) : m;
+        const float n = std::sqrt(x * x + y * y);
+        const float t[2] = {x / n * target, y / n * target};
+        for (int i = 0; i < 2; i++) g[i] = curve == settings::StickCurve::GameCube ? t[i] : gameStickInverse(t[i]);
+    }
+    rawX = stickRaw(g[0], kStickMax);
+    rawY = stickRaw(g[1], kStickMax);
+    if (rateX || rateY) {
+        int cx = rawX, cy = rawY;
+        gameStickClamp(cx, cy);
+        if (rateX) *rateX = gameStickResponse(float(cx) / float(kStickMax));
+        if (rateY) *rateY = gameStickResponse(float(cy) / float(kStickMax));
+    }
+}
 
 // A round deadzone (settings stick_deadzone) the output rescales from, so it starts at 0 at the
 // deadzone's edge and keeps its direction, then the control stick's sensitivity; x, y in -1..1
 // (a keyboard's diagonal reaches past 1: it stays full on both axes).
 void shapeStick(float& x, float& y, bool mainStick) {
     const auto& s = settings::get();
-    const float dz = float(std::clamp(s.stickDeadzone, 0, 50)) / 100.f;
-    const float sens = mainStick ? float(std::clamp(s.stickSensitivity, 25, 200)) / 100.f : 1.f;
+    const float dz = float(std::clamp(mainStick ? s.stickDeadzone : s.cStickDeadzone, 0, 50)) / 100.f;
+    const float sens = float(std::clamp(mainStick ? s.stickSensitivity : s.cStickSensitivity, 25, 200)) / 100.f;
     const float m = std::sqrt(x * x + y * y);
     if (m <= dz || m <= 0.f) {
         x = y = 0.f;
@@ -595,8 +703,8 @@ void poll() {
     auto shape = [&st] {
         for (int i = 0; i < PAD_CHANMAX; i++)
             if (auto& e = st[i]; e.err == PAD_ERR_NONE) {
-                shapeStickS8(e.stickX, e.stickY, true);
-                shapeStickS8(e.substickX, e.substickY, false);
+                mainStickToGame(float(e.stickX) / 127.f, float(e.stickY) / 127.f, e.stickX, e.stickY);
+                cStickToGame(float(e.substickX) / 127.f, float(e.substickY) / 127.f, e.substickX, e.substickY);
                 curvePort(e, i);
             }
         s_port1Game = st[0];
@@ -620,6 +728,7 @@ void poll() {
         applyRumble();
         shape();
         bumperTest(st[0]);
+        stickTest(st[0]);
         gyro::apply(st[0], true);
     } else {
         memcpy(st, s_lastPads, sizeof st);

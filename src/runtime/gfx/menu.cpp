@@ -692,33 +692,60 @@ bool fpsRow(const char* text, int& fps, const char* help) {
 // 0..100: a bar the mouse drags, left/right step 5
 // The Controls page's stick meter: port 1's control stick as it is (dot), the deadzone (shaded)
 // and what the game gets after the deadzone and sensitivity (gold), to tune both by eye.
-void stickMeter() {
-    static float rx = 0.f, ry = 0.f;
-    static bool pad = false;
+const char* stickCurveLabel(settings::StickCurve c) {
+    switch (c) {
+    case settings::StickCurve::Linear: return "Linear";
+    case settings::StickCurve::GameCube: return "GameCube";
+    default: return "Smooth";
+    }
+}
+
+// port 1's control stick (the controller's left stick) or C-stick (its right one): where it is, the
+// deadzone, and what the game gets - the turn / pitch rate in flight for the control stick, the
+// fraction of its range for the C-stick
+void stickMeter(bool mainStick) {
+    static float sx[2] = {}, sy[2] = {};
+    static bool pads[2] = {};
+    const int k = mainStick ? 0 : 1;
+    float& rx = sx[k];
+    float& ry = sy[k];
+    bool& pad = pads[k];
     if (input::JoystickAccess joy; joy) {  // (else the last reading: the input thread is scanning)
         const auto src = aurora::pad::port_controller(0);
         SDL_Gamepad* g = src ? SDL_GetGamepadFromID(aurora::input::gamepad_for_source(src)) : nullptr;
         pad = g != nullptr;
         if (g) {
-            rx = float(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX)) / 32767.f;
-            ry = float(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY)) / 32767.f;
+            rx = float(SDL_GetGamepadAxis(g, mainStick ? SDL_GAMEPAD_AXIS_LEFTX : SDL_GAMEPAD_AXIS_RIGHTX)) / 32767.f;
+            ry = float(SDL_GetGamepadAxis(g, mainStick ? SDL_GAMEPAD_AXIS_LEFTY : SDL_GAMEPAD_AXIS_RIGHTY)) / 32767.f;
         }
     }
-    if (static const char* test = getenv("R2_STICK_METER_TEST"); test && !pad)  // "x,y" (screenshots)
-        pad = sscanf(test, "%f,%f", &rx, &ry) == 2;
+    if (static const char* test = getenv("R2_STICK_METER_TEST"); test) {  // "x,y[,cx,cy]" (screenshots)
+        float v[4] = {};
+        const int n = sscanf(test, "%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3]);
+        if (n >= 2 * (k + 1)) {
+            pad = true;
+            rx = v[2 * k];
+            ry = v[2 * k + 1];
+        }
+    }
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const float r = 54.f * s_ui, size = 2.f * r + 16.f * s_ui;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 c(p.x + s_valueX + r + 8.f * s_ui, p.y + size * 0.5f);
     if (!pad) {
-        dl->AddText(ImVec2(p.x + 18.f * s_ui, p.y), kDim, "Connect a controller to see its control stick here.");
+        dl->AddText(ImVec2(p.x + 18.f * s_ui, p.y), kDim,
+                    mainStick ? "Connect a controller to see its control stick here." : "Connect a controller to see its C-stick here.");
         ImGui::Dummy(ImVec2(0.f, ImGui::GetFrameHeight()));
         return;
     }
     const auto& st = settings::get();
-    const float dz = float(st.stickDeadzone) / 100.f;
-    float ox = rx, oy = ry;
-    input::shapeStick(ox, oy, true);
+    const float dz = float(mainStick ? st.stickDeadzone : st.cStickDeadzone) / 100.f;
+    // the dot: the turn / pitch rate the stick gives the craft in flight (0..1 of its maximum), or
+    // the C-stick's fraction of its range
+    float ox = 0.f, oy = 0.f;
+    s8 gx = 0, gy = 0;
+    if (mainStick) input::mainStickToGame(rx, ry, gx, gy, &ox, &oy);
+    else input::cStickToGame(rx, ry, gx, gy, &ox, &oy);
     auto at = [&](float x, float y) {
         const float m = std::sqrt(x * x + y * y), k = m > 1.05f ? 1.05f / m : 1.f;  // (a keyboard's diagonal)
         return ImVec2(c.x + x * k * r, c.y + y * k * r);
@@ -735,8 +762,12 @@ void stickMeter() {
     dl->AddCircleFilled(at(rx, ry), 4.f * s_ui, kText, 16);
     dl->AddCircleFilled(at(ox, oy), 6.f * s_ui, kGold, 16);
     char buf[96];
-    snprintf(buf, sizeof buf, "STICK %3.0f%%   TO THE GAME %3.0f%%", std::min(1.f, std::sqrt(rx * rx + ry * ry)) * 100.f,
-             std::min(1.f, std::sqrt(ox * ox + oy * oy)) * 100.f);
+    if (mainStick)
+        snprintf(buf, sizeof buf, "STICK %3.0f%%   TURN %3.0f%%   PITCH %3.0f%%", std::min(1.f, std::sqrt(rx * rx + ry * ry)) * 100.f,
+                 std::fabs(ox) * 100.f, std::fabs(oy) * 100.f);
+    else
+        snprintf(buf, sizeof buf, "STICK %3.0f%%   TO THE GAME %3.0f%%", std::min(1.f, std::sqrt(rx * rx + ry * ry)) * 100.f,
+                 std::min(1.f, std::sqrt(ox * ox + oy * oy)) * 100.f);
     dl->AddText(ImVec2(c.x + r + 24.f * s_ui, c.y - ImGui::GetFontSize() * 0.5f), kDim, buf);
     ImGui::Dummy(ImVec2(0.f, size));
 }
@@ -2137,17 +2168,38 @@ void pageControls() {
     heading("CONTROL STICK");
     {
         settings::Settings& st = settings::get();
-        if (percentRow("Stick sensitivity", st.stickSensitivity,
-                       "How much the control stick steers: below 100% finer aiming (full deflection is never "
-                       "reached), above it full deflection comes sooner. The meter below shows the result.",
+        if (percentRow("Sensitivity", st.stickSensitivity,
+                       "How much the control stick (your left stick) steers: below 100% finer aiming (full "
+                       "deflection is never reached), above it full deflection comes sooner. The meter below "
+                       "shows the result.",
                        25, 200, 5))
             s_changed = true;
-        if (percentRow("Stick deadzone", st.stickDeadzone,
-                       "How far a stick moves before anything happens (both sticks; round, and the output grows from "
+        if (enumRow("Response", st.stickCurve, stickCurveLabel,
+                    "How fast the craft turns for how far the stick goes. Smooth: gentle near the center, building "
+                    "up evenly to full speed. Linear: in proportion to the stick. GameCube: the game's own curve, "
+                    "half speed up to 80% of the stick, then a jump to full."))
+            s_changed = true;
+        if (percentRow("Deadzone", st.stickDeadzone,
+                       "How far the control stick moves before anything happens (round, and the output grows from "
                        "zero at its edge). Raise it if the craft drifts with the stick let go.",
                        0, 50, 1))
             s_changed = true;
-        stickMeter();
+        stickMeter(true);
+    }
+    heading("C-STICK");
+    {
+        settings::Settings& st = settings::get();
+        if (percentRow("C-stick sensitivity", st.cStickSensitivity,
+                       "How much the C-stick (your right stick) moves: below 100% it never reaches the edge, above "
+                       "it the edge comes sooner. The meter below shows the result.",
+                       25, 200, 5))
+            s_changed = true;
+        if (percentRow("C-stick deadzone", st.cStickDeadzone,
+                       "How far the C-stick moves before anything happens (round, and the output grows from zero at "
+                       "its edge).",
+                       0, 50, 1))
+            s_changed = true;
+        stickMeter(false);
     }
     heading("TRIGGERS");
     if (toggleRow("Trigger clicks on LB / RB", settings::get().bumperClicks,

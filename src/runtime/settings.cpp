@@ -98,6 +98,12 @@ void set(const std::string& key, const std::string& value) {
             if (value == buttonPromptsName(ButtonPrompts(i))) s.buttonPrompts = ButtonPrompts(i);
     } else if (key == "stick_deadzone") s.stickDeadzone = std::clamp(n, 0, 50);
     else if (key == "stick_sensitivity") s.stickSensitivity = std::clamp(n, 25, 200);
+    else if (key == "cstick_deadzone") s.cStickDeadzone = std::clamp(n, 0, 50);
+    else if (key == "cstick_sensitivity") s.cStickSensitivity = std::clamp(n, 25, 200);
+    else if (key == "stick_curve") {
+        for (int i = 0; i < int(StickCurve::Count); i++)
+            if (value == stickCurveName(StickCurve(i))) s.stickCurve = StickCurve(i);
+    }
     else if (key == "xbox_buttons")  // (before button_prompts: on = Xbox or, now, PlayStation)
         s.buttonPrompts = parseBool(value) ? ButtonPrompts::Auto : ButtonPrompts::GameCube;
     else if (key == "gyro") { if (n >= 0 && n < int(GyroMode::Count)) s.gyroMode = GyroMode(n); }
@@ -198,11 +204,11 @@ std::string summary() {
              "disc_path=%s launcher=%d check_updates=%d fullscreen=%d resolution=%s msaa=%d anisotropy=%d aspect=%s fps=%d ubershaders=%d precompile_shaders=%d hud_edges=%d tile_menus=%d game_dither=%d "
              "show_fps=%d volume=%d background_audio=%d speakers=%s skip_logos=%d skip_cutscenes=%d fast_disc=%d invincible=%d "
              "infinite_lives=%d infinite_ammo=%d perfect_stats=%d all_craft=%d custom_textures=%d prefetch_textures=%d "
-             "textures_folder=%s button_prompts=%s stick_deadzone=%d stick_sensitivity=%d bumper_clicks=%d gyro=%s gyro_button=%s gyro_speed=%d/%d gyro_invert_y=%d state_slot=%d achievements=%d ra_user=%s ra_notifications=%d ra_encore=%d",
+             "textures_folder=%s button_prompts=%s stick_deadzone=%d stick_sensitivity=%d stick_curve=%s cstick_deadzone=%d cstick_sensitivity=%d bumper_clicks=%d gyro=%s gyro_button=%s gyro_speed=%d/%d gyro_invert_y=%d state_slot=%d achievements=%d ra_user=%s ra_notifications=%d ra_encore=%d",
              s.discPath.empty() ? "-" : s.discPath.c_str(), s.launcher, s.checkUpdates, s.fullscreen, resolutionName(s.resolution), s.msaa, s.anisotropy, aspectName(s.aspect), s.fps, s.ubershaders, s.precompileShaders, s.hudEdges,
              s.tileMenus, s.gameDither, s.showFps, s.volume, s.backgroundAudio, speakersName(s.speakers), s.skipLogos, s.skipCutscenes,
              s.fastDisc, s.invincible, s.infiniteLives, s.infiniteAmmo, s.perfectStats, s.allCraft, s.customTextures,
-             s.prefetchTextures, s.texturesFolder.empty() ? "-" : s.texturesFolder.c_str(), buttonPromptsName(s.buttonPrompts), s.stickDeadzone, s.stickSensitivity, s.bumperClicks, gyroModeName(s.gyroMode),
+             s.prefetchTextures, s.texturesFolder.empty() ? "-" : s.texturesFolder.c_str(), buttonPromptsName(s.buttonPrompts), s.stickDeadzone, s.stickSensitivity, stickCurveName(s.stickCurve), s.cStickDeadzone, s.cStickSensitivity, s.bumperClicks, gyroModeName(s.gyroMode),
              s.gyroButton.c_str(), s.gyroSpeedX, s.gyroSpeedY, s.gyroInvertY, s.stateSlot, s.achievements, s.raUser.empty() ? "-" : s.raUser.c_str(),
              s.raNotifications, s.raEncore);
     return b;
@@ -269,6 +275,11 @@ void save() {
     fprintf(f, "# controller sticks: a round deadzone in %% of the travel (0-50, both sticks), the control stick's sensitivity in %% (25-200)\n");
     fprintf(f, "stick_deadzone=%d\n", s.stickDeadzone);
     fprintf(f, "stick_sensitivity=%d\n", s.stickSensitivity);
+    fprintf(f, "# the C-stick (the controller's right stick): deadzone 0..50, sensitivity 25..200\n");
+    fprintf(f, "cstick_deadzone=%d\n", s.cStickDeadzone);
+    fprintf(f, "cstick_sensitivity=%d\n", s.cStickSensitivity);
+    fprintf(f, "# how turning follows the control stick: smooth, linear or gamecube (the game's own curve)\n");
+    fprintf(f, "stick_curve=%s\n", stickCurveName(s.stickCurve));
     fprintf(f, "# gyro aiming in flight: 0 off, 1 always, 2 while the button is held, 3 the button toggles it, 4 off while held\n");
     fprintf(f, "gyro=%d\n", int(s.gyroMode));
     fprintf(f, "# the triggers' clicks (full boost / brake) on LB / RB, the triggers analog only, Z on the right stick click\n");
@@ -328,6 +339,14 @@ const char* buttonPromptsName(ButtonPrompts p) {
     case ButtonPrompts::PlayStation: return "playstation";
     case ButtonPrompts::GameCube: return "gamecube";
     default: return "auto";
+    }
+}
+
+const char* stickCurveName(StickCurve c) {
+    switch (c) {
+    case StickCurve::Linear: return "linear";
+    case StickCurve::GameCube: return "gamecube";
+    default: return "smooth";
     }
 }
 
