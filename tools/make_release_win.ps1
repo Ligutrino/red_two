@@ -10,6 +10,12 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $BuildDir) { $BuildDir = Join-Path $root "build\windows" }
 if (-not $Out) { $Out = Join-Path $root "build\RedTwo-windows-x64.zip" }
+# Downloads install newer releases themselves (update.cpp) only when built with -DR2_RELEASE=ON
+# (powershell -File tools\build.ps1 -BuildDir build\release-win -Configure -CMakeArgs -DR2_RELEASE=ON).
+$cache = Join-Path $BuildDir "CMakeCache.txt"
+if (-not (Select-String -Path $cache -Pattern '^R2_RELEASE:BOOL=ON' -Quiet)) {
+    throw "$BuildDir is not a release build (-DR2_RELEASE=ON): its downloads could not update themselves"
+}
 $stage = Join-Path $root "build\release-windows\Red Two"
 if (Test-Path (Split-Path $stage)) { Remove-Item -Recurse -Force (Split-Path $stage) }
 New-Item -ItemType Directory -Force $stage | Out-Null

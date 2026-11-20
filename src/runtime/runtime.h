@@ -146,7 +146,8 @@ void cardFlushNow();        // card writes not yet in the image file go there no
 // main.cpp: start a new instance with the same arguments, then quit. The new instance goes
 // straight into the game, or to the launcher with toLauncher (R2_LAUNCHER=1/0 in its environment).
 void restartGame(bool toLauncher = false);
-void resetGame(bool toLauncher = false);  // main.cpp: the menu's reset (card writes flushed, then restartGame)
+void resetGame(bool toLauncher = false);
+void setRestartProgram(const std::string& path);  // main.cpp: restarts start this program instead (an update)  // main.cpp: the menu's reset (card writes flushed, then restartGame)
 // main.cpp: the window was closed or the menu's quit chosen: a save state being written and the
 // memory card's last writes reach their files, then the process ends
 [[noreturn]] void quitToDesktop();

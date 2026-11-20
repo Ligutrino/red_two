@@ -47,6 +47,7 @@
 #include "../hw/musyx_dsp.h"
 #include "../mods.h"
 #include "../achievements.h"
+#include "../update.h"
 #include "../gyro.h"
 #include "../runtime.h"
 #include "../savestate.h"
@@ -923,6 +924,112 @@ bool discBrowserShown();
 std::string discRowText();
 void pageBrowse(settings::Settings& s);
 
+// --- updates (update.cpp): a newer release, its download and install, the restart into it ---
+void infoRow(const char* text, const std::string& value, const char* help, ImU32 col);  // (below)
+void openUrl(const std::string& url) {
+    if (!SDL_OpenURL(url.c_str())) logf("menu", "cannot open %s: %s", url.c_str(), SDL_GetError());
+    else logf("menu", "opened %s", url.c_str());
+}
+
+bool s_confirmUpdateRestart = false;
+
+void restartIntoUpdate() {
+    logf("menu", "restarting into Red Two %s", update::status().latest.c_str());
+    setRestartProgram(update::restartProgram());
+    if (s_launcher) restartGame(true);  // (returns only if it could not start the new version)
+    else resetGame(true);
+}
+
+// a bar that only shows progress (not a value to change)
+void progressRow(const char* text, float fraction, const std::string& caption, const char* help) {
+    rowBegin(text, help);
+    const float w = 380.f * s_ui, h = ImGui::GetFrameHeight();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(w, h));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float x0 = p.x + 14.f * s_ui, x1 = p.x + w - 14.f * s_ui, cy = p.y + h * 0.5f, th = 10.f * s_ui;
+    dl->AddRectFilled(ImVec2(x0, cy - th * 0.5f), ImVec2(x1, cy + th * 0.5f), IM_COL32(30, 52, 86, 255), th * 0.3f);
+    const float fx = x0 + (x1 - x0) * std::clamp(fraction, 0.f, 1.f);
+    if (fx > x0) dl->AddRectFilledMultiColor(ImVec2(x0, cy - th * 0.5f), ImVec2(fx, cy + th * 0.5f), alpha(kAmber, 200), kGold, kGold, alpha(kAmber, 200));
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(caption.c_str());
+}
+
+void updateSection() {
+    using P = update::Phase;
+    const update::Status u = update::status();
+    if (u.phase != P::Available && u.phase != P::Downloading && u.phase != P::Installing && u.phase != P::Ready &&
+        u.phase != P::Failed && u.phase != P::Updated)
+        return;
+    heading("UPDATE");
+    char buf[192];
+    switch (u.phase) {
+    case P::Available:
+        snprintf(buf, sizeof buf, "Red Two %s is out (you have %s)", u.latest.c_str(), update::version());
+        infoRow("New version", buf, "A newer Red Two is on GitHub. Its release notes say what changed.", kAmber);
+        if (u.canInstall) {
+            if (buttonRow("Update", "DOWNLOAD AND INSTALL",
+                          "Downloads the new version, checks it and puts it in place of this one; then Red Two restarts "
+                          "into it. Your settings, controls, memory card, save states and texture packs stay as they are "
+                          "(save states only load into the version that made them).",
+                          kAmber))
+                update::install();
+        } else if (buttonRow("Update", "OPEN THE DOWNLOAD PAGE",
+                             "This copy of Red Two cannot replace itself (built from source, or not the release download): "
+                             "get the new version from its release page.",
+                             kAmber)) {
+            openUrl(u.pageUrl);
+        }
+        break;
+    case P::Downloading: {
+        const float frac = u.total ? float(double(u.got) / double(u.total)) : 0.f;
+        snprintf(buf, sizeof buf, "%.0f / %.0f MB", double(u.got) / 1e6, double(u.total) / 1e6);
+        progressRow("Downloading", frac, buf, "The new version is downloading. You can keep playing meanwhile.");
+        break;
+    }
+    case P::Installing:
+        infoRow("Installing", "Checking the download and putting it in place...", "Almost done.", kText);
+        break;
+    case P::Ready:
+        snprintf(buf, sizeof buf, "RESTART INTO %s", u.latest.c_str());
+        if (s_launcher ? buttonRow("Update installed", buf, "Red Two restarts into the new version.", kAmber)
+                       : confirmRow("Update installed", buf, "PRESS AGAIN: RESTART", s_confirmUpdateRestart,
+                                    "Red Two restarts into the new version, in the launcher. What the game saved to its "
+                                    "memory card and your save states are kept; a mission in progress is not. Or keep "
+                                    "playing: the next start is the new version."))
+            restartIntoUpdate();
+        break;
+    case P::Failed: {
+        ImGui::PushStyleColor(ImGuiCol_Text, vec(kAmber));
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
+        ImGui::TextUnformatted(("The update did not work. " + u.error).c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::PopStyleColor();
+        if (buttonRow("Update", "TRY AGAIN", "Download and install the new version again.", kAmber)) update::install();
+        break;
+    }
+    case P::Updated:
+        snprintf(buf, sizeof buf, "Red Two %s (updated from %s)", u.latest.c_str(), u.from.c_str());
+        infoRow("Updated", buf, "This is the new version. Its release notes say what changed.", kGold);
+        break;
+    default:
+        break;
+    }
+    if (!u.pageUrl.empty() && buttonRow("What's new", "RELEASE NOTES", "Opens the release's page on GitHub in your browser."))
+        openUrl(u.pageUrl);
+}
+
+// R2_UPDATE_TEST=install (tests): restart into the update as soon as it is in place
+void updatePoll() {
+    static const bool autoRestart = getenv("R2_UPDATE_TEST") && !strcmp(getenv("R2_UPDATE_TEST"), "install");
+    static bool done = false;
+    if (autoRestart && !done && update::status().phase == update::Phase::Ready) {
+        done = true;
+        restartIntoUpdate();
+    }
+}
+
 void pageDisplay(settings::Settings& s) {
     if (discBrowserShown()) {
         pageBrowse(s);
@@ -932,6 +1039,7 @@ void pageDisplay(settings::Settings& s) {
         pageDisc();
         return;
     }
+    updateSection();
     heading("GAME");
     if (s_launcher) {
         if (buttonRow("Start game", discReady() ? "LAUNCH" : "CHOOSE THE DISC FIRST",
@@ -968,6 +1076,15 @@ void pageDisplay(settings::Settings& s) {
                                "with this switch in the in-game menu (F1 or the controller's Back)."
                              : "On: Red Two opens the launcher before the game starts. Off: straight into the game."))
         s_changed = true;
+    {
+        std::string help = std::string("At start, Red Two asks GitHub whether a newer version is out, and offers it at the top "
+                                       "of this page. Off: it never asks. This is Red Two ") +
+                           update::version() + ".";
+        if (toggleRow("Check for updates", s.checkUpdates, help.c_str())) {
+            s_changed = true;
+            if (s.checkUpdates) update::check();
+        }
+    }
     if (confirmRow("Quit to desktop", "QUIT", "PRESS AGAIN: QUIT", s_confirmQuit,
                    "Close Red Two. What the game saved to its memory card and your save states are kept; a mission in "
                    "progress is not.")) {
@@ -2334,6 +2451,14 @@ bool drawMenu(settings::Settings& s, float t) {
     const float statusPx = 17.f * s_ui;
     drawText(bg, s_font, statusPx, ImVec2(lamp.x - 22.f * s_ui - textWidth(s_font, statusPx, status, 2.f * s_ui), lamp.y - 9.f * s_ui),
              kDim, status, 2.f * s_ui);
+    {
+        const update::Status us = update::status();
+        const bool news = us.phase == update::Phase::Available || us.phase == update::Phase::Ready;
+        const std::string ver = news ? "UPDATE " + us.latest + " AVAILABLE" : std::string("VERSION ") + update::version();
+        const float vpx = 14.f * s_ui;
+        drawText(bg, s_font, vpx, ImVec2(lamp.x - 22.f * s_ui - textWidth(s_font, vpx, ver.c_str(), 2.f * s_ui), lamp.y + 12.f * s_ui),
+                 news ? kAmber : alpha(kDim, 150), ver.c_str(), 2.f * s_ui);
+    }
     const float headerBottom = titleY + titlePx * 1.02f + 30.f * s_ui;
 
     // footer: the selected row's description, then the buttons
@@ -2605,6 +2730,7 @@ bool launcherFrame() {
     ImGuiContext* ctx = ImGui::GetCurrentContext();
     if (!ctx || !ctx->WithinFrameScope) return false;
     modsPoll();
+    updatePoll();
     const float t = float(double(SDL_GetTicks()) / 1000.0);
     drawMenu(settings::get(), t);
     if (s_open) bindSelfTest();
@@ -2840,6 +2966,7 @@ void menuDraw() {
     }
     settings::Settings& s = settings::get();
     modsPoll();
+    updatePoll();
     // button prompts follow the bindings (a controller connected, a rebind): checked twice a second
     {
         static u64 lastIconsTb = 0;
