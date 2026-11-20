@@ -137,7 +137,10 @@ Settings& get() { return s_settings; }
 
 void load() {
     const bool automated = envFlag("R2_BACKGROUND") || envFlag("R2_HEADLESS") || getenv("R2_INPUT");
-    if (automated) s_settings.fastDisc = false;  // input scripts are timed for the drive's speed
+    if (automated) {
+        s_settings.fastDisc = false;     // input scripts are timed for the drive's speed
+        s_settings.ubershaders = false;  // (their tests and shader cache were made without)
+    }
     if (const std::string note = mods::userDirNote(); !note.empty()) logf("config", "%s", note.c_str());
     if (!automated) {
         if (const std::string dir = mods::userDir(); !dir.empty()) s_path = dir + "settings.ini";
@@ -158,7 +161,8 @@ void load() {
             s_settings.fullscreen = true;
             s_settings.aspect = Aspect::Window;
             s_settings.prefetchTextures = false;
-            logf("config", "first start on a Steam Deck: fullscreen, aspect of the screen, no texture prefetch");
+            s_settings.ubershaders = false;  // (a faster start: they take long to compile there)
+            logf("config", "first start on a Steam Deck: fullscreen, aspect of the screen, no texture prefetch, no ubershaders");
         } else {
 #ifdef __ANDROID__
             // the first start on Android: the picture as wide as the screen (wider phones get
@@ -166,6 +170,7 @@ void load() {
             s_settings.fullscreen = true;
             s_settings.aspect = Aspect::Window;
             s_settings.resolution = Resolution::X2;
+            s_settings.ubershaders = false;
             logf("config", "first start on Android: aspect of the screen, 960p");
 #endif
         }

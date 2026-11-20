@@ -57,10 +57,12 @@ struct Settings {
     // 8 or 16 (Aurora patch 0030; applies at once)
     int anisotropy = 1;
     // While a shader compiles, a generic one (Aurora's ubershader) draws the object instead of it
-    // being skipped (Dolphin's hybrid ubershaders). Off by default (the user's call): it is the
-    // shader that crashed the Steam Deck's driver before patch 0027, and with shaders compiled
-    // before the game starts only shaders never seen before pop in.
-    bool ubershaders = false;
+    // being skipped (Dolphin's hybrid ubershaders). Without it a shader never seen before on this
+    // PC skips its objects for a few frames: flicker all through a first playthrough (issue #7).
+    // On by default (since 1.2): its pipelines take ~20 s to compile once (8 workers here), then
+    // load from the cache in under a second. Off on a Steam Deck's first start (slower to compile
+    // there) and in automated runs (their shader cache stays as it was).
+    bool ubershaders = true;
     // Every shader in the cache compiled before the game starts ("PREPARING SHADERS",
     // gx_bridge.cpp precompileShaders). Off: the game starts at once and they compile while it
     // runs (objects whose shader is not ready yet are skipped for a few frames: pop-in).
