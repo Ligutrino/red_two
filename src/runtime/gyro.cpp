@@ -2,8 +2,9 @@
 //
 // Sensors: the Steam Deck's built-in controller through SDL's HIDAPI driver (gyro and
 // accelerometer at 250 Hz; the Deck's firmware already reads 0 at rest), or any controller SDL
-// reads a gyro from (DualSense, Switch Pro, ...). With Steam Input on, Steam hides the Deck's
-// controller behind a virtual pad without sensors: Red Two's shortcut needs it off. The samples
+// reads a gyro from (DualSense, DualShock 4, Switch Pro Controller, Joy-Cons, ...; Xbox
+// controllers have none). With Steam Input on, Steam hides the controller behind a virtual pad
+// without sensors: Red Two needs it off. The gyro button is one the controller has (updateButton). The samples
 // arrive as Aurora input events (a passive layer: SensorChanged with the sensor's timestamps)
 // from the game thread's event pump; input::poll asks for the mean rate of the last 16 ms once
 // per retrace, so neither the pump's nor the game's timing shows.
@@ -70,6 +71,9 @@ int s_count = 0, s_head = 0;  // s_head: the next one written
 
 SourceId s_source = 0;  // the controller whose sensors are read
 std::string s_name;
+u32 s_available = ~0u;        // kButtons that controller has (bit i)
+int s_effective = -1;         // the gyro button used (index into kButtons; -1: the setting's own name)
+std::string s_buttonSetting;  // the setting s_effective was worked out for (empty: again)
 bool s_sensorsOn = false;
 u64 s_lastArrivalNs = 0, s_lastSensorNs = 0;
 float s_accel[3] = {};  // m/s^2, the newest sample
@@ -244,7 +248,7 @@ void selectSource(bool want) {  // JoystickAccess held
     static bool s_missingLogged = false;
     if (want && !src && !s_source && !s_missingLogged) {
         s_missingLogged = true;
-        logf("gyro", "no controller with a gyro (Steam Input hides the Steam Deck's: turn it off for Red Two)");
+        logf("gyro", "no controller with a gyro (Xbox controllers have none; Steam Input hides one: turn it off for Red Two)");
     }
     if (src != s_source) {
         if (s_source && s_sensorsOn) enableSensors(s_source, false);
@@ -255,6 +259,7 @@ void selectSource(bool want) {  // JoystickAccess held
         if (src) logf("gyro", "gyro of '%s'", s_name.c_str());
         else logf("gyro", "the controller with the gyro went away");
         s_missingLogged = src != 0;
+        s_buttonSetting.clear();  // its buttons: worked out again
     }
     if (s_source && want != s_sensorsOn) {
         enableSensors(s_source, want);
@@ -263,16 +268,144 @@ void selectSource(bool want) {  // JoystickAccess held
     }
 }
 
-bool buttonHeld(const std::string& name) {  // JoystickAccess held
-    static std::string s_cachedName;
-    static SDL_GamepadButton s_button = SDL_GAMEPAD_BUTTON_INVALID;
-    if (name != s_cachedName) {
-        s_cachedName = name;
-        s_button = SDL_GetGamepadButtonFromString(name.c_str());
+// --- the gyro button ----------------------------------------------------------------------------
+// The setting's button may not be on this controller: the default is the Steam Deck's left stick
+// touch, which a DualSense or a Switch Pro Controller lacks (While held never turned on, Off while
+// held never off). Then the first of these it has is used.
+constexpr const char* kFallbacks[] = {"misc3", "touch", "leftstick"};
+
+SDL_Gamepad* sourcePad() {  // JoystickAccess held
+    return s_source ? SDL_GetGamepadFromID(aurora::input::gamepad_for_source(s_source)) : nullptr;
+}
+
+bool padHas(SDL_Gamepad* g, const char* name) {
+    if (!std::strcmp(name, "touch")) return SDL_GetNumGamepadTouchpads(g) > 0;
+    const SDL_GamepadButton b = SDL_GetGamepadButtonFromString(name);
+    return b != SDL_GAMEPAD_BUTTON_INVALID && SDL_GamepadHasButton(g, b);
+}
+
+void updateButton(const std::string& setting, bool force) {  // JoystickAccess held
+    static u32 s_polls = 0;
+    if (!force && setting == s_buttonSetting && s_polls++ % 30 != 0) return;
+    SDL_Gamepad* g = sourcePad();
+    u32 avail = 0;
+    for (int i = 0; i < kButtonCount; i++)
+        if (!g || padHas(g, kButtons[i].sdlName)) avail |= 1u << i;
+    int want = -1;
+    for (int i = 0; i < kButtonCount; i++)
+        if (setting == kButtons[i].sdlName) want = i;
+    int eff = want;
+    const bool missing = g && (want >= 0 ? !(avail >> want & 1) : !padHas(g, setting.c_str()));
+    if (missing)
+        for (const char* f : kFallbacks) {
+            int i = 0;
+            while (i < kButtonCount && std::strcmp(kButtons[i].sdlName, f) != 0) i++;
+            if (i < kButtonCount && (avail >> i & 1)) {
+                eff = i;
+                break;
+            }
+        }
+    if (eff != s_effective && missing && eff >= 0)
+        logf("gyro", "'%s' has no %s: the gyro button is %s", s_name.c_str(), setting.c_str(), kButtons[eff].label);
+    s_available = avail;
+    s_effective = eff;
+    s_buttonSetting = setting;
+}
+
+bool buttonHeld() {  // JoystickAccess held
+    SDL_Gamepad* g = sourcePad();
+    if (!g) return false;
+    const char* name = s_effective >= 0 ? kButtons[s_effective].sdlName : s_buttonSetting.c_str();
+    if (!std::strcmp(name, "touch")) {  // any finger on any touchpad
+        for (int t = 0, nt = SDL_GetNumGamepadTouchpads(g); t < nt; t++)
+            for (int f = 0, nf = SDL_GetNumGamepadTouchpadFingers(g, t); f < nf; f++) {
+                bool down = false;
+                float x, y, p;
+                if (SDL_GetGamepadTouchpadFinger(g, t, f, &down, &x, &y, &p) && down) return true;
+            }
+        return false;
     }
-    if (!s_source || s_button == SDL_GAMEPAD_BUTTON_INVALID) return false;
-    SDL_Gamepad* g = SDL_GetGamepadFromID(aurora::input::gamepad_for_source(s_source));
-    return g && SDL_GetGamepadButton(g, s_button);
+    const SDL_GamepadButton b = SDL_GetGamepadButtonFromString(name);
+    return b != SDL_GAMEPAD_BUTTON_INVALID && SDL_GetGamepadButton(g, b);
+}
+
+// R2_GYRO_PAD_TEST=<seconds> (automated runs, with R2_BG_PADS=1 and gyro=2, While held): a virtual
+// controller like a DualSense - gyro and accelerometer at 250 Hz, a touchpad, no Steam Deck stick
+// touches - lies flat from the start; from <seconds> on it turns right at 40 deg/s for 2 s with no
+// finger on the touchpad, 2 s with one, then raises its far edge at 30 deg/s for 2 s with one, then
+// lies still: what port 1's main stick got is logged in each phase (the default button, left stick
+// touch, is not on it: the touchpad must take over).
+struct PadTest {
+    double start = -1.0;
+    SDL_Joystick* joy = nullptr;
+    int phase = -1;
+    int n = 0;
+    float sx = 0.f, sy = 0.f;
+} s_padTest;
+
+bool SDLCALL padTestSensors(void*, bool) { return true; }
+
+void padTestUpdate() {  // JoystickAccess held; before the gyro is applied
+    PadTest& t = s_padTest;
+    static bool once = false;
+    if (!once) {
+        once = true;
+        const char* e = getenv("R2_GYRO_PAD_TEST");
+        t.start = e ? atof(e) : -1.0;
+        if (t.start < 0) return;
+        static const SDL_VirtualJoystickSensorDesc sensors[2] = {{SDL_SENSOR_GYRO, 250.f}, {SDL_SENSOR_ACCEL, 250.f}};
+        static const SDL_VirtualJoystickTouchpadDesc touchpad = {2, {}};
+        SDL_VirtualJoystickDesc desc;
+        SDL_INIT_INTERFACE(&desc);
+        desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+        desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
+        desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+        desc.button_mask = 0xFFFFu | (1u << SDL_GAMEPAD_BUTTON_TOUCHPAD);  // face ... misc1, touchpad click
+        desc.axis_mask = (1u << SDL_GAMEPAD_AXIS_COUNT) - 1;
+        desc.ntouchpads = 1;
+        desc.touchpads = &touchpad;
+        desc.nsensors = 2;
+        desc.sensors = sensors;
+        desc.SetSensorsEnabled = padTestSensors;
+        desc.name = "Red Two gyro test pad";
+        const SDL_JoystickID id = SDL_AttachVirtualJoystick(&desc);
+        t.joy = id ? SDL_OpenJoystick(id) : nullptr;
+        logf("gyro", "pad test: virtual controller %s", t.joy ? "attached" : SDL_GetError());
+    }
+    if (!t.joy) return;
+    static const u64 t0 = SDL_GetTicksNS();
+    const u64 now = SDL_GetTicksNS();
+    const double secs = double(now - t0) * 1e-9 - t.start;
+    const int phase = secs < 0 ? -1 : secs < 2 ? 0 : secs < 4 ? 1 : secs < 6 ? 2 : secs < 8 ? 3 : 4;
+    if (phase != t.phase) {
+        static const char* const kNames[] = {"turning right, no touch", "turning right, finger on the touchpad",
+                                             "raising the far edge, finger on the touchpad", "still"};
+        if (t.phase >= 0 && t.phase < 4)
+            logf("gyro", "pad test: %-44s -> port 1 stick %+.0f, %+.0f (mean)", kNames[t.phase], t.n ? t.sx / t.n : 0.f,
+                 t.n ? t.sy / t.n : 0.f);
+        t.phase = phase;
+        t.n = 0;
+        t.sx = t.sy = 0.f;
+        SDL_SetJoystickVirtualTouchpad(t.joy, 0, 0, phase == 1 || phase == 2, 0.5f, 0.5f, phase == 1 || phase == 2 ? 1.f : 0.f);
+    }
+    // (rad/s in SDL's frame: x right, y out of the face, z toward the player; flat: up = +y)
+    const float turn = phase == 0 || phase == 1 ? -40.f / kRadToDeg : 0.f;  // about +y: counter-clockwise = left
+    const float lift = phase == 2 ? 30.f / kRadToDeg : 0.f;
+    static u64 last = 0;
+    if (!last) last = now;
+    for (u64 ts = last + 4'000'000; ts <= now; ts += 4'000'000) {  // 250 Hz up to now
+        const float gyro[3] = {lift, turn, 0.f}, accel[3] = {0.f, 9.80665f, 0.f};
+        SDL_SendJoystickVirtualSensorData(t.joy, SDL_SENSOR_GYRO, ts, gyro, 3);
+        SDL_SendJoystickVirtualSensorData(t.joy, SDL_SENSOR_ACCEL, ts, accel, 3);
+        last = ts;
+    }
+}
+
+void padTestResult(const PADStatus& st) {
+    if (s_padTest.phase < 0 || s_padTest.phase > 3) return;
+    s_padTest.sx += st.stickX;
+    s_padTest.sy += st.stickY;
+    s_padTest.n++;
 }
 
 // R2_GYRO_TEST="<from s>-<to s>:<turn>,<pitch>[;...]": the gyro reads these rates (deg/s, right
@@ -363,14 +496,35 @@ std::string controllerName() {
     return s_name;
 }
 
+u32 availableButtons() { return s_available; }
+int effectiveButton() {
+    if (s_buttonSetting != settings::get().gyroButton) {  // changed in the menu: until the next poll
+        for (int i = 0; i < kButtonCount; i++)
+            if (settings::get().gyroButton == kButtons[i].sdlName) return i;
+        return -1;
+    }
+    return s_effective;
+}
+
+void applyGyro(PADStatus& st, bool joy);
+
 void apply(PADStatus& st, bool joy) {
+    if (joy) padTestUpdate();
+    applyGyro(st, joy);
+    padTestResult(st);
+}
+
+void applyGyro(PADStatus& st, bool joy) {
     const settings::Settings& s = settings::get();
     float turn = 0.f, pitch = 0.f;
     const bool test = testRate(turn, pitch);
     const settings::GyroMode mode = s.gyroMode;
     if (joy) selectSource(mode != settings::GyroMode::Off);
     bool held = s_buttonWas;
-    if (joy) held = buttonHeld(s.gyroButton);
+    if (joy) {
+        updateButton(s.gyroButton, s_buttonSetting.empty());
+        held = buttonHeld();
+    }
     if (mode == settings::GyroMode::Toggle) {
         if (held && !s_buttonWas) {
             s_toggle = !s_toggle;

@@ -26,6 +26,12 @@ inline constexpr float kMaxAspect = 64.f / 27.f;
 // older xbox_buttons=1/0 reads as auto / gamecube).
 enum class ButtonPrompts : int { Auto = 0, Xbox, PlayStation, GameCube, Count };
 
+// Sound output (audio.cpp): Auto follows the default device's channels (the system's speaker
+// setup); 5.1 / 7.1 play the game's Pro Logic II surround on speakers of their own, stereo plays
+// it matrix-encoded (a receiver's Pro Logic II decoder unfolds it). settings.ini:
+// speakers=auto|stereo|5.1|7.1
+enum class Speakers : int { Auto = 0, Stereo, Surround51, Surround71, Count };
+
 struct Settings {
     // start: the launcher (the settings menu before the game boots, gfx/menu.cpp) or straight
     // into the game. On until the player turns it off; --launcher / R2_LAUNCHER=1 show it anyway.
@@ -62,6 +68,7 @@ struct Settings {
     // audio
     int volume = 100;            // master volume, 0..100 (output gain (volume/100)^2)
     bool backgroundAudio = true;  // keep playing while the window is in the background
+    Speakers speakers = Speakers::Auto;
     // game
     bool skipLogos = false;      // boot straight past the legal screen, intro and logos
     bool skipCutscenes = false;  // B (or Start) skips the opening crawl and in-game cutscenes
@@ -94,11 +101,15 @@ struct Settings {
     // the output rescales from (both sticks), and the control stick's sensitivity in % (output =
     // input x sensitivity, clamped: above 100 full deflection comes sooner, below it never does)
     int stickDeadzone = 15;      // 0..50
+    // The triggers' clicks (full boost / full brake) on LB / RB, the triggers analog only, Z from
+    // RB to the right stick click (input.cpp placeClicks: the controllers' bindings)
+    bool bumperClicks = false;
     int stickSensitivity = 100;  // 25..200
-    // Gyro aiming (gyro.cpp): turning and tilting the controller (the Steam Deck itself) steers the
-    // craft in flight, on top of the stick. The button is an SDL gamepad button name (misc3 is the
-    // Deck's left stick touch); sensitivities are percent (100: the craft turns as far as the
-    // controller is turned).
+    // Gyro aiming (gyro.cpp): turning and tilting the controller (the Steam Deck itself, a
+    // DualSense, a Switch Pro Controller) steers the craft in flight, on top of the stick. The
+    // button is an SDL gamepad button name (misc3 is the Deck's left stick touch; "touch" a finger
+    // on a touchpad); on a controller without it the gyro uses the first of misc3, touch and
+    // leftstick it has. Sensitivities are percent (100: the craft turns as far as the controller).
     GyroMode gyroMode = GyroMode::Off;
     std::string gyroButton = "misc3";
     int gyroSpeedX = 100, gyroSpeedY = 100;
@@ -124,6 +135,7 @@ const char* resolutionName(Resolution r);
 const char* aspectName(Aspect a);
 const char* buttonPromptsName(ButtonPrompts p);  // as settings.ini writes it
 const char* gyroModeName(GyroMode m);
+const char* speakersName(Speakers s);  // as settings.ini writes it
 inline constexpr int kGyroSpeedMin = 10, kGyroSpeedMax = 400;
 float resolutionScale(Resolution r);  // Aurora frame buffer scale; 0 = the window's own size
 float aspectValue(Aspect a);          // width / height (4:3 = the game's own); -1 = the window's
