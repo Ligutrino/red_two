@@ -26,6 +26,12 @@ inline constexpr float kMaxAspect = 64.f / 27.f;
 // older xbox_buttons=1/0 reads as auto / gamecube).
 enum class ButtonPrompts : int { Auto = 0, Xbox, PlayStation, GameCube, Count };
 
+// How the craft's turn and pitch rate follow the control stick (input.cpp mainStickToGame):
+// Smooth grows with the deflection to the power 1.5, Linear in proportion, GameCube is the game's
+// own curve (half rate up to 80% of the stick, then three times as steep). settings.ini:
+// stick_curve=smooth|linear|gamecube
+enum class StickCurve : int { Smooth = 0, Linear, GameCube, Count };
+
 // Sound output (audio.cpp): Auto follows the default device's channels (the system's speaker
 // setup); 5.1 / 7.1 play the game's Pro Logic II surround on speakers of their own, stereo plays
 // it matrix-encoded (a receiver's Pro Logic II decoder unfolds it). settings.ini:
@@ -104,11 +110,14 @@ struct Settings {
     // Controller sticks (input.cpp shapeStick): a round deadzone in % of the stick's travel that
     // the output rescales from (both sticks), and the control stick's sensitivity in % (output =
     // input x sensitivity, clamped: above 100 full deflection comes sooner, below it never does)
-    int stickDeadzone = 15;      // 0..50
+    int stickDeadzone = 15;      // 0..50 (the control stick; the C-stick has its own)
+    int cStickDeadzone = 15;     // 0..50
+    int cStickSensitivity = 100;  // 25..200
     // The triggers' clicks (full boost / full brake) on LB / RB, the triggers analog only, Z from
     // RB to the right stick click (input.cpp placeClicks: the controllers' bindings)
     bool bumperClicks = false;
     int stickSensitivity = 100;  // 25..200
+    StickCurve stickCurve = StickCurve::Smooth;
     // Gyro aiming (gyro.cpp): turning and tilting the controller (the Steam Deck itself, a
     // DualSense, a Switch Pro Controller) steers the craft in flight, on top of the stick. The
     // button is an SDL gamepad button name (misc3 is the Deck's left stick touch; "touch" a finger
@@ -140,6 +149,7 @@ const char* aspectName(Aspect a);
 const char* buttonPromptsName(ButtonPrompts p);  // as settings.ini writes it
 const char* gyroModeName(GyroMode m);
 const char* speakersName(Speakers s);  // as settings.ini writes it
+const char* stickCurveName(StickCurve c);  // as settings.ini writes it
 inline constexpr int kGyroSpeedMin = 10, kGyroSpeedMax = 400;
 float resolutionScale(Resolution r);  // Aurora frame buffer scale; 0 = the window's own size
 float aspectValue(Aspect a);          // width / height (4:3 = the game's own); -1 = the window's
