@@ -426,7 +426,17 @@ void bindRow(const ControlRow& row, const aurora::binding::PhysicalInput& in) {
     using Dir = PhysicalInput::GamepadAxis::Direction;
     const auto target = profileTarget();
     if (row.sign == 0) {
-        aurora::pad::rebind(target, row.control, in);
+        // L / R on a controller's trigger: its click (the digital L / R) at the profile's trigger
+        // threshold, as Aurora binds it by default - the binding's own 0.5 clicked at half travel
+        // (issue #6; input.cpp setUpControllers mends older rebinds)
+        Binding b{.input = in};
+        const auto* ax = in.control.get_if<PhysicalInput::GamepadAxis>();
+        if (row.second && ax && (ax->axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || ax->axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)) {
+            const aurora::pad::Profile* prof = aurora::pad::profile(target);
+            const aurora::pad::ProfileSettings s = prof ? prof->settings : aurora::pad::ProfileSettings{};
+            b.threshold = row.control == aurora::pad::controls().l ? s.leftTriggerThreshold : s.rightTriggerThreshold;
+        }
+        aurora::pad::rebind(target, row.control, b);
         if (row.second) aurora::pad::rebind(target, row.second, in, aurora::pad::ConflictPolicy::Allow);
     } else {
         // keep the other direction's bindings (splitting a full axis into its other half)
@@ -730,6 +740,77 @@ void stickMeter() {
     ImGui::Dummy(ImVec2(0.f, size));
 }
 
+// Port 1's triggers, like Dolphin's controller page: how far each is pulled, where it clicks (the
+// tick; none when the bumpers have the clicks), the click lighting up, and what the game gets
+// (its PADClamp reads 30 and less as nothing and 170 as all: (v - 30) / 140).
+void triggerMeter() {
+    static input::TriggerView v{};
+    static bool pad = false;
+    static u64 lastTb = 0;
+    if (const u64 now = tbNow(); now - lastTb > kTbClock / 120) {  // (read once a frame at most)
+        lastTb = now;
+        input::TriggerView n{};
+        const int got = input::port1Triggers(n);
+        if (got > 0) v = n;
+        if (got >= 0) pad = got > 0;  // (-1: the input thread is scanning - the last reading)
+    }
+    if (static const char* test = getenv("R2_TRIGGER_METER_TEST"); test) {  // "l,r" travel (screenshots)
+        float l = 0.f, r = 0.f;
+        if (sscanf(test, "%f,%f", &l, &r) == 2) {
+            pad = true;
+            const float t[2] = {l, r};
+            for (int i = 0; i < 2; i++) {
+                v.travel[i] = t[i];
+                v.clickAt[i] = settings::get().bumperClicks ? 0.f : 0.95f;
+                v.click[i] = v.clickAt[i] > 0.f && t[i] >= v.clickAt[i];
+                const float full = v.clickAt[i] > 0.f ? v.clickAt[i] : 1.f;
+                v.analog[i] = v.click[i] ? 180 : t[i] <= 0.04f ? 0 : u8(std::lround(30.f + (t[i] - 0.04f) / (full - 0.04f) * 140.f));
+            }
+        }
+    }
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (!pad) {
+        dl->AddText(ImVec2(p0.x + 18.f * s_ui, p0.y), kDim, "Connect a controller to see its triggers here.");
+        ImGui::Dummy(ImVec2(0.f, ImGui::GetFrameHeight()));
+        return;
+    }
+    const float h = ImGui::GetFrameHeight(), w = 300.f * s_ui, gap = 6.f * s_ui;
+    static const char* const kNames[2] = {"L trigger (brake)", "R trigger (throttle)"};
+    for (int i = 0; i < 2; i++) {
+        const ImVec2 p(p0.x, p0.y + float(i) * (h + gap));
+        const float cy = p.y + h * 0.5f;
+        dl->AddText(ImVec2(p.x + 18.f * s_ui, cy - ImGui::GetFontSize() * 0.5f), kText, kNames[i]);
+        const float x0 = p.x + s_valueX + 14.f * s_ui, x1 = p.x + s_valueX + w - 14.f * s_ui;
+        const float th = 12.f * s_ui, t = std::clamp(v.travel[i], 0.f, 1.f), fx = x0 + (x1 - x0) * t;
+        dl->AddRectFilled(ImVec2(x0, cy - th * 0.5f), ImVec2(x1, cy + th * 0.5f), IM_COL32(30, 52, 86, 255), th * 0.3f);
+        if (t > 0.f) {
+            const ImU32 a = v.click[i] ? IM_COL32(255, 120, 60, 255) : alpha(kAmber, 200);
+            const ImU32 b = v.click[i] ? IM_COL32(255, 70, 40, 255) : kGold;
+            dl->AddRectFilledMultiColor(ImVec2(x0, cy - th * 0.5f), ImVec2(fx, cy + th * 0.5f), a, b, b, a);
+        }
+        if (v.clickAt[i] > 0.f) {  // where the click is
+            const float cx = x0 + (x1 - x0) * v.clickAt[i];
+            dl->AddLine(ImVec2(cx, cy - th * 1.1f), ImVec2(cx, cy + th * 1.1f), alpha(kText, 200), 2.f * s_ui);
+        }
+        dl->AddRect(ImVec2(x0, cy - th * 0.5f), ImVec2(x1, cy + th * 0.5f), alpha(kGold, 90), th * 0.3f, 0, 1.f);
+        const float game = std::clamp((float(v.analog[i]) - 30.f) / 140.f, 0.f, 1.f);
+        char buf[64];
+        snprintf(buf, sizeof buf, "%3.0f%%   GAME %3.0f%%", t * 100.f, game * 100.f);
+        const float tx = p.x + s_valueX + w + 10.f * s_ui;
+        dl->AddText(ImVec2(tx, cy - ImGui::GetFontSize() * 0.5f), kDim, buf);
+        // the click: full brake / boost
+        const char* tag = i ? "BOOST" : "BRAKE";
+        const ImVec2 ts = ImGui::CalcTextSize(tag);
+        const float bx = tx + ImGui::CalcTextSize(buf).x + 14.f * s_ui, pad2 = 6.f * s_ui;
+        const ImVec2 b0(bx, cy - ts.y * 0.5f - 2.f * s_ui), b1(bx + ts.x + 2.f * pad2, cy + ts.y * 0.5f + 2.f * s_ui);
+        if (v.click[i]) dl->AddRectFilled(b0, b1, IM_COL32(255, 90, 50, 230), 3.f * s_ui);
+        dl->AddRect(b0, b1, v.click[i] ? IM_COL32(255, 160, 120, 255) : alpha(kDim, 90), 3.f * s_ui, 0, 1.f);
+        dl->AddText(ImVec2(bx + pad2, cy - ts.y * 0.5f), v.click[i] ? IM_COL32(255, 255, 255, 255) : alpha(kDim, 140), tag);
+    }
+    ImGui::Dummy(ImVec2(0.f, 2.f * h + gap));
+}
+
 // a bar from lo to hi percent (steps of `step` from the controller / keys, any value by mouse)
 bool percentRow(const char* text, int& v, const char* help, int lo = 0, int hi = 100, int step = 5) {
     const bool sel = rowBegin(text, help);
@@ -968,6 +1049,18 @@ void pageGameplay(settings::Settings& s) {
         s_changed = true;
 }
 
+const char* speakersLabel(settings::Speakers sp) {
+    switch (sp) {
+    case settings::Speakers::Stereo: return "Stereo";
+    case settings::Speakers::Surround51: return "5.1 surround";
+    case settings::Speakers::Surround71: return "7.1 surround";
+    default: {
+        const int n = audio::outputChannels();
+        return n == 8 ? "Automatic (7.1)" : n == 6 ? "Automatic (5.1)" : "Automatic (stereo)";
+    }
+    }
+}
+
 void pageAudio(settings::Settings& s) {
     heading("VOLUME");
     if (percentRow("Master volume", s.volume,
@@ -975,6 +1068,12 @@ void pageAudio(settings::Settings& s) {
                    "menu (Sound Settings)."))
         s_changed = true;
     heading("OUTPUT");
+    if (enumRow("Speakers", s.speakers, speakersLabel,
+                "Stereo plays the game's Pro Logic II surround matrix-encoded, for a receiver's decoder. 5.1 and "
+                "7.1 play it on speakers of their own (the game's sound setting must be STEREO, not MONO).")) {
+        s_changed = true;
+        audio::setSpeakers(int(s.speakers));
+    }
     if (toggleRow("Sound in background", s.backgroundAudio,
                   "Keep playing sound while another window has the focus. Off: silent until you come back."))
         s_changed = true;
@@ -1933,6 +2032,13 @@ void pageControls() {
             s_changed = true;
         stickMeter();
     }
+    heading("TRIGGERS");
+    if (toggleRow("Trigger clicks on LB / RB", settings::get().bumperClicks,
+                  "A GameCube trigger clicks at the end of its pull: full boost (wings closed, no firing) or full brake. "
+                  "On: the triggers only throttle and brake, LB / RB click (as players set up in Dolphin), and Z moves "
+                  "from RB to the right stick click. Changes the controller's bindings below."))
+        s_changed = true;
+    triggerMeter();
     heading("ON-SCREEN BUTTONS");
     {
         settings::Settings& st = settings::get();
@@ -1956,25 +2062,32 @@ void pageControls() {
         const std::string pad = gyro::controllerName();
         std::string help = "Turn and tilt the controller to steer the craft in flight, on top of the stick (menus, the pause "
                            "screen and cutscenes are left alone). ";
-        help += pad.empty() ? "No controller with a gyro found. On a Steam Deck: Steam Input hides it - turn Steam Input off "
+        help += pad.empty() ? "No controller with a gyro found (a Steam Deck, DualSense, DualShock 4 or Switch Pro "
+                              "Controller has one; Xbox controllers do not). Steam Input hides it: turn Steam Input off "
                               "for Red Two (Properties > Controller)."
                             : "Gyro: " + pad + ".";
         if (enumRow("Gyro aiming", st.gyroMode, settings::gyroModeName, help.c_str())) s_changed = true;
     }
     {
         settings::Settings& st = settings::get();
-        const bool sel = rowBegin("Gyro button", "The button for While held, Button toggles and Off while held. The Steam "
-                                                 "Deck's stick touches are its sticks' touch sensors: Left stick touch keeps "
-                                                 "the gyro on while your thumb rests on the stick you fly with.");
-        constexpr int n = int(std::size(gyro::kButtons));
-        int cur = -1;
-        for (int i = 0; i < n; i++)
-            if (st.gyroButton == gyro::kButtons[i].sdlName) cur = i;
-        const char* label = cur >= 0 ? gyro::kButtons[cur].label : st.gyroButton.c_str();  // (one set in settings.ini)
-        const int shown = std::max(cur, 0);
-        const int next = choiceStep(shown, n, selector("gyrobutton", label, shown > 0, shown < n - 1, sel), sel);
-        if (next != shown || (cur < 0 && sel && (s_in.dx || s_in.accept))) {
-            st.gyroButton = gyro::kButtons[next].sdlName;
+        const bool sel = rowBegin("Gyro button", "The button for While held, Button toggles and Off while held, from those "
+                                                 "the gyro's controller has. Touches keep the gyro on while a finger rests: "
+                                                 "the Steam Deck's left stick touch (the stick you fly with), a DualSense's "
+                                                 "or DualShock 4's touchpad.");
+        // the buttons the controller has (all of them while none is found), in kButtons' order
+        const u32 avail = gyro::availableButtons();
+        const int eff = gyro::effectiveButton();  // the setting's, or what stands in for it
+        int list[gyro::kButtonCount], n = 0, shown = -1;
+        for (int i = 0; i < gyro::kButtonCount; i++)
+            if (avail >> i & 1) {
+                if (i == eff) shown = n;
+                list[n++] = i;
+            }
+        const char* label = eff >= 0 ? gyro::kButtons[eff].label : st.gyroButton.c_str();  // (one set in settings.ini)
+        const int cur = std::max(shown, 0);
+        const int next = n ? choiceStep(cur, n, selector("gyrobutton", label, cur > 0, cur < n - 1, sel), sel) : cur;
+        if (n && (next != cur || (shown < 0 && sel && (s_in.dx || s_in.accept)))) {
+            st.gyroButton = gyro::kButtons[list[next]].sdlName;
             s_changed = true;
         }
     }
