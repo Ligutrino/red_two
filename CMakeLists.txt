@@ -3,6 +3,17 @@ project(red_two LANGUAGES C CXX)
 if(WIN32)
     enable_language(RC)
 endif()
+# macOS: Apple Silicon only (memory.cpp's fault handler reads AArch64's exception state)
+if(APPLE AND NOT IOS)
+    if(CMAKE_OSX_ARCHITECTURES)
+        set(_r2_mac_arch "${CMAKE_OSX_ARCHITECTURES}")
+    else()
+        set(_r2_mac_arch "${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
+    if(NOT _r2_mac_arch STREQUAL "arm64")
+        message(FATAL_ERROR "macOS builds are for Apple Silicon (arm64) only, not ${_r2_mac_arch}")
+    endif()
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -244,7 +255,7 @@ elseif(APPLE)
         MACOSX_BUNDLE TRUE
         OUTPUT_NAME "Red Two"
         MACOSX_BUNDLE_BUNDLE_NAME "Red Two"
-        MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.fhclimited.redtwo"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.gminustwo.redtwo"
         MACOSX_BUNDLE_BUNDLE_VERSION "${R2_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${R2_VERSION}"
         MACOSX_BUNDLE_ICON_FILE "red_two.icns"

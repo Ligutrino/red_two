@@ -76,8 +76,14 @@ tools/build_macos.sh --disc "<your Rogue Leader.rvz>"     # -> build/macos/Red T
 Copy `Red Two.app` anywhere; a disc image in the same folder as the app is found by itself.
 Settings, saves, states and logs live in `~/Library/Application Support/Red Two/`. The arm64
 loader allows only position-independent programs, so (as on Android) a save state loads only
-into the session that made it; the game's own saves on the memory card are not affected. The
-app is signed ad hoc for this Mac: on another one, right-click > Open the first time.
+into the session that made it; the game's own saves on the memory card are not affected.
+
+If the app or the disc is in Downloads, Desktop or Documents, macOS asks once whether Red Two
+may use that folder, before the window opens: allow it (System Settings > Privacy & Security >
+Files and Folders changes it later). The app is signed ad hoc, which is enough on the Mac that
+built it. A copy downloaded or AirDropped to another Mac is quarantined: open it once, then
+choose Open Anyway in System Settings > Privacy & Security (or run
+`xattr -dr com.apple.quarantine "Red Two.app"`).
 
 ### Playing
 
