@@ -344,7 +344,7 @@ void printHostStack(FILE* f, int skip) {
 }
 #else
 // Linux: the host call stack through the C library's backtrace (names from the exe's dynamic
-// symbol table: linked with -rdynamic), demangled.
+// symbol table: linked with -rdynamic), demangled. macOS: the same, from the image's symbols.
 void printHostStack(FILE* f, int skip) {
     void* frames[48];
     const int n = backtrace(frames, 48);
@@ -352,8 +352,14 @@ void printHostStack(FILE* f, int skip) {
     fprintf(f, "host call stack (thread %ld):\n", long(gettid()));
     for (int i = skip + 1; i < n; i++) {
         std::string line = names ? names[i] : "?";
+#ifdef __APPLE__
+        // "3   Red Two   0x0000000100c0f5e4 _ZN2rt3fooEv + 52": the name between the address and " + "
+        const size_t addr = line.find(" 0x"), open = addr == std::string::npos ? addr : line.find(' ', addr + 1),
+                     plus = line.rfind(" + ");
+#else
         // "exe(_ZN2rt3fooEv+0x12) [0x...]": demangle the name between '(' and '+'
         const size_t open = line.find('('), plus = line.find('+', open);
+#endif
         if (open != std::string::npos && plus != std::string::npos && plus > open + 1) {
             int status = 0;
             char* dm = abi::__cxa_demangle(line.substr(open + 1, plus - open - 1).c_str(), nullptr, nullptr, &status);

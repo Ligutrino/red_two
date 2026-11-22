@@ -17,6 +17,8 @@
 // (~/.config/dolphin-emu); the Flatpak (EmuDeck on the Steam Deck) keeps both under
 // ~/.var/app/org.DolphinEmu.dolphin-emu/{data,config}/dolphin-emu; an old or portable layout
 // (~/.dolphin-emu) has Config inside. Sys: <prefix>/share/dolphin-emu/sys.
+// macOS: the user folder is ~/Library/Application Support/Dolphin (Config inside); Sys is in the
+// app, Dolphin.app/Contents/Resources/Sys.
 #ifdef _WIN32
 #include <windows.h>
 #include <shlobj.h>
@@ -97,10 +99,16 @@ constexpr const char* kFlatpak = ".var/app/org.DolphinEmu.dolphin-emu";
 // (no Dolphin executables to look for: the Sys folders of the usual installs)
 std::vector<fs::path> dolphinExeDirs() { return {}; }
 std::vector<fs::path> dolphinSysDirs() {
+    std::vector<fs::path> places = {
+        fs::path("/usr/share/dolphin-emu/sys"), fs::path("/usr/local/share/dolphin-emu/sys"),
+        fs::path("/var/lib/flatpak/app/org.DolphinEmu.dolphin-emu/current/active/files/share/dolphin-emu/sys"),
+        homeDir() / ".local/share/flatpak/app/org.DolphinEmu.dolphin-emu/current/active/files/share/dolphin-emu/sys"};
+#ifdef __APPLE__
+    for (const fs::path& apps : {fs::path("/Applications"), homeDir() / "Applications"})
+        places.push_back(apps / "Dolphin.app/Contents/Resources/Sys");
+#endif
     std::vector<fs::path> v;
-    for (const fs::path& p : {fs::path("/usr/share/dolphin-emu/sys"), fs::path("/usr/local/share/dolphin-emu/sys"),
-                              fs::path("/var/lib/flatpak/app/org.DolphinEmu.dolphin-emu/current/active/files/share/dolphin-emu/sys"),
-                              homeDir() / ".local/share/flatpak/app/org.DolphinEmu.dolphin-emu/current/active/files/share/dolphin-emu/sys"}) {
+    for (const fs::path& p : places) {
         std::error_code ec;
         if (fs::is_directory(p / "GameSettings", ec)) v.push_back(p);
     }

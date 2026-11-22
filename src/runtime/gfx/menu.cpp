@@ -2853,6 +2853,8 @@ void menuImGuiInit(const void*) {
                           "/system/fonts/NotoSans-Regular.ttf", "/system/fonts/DroidSans.ttf"})
         fonts.push_back(f);
 #elif defined(__APPLE__)
+    // one shipped in the app (Contents/Resources/font.ttf, the base path), else the system's
+    if (const char* base = SDL_GetBasePath()) fonts.push_back(std::string(base) + "font.ttf");
     for (const char* f : {"/System/Library/Fonts/Supplemental/Arial Narrow.ttf", "/System/Library/Fonts/SFCompact.ttf",
                           "/System/Library/Fonts/SFNS.ttf"})
         fonts.push_back(f);

@@ -54,6 +54,11 @@ if [ $configure -eq 1 ] || [ ! -f "$build/build.ninja" ]; then
     cmake "${args[@]}" ${cmake_args[@]+"${cmake_args[@]}"}
 fi
 cmake --build "$build" --target red_two
+# the starter shader list (tools/make_shader_seed.py), as make_appimage.sh: Aurora reads it from
+# Contents/Resources
+if [ -f "$root/build/initial_pipeline_cache.db" ]; then
+    cp "$root/build/initial_pipeline_cache.db" "$build/Red Two.app/Contents/Resources/"
+fi
 # ad-hoc signature over the whole bundle (arm64 code must be signed to run)
 codesign --force --deep --sign - "$build/Red Two.app"
 echo "built $build/Red Two.app"
