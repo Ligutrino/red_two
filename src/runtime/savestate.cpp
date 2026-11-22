@@ -190,8 +190,13 @@ bool readState(int slot) {
         s_error = buf;
         return false;
     }
-    if (h.exeHash != lay.exeHash || h.exeBase != lay.exeBase) {
+    if (h.exeHash != lay.exeHash) {
         snprintf(buf, sizeof buf, "STATE %d IS FROM ANOTHER VERSION OF RED TWO", slot);
+        s_error = buf;
+        return false;
+    }
+    if (h.exeBase != lay.exeBase) {  // (Android, macOS: the program loads somewhere else every start)
+        snprintf(buf, sizeof buf, "STATE %d IS FROM AN EARLIER SESSION", slot);
         s_error = buf;
         return false;
     }
