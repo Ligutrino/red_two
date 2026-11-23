@@ -453,21 +453,8 @@ std::string describeAddr(u32 addr) {
 
 // --- disc -----------------------------------------------------------------------------
 
-// The disc: an ISO/GCM or RVZ/WIA image (src/common/disc_image.cpp).
-static std::unique_ptr<disc::Image> s_image;
-
-bool discOpen(const std::string& path) {
-    std::string err;
-    s_image = disc::open(path, err);
-    if (!s_image) {
-        logf("disc", "%s", err.c_str());
-        return false;
-    }
-    logf("disc", "%s image %s (%llu MiB)", s_image->kind(), path.c_str(), (unsigned long long)(s_image->size() >> 20));
-    return s_image->size() > 0x440;
-}
-
-bool discRead(u64 off, void* dst, u32 len) { return s_image && s_image->read(off, dst, len); }
+// The disc: an ISO/GCM or RVZ/WIA image (src/common/disc_image.cpp), opened and read by
+// disc_reader.cpp (discOpen, discRead, the DVD drive's reads on a thread of their own).
 
 std::string discProblem(const std::string& path, std::string* what) {
     if (path.empty()) return "No disc image chosen.";

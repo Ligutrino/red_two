@@ -261,6 +261,9 @@ struct DiOp {
     bool active = false;
     u32 cmd0 = 0, off = 0, len = 0, mar = 0;
 } s_diOp;
+u64 s_diDueTb = 0;  // when the emulated transfer ended (host state: a late read's wait, for the log)
+
+u64 diDiscOffset() { return (s_diOp.cmd0 & 0xC0) == 0x40 ? 0 : u64(s_diOp.off) << 2; }
 
 void onDi() {
     if (!s_diOp.active) return;
@@ -268,8 +271,24 @@ void onDi() {
     if (cmd == 0xA8) {
         u8* dst = physPtr(s_diOp.mar, s_diOp.len);
         if (!dst) fatal("DVD read to bad address %08X len %X", s_diOp.mar, s_diOp.len);
-        const u64 off = (s_diOp.cmd0 & 0xC0) == 0x40 ? 0 : u64(s_diOp.off) << 2;
-        if (!discRead(off, dst, s_diOp.len)) fatal("DVD read past the disc: %llX + %X", (unsigned long long)off, s_diOp.len);
+        const u64 off = diDiscOffset();
+        // The bytes come from the reader thread (disc_reader.cpp), which started at diStart.
+        // Not in yet (a slow drive): the drive finishes later, as a real one with a long seek
+        // would, and the game runs on meanwhile instead of freezing.
+        switch (discTake(off, dst, s_diOp.len)) {
+        case DiscData::Pending:
+            if (!s_diDueTb) s_diDueTb = tbNow();
+            schedule(EV_DI, tbNow() + kTbClock / 1000);
+            return;
+        case DiscData::Failed: fatal("DVD read past the disc: %llX + %X", (unsigned long long)off, s_diOp.len);
+        case DiscData::Ready: break;
+        }
+        if (s_diDueTb) {
+            const u64 now = tbNow();  // (a save state loaded meanwhile moves the time base back)
+            const double ms = now > s_diDueTb ? double(now - s_diDueTb) * 1000.0 / double(kTbClock) : 0.0;
+            s_diDueTb = 0;
+            if (ms >= 20.0) discLate(off, s_diOp.len, ms);
+        }
         watchHost(s_diOp.mar, s_diOp.len, "DVD read");
         di[DIMAR] = s_diOp.mar + s_diOp.len;
     }
@@ -301,6 +320,8 @@ void diStart() {
             const u64 o = u64(s_diOp.off) << 2;
             logf("dvd", "read %08llX len %X -> %08X  %s", (unsigned long long)o, s_diOp.len, s_diOp.mar, discFileAt(o).c_str());
         }
+        s_diDueTb = 0;
+        discPrefetch(diDiscOffset(), s_diOp.len);
         break;
     case 0xAB: break;  // seek
     case 0x12: {       // inquiry

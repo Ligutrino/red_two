@@ -118,8 +118,16 @@ Ctx& curCtx();
 void deliverException(Ctx& c, u32 exc, u32 pc);
 
 // --- devices --------------------------------------------------------------------------
+// disc_reader.cpp: the disc image. discRead reads at once (boot); the DVD drive asks for a read
+// with discPrefetch when it starts one (the reader thread brings it in, and what follows it) and
+// takes the bytes with discTake when the emulated transfer ends - Pending: not in yet, finish
+// later (discLate logs a long wait); Failed: past the disc or unreadable.
 bool discOpen(const std::string& path);
 bool discRead(u64 off, void* dst, u32 len);
+void discPrefetch(u64 off, u32 len);
+enum class DiscData { Ready, Pending, Failed };
+DiscData discTake(u64 off, void* dst, u32 len);
+void discLate(u64 off, u32 len, double ms);
 // main.cpp: whether an image is the disc Red Two needs (Rogue Leader, USA, GSWE64 revision 0):
 // "" if so, else why not in a sentence; *what: what it is ("Star Wars Rogue Squadron II (GSWE64),
 // RVZ image, 1.4 GiB") when it could be read

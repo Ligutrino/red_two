@@ -165,6 +165,7 @@ target_compile_definitions(rcheevos PUBLIC RC_CLIENT_SUPPORTS_HASH PRIVATE _CRT_
 # --- runtime ----------------------------------------------------------------------------
 set(R2_RUNTIME_SOURCES
     src/runtime/main.cpp
+    src/runtime/disc_reader.cpp
     src/runtime/memory.cpp
     src/runtime/cpu.cpp
     src/runtime/events.cpp
