@@ -298,6 +298,12 @@ void diagStart() {
 #endif
 }
 
+// Before the game: the launcher and the shader preparation screen run their own frame loops on
+// the same thread. Each turn counts as a frame for the stall reports (not for the perf lines),
+// so a freeze there (issue #41: the window stopped responding in the launcher, nothing logged)
+// is reported with that thread's stacks every 10 s.
+void diagUiFrame() { s_lastPresent.store(tbNow(), std::memory_order_relaxed); }
+
 void diagFramePresented(u32 draws, u64 presentTb) {
     const u64 now = tbNow();
     s_lastPresent.store(now, std::memory_order_relaxed);

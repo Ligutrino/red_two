@@ -179,6 +179,7 @@ void precompileShaders() {
         waited = true;
         const u32 done = st->createdPipelines;
         total = std::max(total, done + queued);
+        diagUiFrame();  // (a freeze here is reported in the log like one in the game)
         pollEvents();
         if (aurora_begin_frame()) {
             drawShaderProgress(done, total, tex.done, tex.total, tex.bytes);
@@ -215,6 +216,14 @@ void runLauncher() {
     const u64 t0 = tbNow();
     launcherOpen();
     for (;;) {
+        diagUiFrame();  // (a freeze here is reported in the log like one in the game)
+        // test: R2_LAUNCHER_FREEZE_TEST=<s> freezes the launcher once, 12 s, that long after it opened
+        if (static double freezeAt = getenv("R2_LAUNCHER_FREEZE_TEST") ? atof(getenv("R2_LAUNCHER_FREEZE_TEST")) : -1.0;
+            freezeAt >= 0 && double(tbNow() - t0) / double(kTbClock) >= freezeAt) {
+            freezeAt = -1.0;
+            logf("gfx", "launcher freeze test: 12 s");
+            SDL_Delay(12000);
+        }
         pollEvents();  // (closing the window quits)
         ra::idle();    // a login from the ACHIEVEMENTS page
         bool start = false;

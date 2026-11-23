@@ -10,6 +10,7 @@
 #else
 #include <cxxabi.h>
 #include <dirent.h>
+#include <fcntl.h>
 #ifdef __ANDROID__
 // Android: SDL's Java activity loads libmain.so and calls SDL_main (main below, renamed)
 #include <android/log.h>
@@ -43,6 +44,7 @@ static long gettid() {  // (macOS has no gettid: the thread's system-wide id)
 #include <SDL3/SDL_messagebox.h>
 
 #include <algorithm>
+#include <atomic>
 #include <csignal>
 #include <cstdarg>
 #include <cstdio>
@@ -106,6 +108,71 @@ void logf(const char* tag, const char* fmt, ...) {
 #endif
 }
 
+// A parent that captured stderr (RecompLauncher, a redirect) gets the session log too: a thread
+// of its own copies what the log file gains to the parent's handle, so the game never waits for
+// the parent to read (a full pipe would hold up every log line), and the file is written in
+// every case. quit() lets the copy catch up first (crash reports included).
+#ifdef _WIN32
+static HANDLE s_mirrorOut = nullptr;
+static bool mirrorWrite(const char* p, size_t n) {
+    while (n) {
+        DWORD w = 0;
+        if (!WriteFile(s_mirrorOut, p, DWORD(n), &w, nullptr) || !w) return false;
+        p += w;
+        n -= w;
+    }
+    return true;
+}
+#else
+static int s_mirrorOut = -1;
+static bool mirrorWrite(const char* p, size_t n) {
+    while (n) {
+        const ssize_t w = write(s_mirrorOut, p, n);
+        if (w <= 0) return false;
+        p += w;
+        n -= size_t(w);
+    }
+    return true;
+}
+#endif
+static std::atomic<unsigned> s_mirrorAsk{0}, s_mirrorSeen{0};
+static std::atomic<bool> s_mirrorOn{false};
+
+#ifdef _WIN32
+static void startLogMirror(const std::string& log, HANDLE parent) {
+#else
+static void startLogMirror(const std::string& log, int parent) {
+#endif
+    FILE* in = fopen(log.c_str(), "rb");
+    if (!in) return;
+    s_mirrorOut = parent;
+    s_mirrorOn = true;
+    std::thread([in] {
+        static char buf[16384];
+        for (;;) {
+            const unsigned ask = s_mirrorAsk.load();
+            const size_t n = fread(buf, 1, sizeof buf, in);
+            if (n) {
+                if (!mirrorWrite(buf, n)) break;  // (the parent went away)
+                continue;
+            }
+            clearerr(in);
+            s_mirrorSeen.store(ask);  // caught up with everything written before that request
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        s_mirrorOn = false;
+    }).detach();
+}
+
+// everything logged so far reaches the parent (waits at most half a second)
+static void mirrorCatchUp() {
+    if (!s_mirrorOn) return;
+    fflush(stderr);
+    const unsigned ask = s_mirrorAsk.fetch_add(1) + 1;
+    for (int i = 0; i < 50 && s_mirrorOn && s_mirrorSeen.load() < ask; i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+}
+
 void fatal(const char* fmt, ...) {
     char buf[2048];
     va_list ap;
@@ -130,6 +197,7 @@ void fatal(const char* fmt, ...) {
 void quit(int code) {
     fflush(stdout);
     fflush(stderr);
+    mirrorCatchUp();
 #ifdef _WIN32
     TerminateProcess(GetCurrentProcess(), UINT(code));
 #else
@@ -257,6 +325,11 @@ void restartGame(bool toLauncher) {
         }
         closedir(d);
         for (int fd : close) ::close(fd);
+    }
+    // the new image's stderr: the parent's pipe again (it mirrors its own new log), not this log
+    if (s_mirrorOut >= 0) {
+        mirrorCatchUp();
+        dup2(s_mirrorOut, 2);
     }
     if (s_argv && !s_restartProgram.empty()) {  // (an updated AppImage: the new file, not this mount)
         std::vector<char*> args;
@@ -727,17 +800,25 @@ static u32 bootDisc() {
 }  // namespace rt
 
 // The program is a Windows GUI app (no console window on a double-click). Its log goes to
-// stderr when the parent captured it (test runs), to the parent's console with --console, and
-// otherwise to a log of its own for every session: %APPDATA%\Red Two\logs\red_two_<date>_<time>.log
-// (the newest 30 are kept; red_two.log in the working directory if that folder cannot be made).
+// stderr alone in test runs (R2_BACKGROUND, R2_HEADLESS, R2_INPUT, R2_LOG_STDERR), to the
+// parent's console with --console, and otherwise to a log of its own for every session:
+// <user folder>\logs\red_two_<date>_<time>.log (the newest 30 are kept; red_two.log in the
+// working directory if that folder cannot be made). A parent that captured stderr
+// (RecompLauncher) gets a copy of it as well (startLogMirror).
 static std::string s_sessionLog;
+static bool s_logMirrored = false;  // (for the session header)
+
+static bool testRunLog() {
+    return rt::envFlag("R2_BACKGROUND") || rt::envFlag("R2_HEADLESS") || getenv("R2_INPUT") || rt::envFlag("R2_LOG_STDERR");
+}
 
 #ifndef _WIN32
 // Linux: the log goes to stderr when it is a terminal or a test run captured it, and otherwise
-// (a desktop launcher, Steam) to a log of its own for every session in the user data folder
-// (~/.local/share/Red Two/logs/), the newest 30 kept.
+// (a desktop launcher, Steam, RecompLauncher) to a log of its own for every session in the user
+// data folder (~/.local/share/Red Two/logs/), the newest 30 kept; a pipe or file stderr pointed
+// at gets a copy.
 static void setupLogOutput(int, char**) {
-    if (isatty(2) || getenv("R2_BACKGROUND") || getenv("R2_HEADLESS") || getenv("R2_INPUT") || getenv("R2_LOG_STDERR")) return;
+    if (isatty(2) || testRunLog()) return;
     std::string dir;
     if (const std::string u = rt::mods::userDir(); !u.empty()) {
         dir = u + "logs";
@@ -764,7 +845,21 @@ static void setupLogOutput(int, char**) {
                  lt.tm_hour, lt.tm_min, lt.tm_sec);
         s_sessionLog = dir + name;
     }
-    if (!freopen(s_sessionLog.c_str(), "w", stderr)) freopen("/dev/null", "w", stderr);
+    int parent = -1;  // (freopen closes the captured stderr: keep a copy for the mirror)
+#ifndef __ANDROID__
+    struct stat est{};
+    if (fstat(2, &est) == 0 && (S_ISFIFO(est.st_mode) || S_ISSOCK(est.st_mode))) parent = dup(2);  // (a pipe: not a file a restart inherited)
+#endif
+    if (!freopen(s_sessionLog.c_str(), "w", stderr)) {
+        freopen("/dev/null", "w", stderr);
+        if (parent >= 0) close(parent);
+        return;
+    }
+    if (parent >= 0) {
+        fcntl(parent, F_SETFD, FD_CLOEXEC);  // (not into a restarted image)
+        rt::startLogMirror(s_sessionLog, parent);
+        s_logMirrored = true;
+    }
 }
 
 static void logSessionHeader(int argc, char** argv) {
@@ -790,7 +885,8 @@ static void logSessionHeader(int argc, char** argv) {
     char cwd[PATH_MAX] = "";
     if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0;
     logf("session", "Red Two %s started %s; exe %s (built %s)%s", rt::update::version(), now, exe, built.c_str(), args.c_str());
-    logf("session", "working directory %s%s%s%s%s", cwd, s_sessionLog.empty() ? "" : "; log ", s_sessionLog.c_str(),
+    logf("session", "working directory %s%s%s%s%s%s", cwd, s_sessionLog.empty() ? "" : "; log ", s_sessionLog.c_str(),
+         s_logMirrored ? " (also copied to the output of the program that started this one)" : "",
          getenv("APPIMAGE") ? "; AppImage " : "", getenv("APPIMAGE") ? getenv("APPIMAGE") : "");
 }
 #else
@@ -803,7 +899,8 @@ static void setupLogOutput(int argc, char** argv) {
         return;
     }
     const HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
-    if (h && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN) return;
+    const bool captured = h && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN;
+    if (captured && testRunLog()) return;
     std::string dir;
     if (const std::string u = rt::mods::userDir(); !u.empty()) {  // (the portable folder or %APPDATA%\Red Two)
         dir = u + "logs";
@@ -830,7 +927,20 @@ static void setupLogOutput(int argc, char** argv) {
                  st.wMinute, st.wSecond);
         s_sessionLog = dir + name;
     }
-    if (!freopen(s_sessionLog.c_str(), "w", stderr)) freopen("red_two.log", "w", stderr);
+    HANDLE parent = nullptr;  // (freopen closes the captured stderr: keep a copy for the mirror)
+    if (captured) DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &parent, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    if (!freopen(s_sessionLog.c_str(), "w", stderr)) {
+        s_sessionLog = "red_two.log";
+        if (!freopen(s_sessionLog.c_str(), "w", stderr)) {  // (no file at all: the parent's output alone)
+            if (parent) CloseHandle(parent);
+            s_sessionLog.clear();
+            return;
+        }
+    }
+    if (parent) {
+        rt::startLogMirror(s_sessionLog, parent);
+        s_logMirrored = true;
+    }
 }
 
 // The session log's first lines: which build this is and how it was started (the settings
@@ -858,7 +968,8 @@ static void logSessionHeader(int argc, char** argv) {
     GetCurrentDirectoryA(sizeof cwd, cwd);
     logf("session", "Red Two %s started %04u-%02u-%02u %02u:%02u:%02u; exe %s (built %s)%s", rt::update::version(), now.wYear,
          now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, exe, built.c_str(), args.c_str());
-    logf("session", "working directory %s%s%s", cwd, s_sessionLog.empty() ? "" : "; log ", s_sessionLog.c_str());
+    logf("session", "working directory %s%s%s%s", cwd, s_sessionLog.empty() ? "" : "; log ", s_sessionLog.c_str(),
+         s_logMirrored ? " (also copied to the output of the program that started this one)" : "");
 }
 #endif
 
