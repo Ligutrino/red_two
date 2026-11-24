@@ -2,6 +2,9 @@
 
 [![release](https://img.shields.io/github/v/release/gminustwo/red_two?filter=v%2A&sort=semver&display_name=tag&label=release&color=orange)](https://github.com/gminustwo/red_two/releases/latest)
 [![downloads](https://img.shields.io/github/downloads/gminustwo/red_two/total?label=downloads&color=brightgreen)](https://github.com/gminustwo/red_two/releases)
+[![Patreon](https://img.shields.io/badge/Patreon-support-F96854?logo=patreon&logoColor=white)](https://www.patreon.com/rengar1)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/rengar12707)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/rengar)
 
 A static recompilation of **Star Wars: Rogue Squadron II – Rogue Leader** (GameCube) for PC.
 
