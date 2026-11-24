@@ -10,6 +10,7 @@
 #else
 #include <cxxabi.h>
 #include <dirent.h>
+#include <fcntl.h>
 #ifdef __ANDROID__
 // Android: SDL's Java activity loads libmain.so and calls SDL_main (main below, renamed)
 #include <android/log.h>
@@ -43,6 +44,8 @@ static long gettid() {  // (macOS has no gettid: the thread's system-wide id)
 #include <SDL3/SDL_messagebox.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <csignal>
 #include <cstdarg>
 #include <cstdio>
@@ -60,6 +63,7 @@ static long gettid() {  // (macOS has no gettid: the thread's system-wide id)
 #include "hw/gx_fifo.h"
 #include "mods.h"
 #include "achievements.h"
+#include "discord.h"
 #include "runtime.h"
 #include "update.h"
 #include "settings.h"
@@ -106,6 +110,71 @@ void logf(const char* tag, const char* fmt, ...) {
 #endif
 }
 
+// A parent that captured stderr (RecompLauncher, a redirect) gets the session log too: a thread
+// of its own copies what the log file gains to the parent's handle, so the game never waits for
+// the parent to read (a full pipe would hold up every log line), and the file is written in
+// every case. quit() lets the copy catch up first (crash reports included).
+#ifdef _WIN32
+static HANDLE s_mirrorOut = nullptr;
+static bool mirrorWrite(const char* p, size_t n) {
+    while (n) {
+        DWORD w = 0;
+        if (!WriteFile(s_mirrorOut, p, DWORD(n), &w, nullptr) || !w) return false;
+        p += w;
+        n -= w;
+    }
+    return true;
+}
+#else
+static int s_mirrorOut = -1;
+static bool mirrorWrite(const char* p, size_t n) {
+    while (n) {
+        const ssize_t w = write(s_mirrorOut, p, n);
+        if (w <= 0) return false;
+        p += w;
+        n -= size_t(w);
+    }
+    return true;
+}
+#endif
+static std::atomic<unsigned> s_mirrorAsk{0}, s_mirrorSeen{0};
+static std::atomic<bool> s_mirrorOn{false};
+
+#ifdef _WIN32
+static void startLogMirror(const std::string& log, HANDLE parent) {
+#else
+static void startLogMirror(const std::string& log, int parent) {
+#endif
+    FILE* in = fopen(log.c_str(), "rb");
+    if (!in) return;
+    s_mirrorOut = parent;
+    s_mirrorOn = true;
+    std::thread([in] {
+        static char buf[16384];
+        for (;;) {
+            const unsigned ask = s_mirrorAsk.load();
+            const size_t n = fread(buf, 1, sizeof buf, in);
+            if (n) {
+                if (!mirrorWrite(buf, n)) break;  // (the parent went away)
+                continue;
+            }
+            clearerr(in);
+            s_mirrorSeen.store(ask);  // caught up with everything written before that request
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        s_mirrorOn = false;
+    }).detach();
+}
+
+// everything logged so far reaches the parent (waits at most half a second)
+static void mirrorCatchUp() {
+    if (!s_mirrorOn) return;
+    fflush(stderr);
+    const unsigned ask = s_mirrorAsk.fetch_add(1) + 1;
+    for (int i = 0; i < 50 && s_mirrorOn && s_mirrorSeen.load() < ask; i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+}
+
 void fatal(const char* fmt, ...) {
     char buf[2048];
     va_list ap;
@@ -130,6 +199,7 @@ void fatal(const char* fmt, ...) {
 void quit(int code) {
     fflush(stdout);
     fflush(stderr);
+    mirrorCatchUp();
 #ifdef _WIN32
     TerminateProcess(GetCurrentProcess(), UINT(code));
 #else
@@ -257,6 +327,11 @@ void restartGame(bool toLauncher) {
         }
         closedir(d);
         for (int fd : close) ::close(fd);
+    }
+    // the new image's stderr: the parent's pipe again (it mirrors its own new log), not this log
+    if (s_mirrorOut >= 0) {
+        mirrorCatchUp();
+        dup2(s_mirrorOut, 2);
     }
     if (s_argv && !s_restartProgram.empty()) {  // (an updated AppImage: the new file, not this mount)
         std::vector<char*> args;
@@ -453,21 +528,8 @@ std::string describeAddr(u32 addr) {
 
 // --- disc -----------------------------------------------------------------------------
 
-// The disc: an ISO/GCM or RVZ/WIA image (src/common/disc_image.cpp).
-static std::unique_ptr<disc::Image> s_image;
-
-bool discOpen(const std::string& path) {
-    std::string err;
-    s_image = disc::open(path, err);
-    if (!s_image) {
-        logf("disc", "%s", err.c_str());
-        return false;
-    }
-    logf("disc", "%s image %s (%llu MiB)", s_image->kind(), path.c_str(), (unsigned long long)(s_image->size() >> 20));
-    return s_image->size() > 0x440;
-}
-
-bool discRead(u64 off, void* dst, u32 len) { return s_image && s_image->read(off, dst, len); }
+// The disc: an ISO/GCM or RVZ/WIA image (src/common/disc_image.cpp), opened and read by
+// disc_reader.cpp (discOpen, discRead, the DVD drive's reads on a thread of their own).
 
 std::string discProblem(const std::string& path, std::string* what) {
     if (path.empty()) return "No disc image chosen.";
@@ -520,6 +582,73 @@ static void loadFst() {
         const std::string path = dirs.back().first + name;
         if (e[0]) dirs.push_back({path + "/", be32(e + 8)});
         else s_files.push_back({path, be32(e + 4), be32(e + 8)});
+    }
+}
+
+// The level resources of Rogue2/lvlPackNN.dat (their .dir: a header line, then "resname offset
+// length attrib depth" per row; depth 0 rows lNN hold a whole level, its pieces lNN/... follow).
+// Test runs (R2_DVD_LOG): boot reads l22 (the front end), SELECT CRAFT one of l18-l21 (the
+// hangars), then the mission's: l01 Death Star Attack, l03 Battle of Hoth, l04 Prisons of the
+// Maw, l11 Death Star Escape (discord.cpp missionName).
+struct LevelRes {
+    u64 begin, end;  // on the disc
+    int level;
+};
+static std::vector<LevelRes> s_levels;
+
+static void loadLevelDirs() {
+    for (const DiscFile& f : s_files) {
+        const std::string pre = "Rogue2/lvlPack", dir = ".dir";
+        if (f.path.compare(0, pre.size(), pre) || f.path.size() < dir.size() ||
+            f.path.compare(f.path.size() - dir.size(), dir.size(), dir) || f.size > (1u << 20))
+            continue;
+        const std::string datName = f.path.substr(0, f.path.size() - dir.size()) + ".dat";
+        const DiscFile* dat = nullptr;
+        for (const DiscFile& d : s_files)
+            if (d.path == datName) dat = &d;
+        std::string text(f.size, '\0');
+        if (!dat || !discRead(f.off, text.data(), f.size)) continue;
+        size_t at = text.find('\n');  // (the header line)
+        while (at != std::string::npos && at + 1 < text.size()) {
+            const size_t end = text.find('\n', at + 1);
+            const std::string line = text.substr(at + 1, end == std::string::npos ? std::string::npos : end - at - 1);
+            at = end;
+            char name[64];
+            unsigned long long off = 0, len = 0;
+            unsigned attrib = 0, depth = 0;
+            if (sscanf(line.c_str(), "%63s %llu %llu %u %u", name, &off, &len, &attrib, &depth) != 5 || depth != 0 ||
+                name[0] != 'l' || !isdigit(u8(name[1])) || !isdigit(u8(name[2])) || name[3])
+                continue;
+            if (off + len <= dat->size) s_levels.push_back({u64(dat->off) + off, u64(dat->off) + off + len, atoi(name + 1)});
+        }
+    }
+    logf("disc", "%zu level resources in Rogue2/lvlPack*.dat", s_levels.size());
+}
+
+static std::atomic<int> s_level{-1};
+int discLevel() { return s_level.load(std::memory_order_relaxed); }
+
+// A level from a save state just loaded (savestate.cpp; -1: none yet when it was saved)
+void discSetLevel(int level) {
+    if (level == s_level.load(std::memory_order_relaxed)) return;
+    s_level = level;
+    if (level < 0) return;
+    const char* what = discord::missionName(level);
+    if (!*what) {
+        if (level == 22) what = "the front end: title and menus";
+        else if (level >= 18 && level <= 21) what = "a hangar: SELECT CRAFT";
+        else if (level >= 1 && level <= 17) what = "a mission";
+        else what = "not seen in a test yet";
+    }
+    logf("level", "level l%02d (%s)", level, what);
+    discord::setLevel(level);
+}
+
+void discNoteRead(u64 off) {
+    for (const LevelRes& l : s_levels) {
+        if (off < l.begin || off >= l.end) continue;
+        discSetLevel(l.level);  // (logged when it changes)
+        return;
     }
 }
 
@@ -740,17 +869,25 @@ static u32 bootDisc() {
 }  // namespace rt
 
 // The program is a Windows GUI app (no console window on a double-click). Its log goes to
-// stderr when the parent captured it (test runs), to the parent's console with --console, and
-// otherwise to a log of its own for every session: %APPDATA%\Red Two\logs\red_two_<date>_<time>.log
-// (the newest 30 are kept; red_two.log in the working directory if that folder cannot be made).
+// stderr alone in test runs (R2_BACKGROUND, R2_HEADLESS, R2_INPUT, R2_LOG_STDERR), to the
+// parent's console with --console, and otherwise to a log of its own for every session:
+// <user folder>\logs\red_two_<date>_<time>.log (the newest 30 are kept; red_two.log in the
+// working directory if that folder cannot be made). A parent that captured stderr
+// (RecompLauncher) gets a copy of it as well (startLogMirror).
 static std::string s_sessionLog;
+static bool s_logMirrored = false;  // (for the session header)
+
+static bool testRunLog() {
+    return rt::envFlag("R2_BACKGROUND") || rt::envFlag("R2_HEADLESS") || getenv("R2_INPUT") || rt::envFlag("R2_LOG_STDERR");
+}
 
 #ifndef _WIN32
 // Linux: the log goes to stderr when it is a terminal or a test run captured it, and otherwise
-// (a desktop launcher, Steam) to a log of its own for every session in the user data folder
-// (~/.local/share/Red Two/logs/), the newest 30 kept.
+// (a desktop launcher, Steam, RecompLauncher) to a log of its own for every session in the user
+// data folder (~/.local/share/Red Two/logs/), the newest 30 kept; a pipe or file stderr pointed
+// at gets a copy.
 static void setupLogOutput(int, char**) {
-    if (isatty(2) || getenv("R2_BACKGROUND") || getenv("R2_HEADLESS") || getenv("R2_INPUT") || getenv("R2_LOG_STDERR")) return;
+    if (isatty(2) || testRunLog()) return;
     std::string dir;
     if (const std::string u = rt::mods::userDir(); !u.empty()) {
         dir = u + "logs";
@@ -777,7 +914,21 @@ static void setupLogOutput(int, char**) {
                  lt.tm_hour, lt.tm_min, lt.tm_sec);
         s_sessionLog = dir + name;
     }
-    if (!freopen(s_sessionLog.c_str(), "w", stderr)) freopen("/dev/null", "w", stderr);
+    int parent = -1;  // (freopen closes the captured stderr: keep a copy for the mirror)
+#ifndef __ANDROID__
+    struct stat est{};
+    if (fstat(2, &est) == 0 && (S_ISFIFO(est.st_mode) || S_ISSOCK(est.st_mode))) parent = dup(2);  // (a pipe: not a file a restart inherited)
+#endif
+    if (!freopen(s_sessionLog.c_str(), "w", stderr)) {
+        freopen("/dev/null", "w", stderr);
+        if (parent >= 0) close(parent);
+        return;
+    }
+    if (parent >= 0) {
+        fcntl(parent, F_SETFD, FD_CLOEXEC);  // (not into a restarted image)
+        rt::startLogMirror(s_sessionLog, parent);
+        s_logMirrored = true;
+    }
 }
 
 static void logSessionHeader(int argc, char** argv) {
@@ -803,7 +954,8 @@ static void logSessionHeader(int argc, char** argv) {
     char cwd[PATH_MAX] = "";
     if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0;
     logf("session", "Red Two %s started %s; exe %s (built %s)%s", rt::update::version(), now, exe, built.c_str(), args.c_str());
-    logf("session", "working directory %s%s%s%s%s", cwd, s_sessionLog.empty() ? "" : "; log ", s_sessionLog.c_str(),
+    logf("session", "working directory %s%s%s%s%s%s", cwd, s_sessionLog.empty() ? "" : "; log ", s_sessionLog.c_str(),
+         s_logMirrored ? " (also copied to the output of the program that started this one)" : "",
          getenv("APPIMAGE") ? "; AppImage " : "", getenv("APPIMAGE") ? getenv("APPIMAGE") : "");
 }
 #else
@@ -816,7 +968,8 @@ static void setupLogOutput(int argc, char** argv) {
         return;
     }
     const HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
-    if (h && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN) return;
+    const bool captured = h && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN;
+    if (captured && testRunLog()) return;
     std::string dir;
     if (const std::string u = rt::mods::userDir(); !u.empty()) {  // (the portable folder or %APPDATA%\Red Two)
         dir = u + "logs";
@@ -843,7 +996,20 @@ static void setupLogOutput(int argc, char** argv) {
                  st.wMinute, st.wSecond);
         s_sessionLog = dir + name;
     }
-    if (!freopen(s_sessionLog.c_str(), "w", stderr)) freopen("red_two.log", "w", stderr);
+    HANDLE parent = nullptr;  // (freopen closes the captured stderr: keep a copy for the mirror)
+    if (captured) DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &parent, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    if (!freopen(s_sessionLog.c_str(), "w", stderr)) {
+        s_sessionLog = "red_two.log";
+        if (!freopen(s_sessionLog.c_str(), "w", stderr)) {  // (no file at all: the parent's output alone)
+            if (parent) CloseHandle(parent);
+            s_sessionLog.clear();
+            return;
+        }
+    }
+    if (parent) {
+        rt::startLogMirror(s_sessionLog, parent);
+        s_logMirrored = true;
+    }
 }
 
 // The session log's first lines: which build this is and how it was started (the settings
@@ -871,7 +1037,8 @@ static void logSessionHeader(int argc, char** argv) {
     GetCurrentDirectoryA(sizeof cwd, cwd);
     logf("session", "Red Two %s started %04u-%02u-%02u %02u:%02u:%02u; exe %s (built %s)%s", rt::update::version(), now.wYear,
          now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, exe, built.c_str(), args.c_str());
-    logf("session", "working directory %s%s%s", cwd, s_sessionLog.empty() ? "" : "; log ", s_sessionLog.c_str());
+    logf("session", "working directory %s%s%s%s", cwd, s_sessionLog.empty() ? "" : "; log ", s_sessionLog.c_str(),
+         s_logMirrored ? " (also copied to the output of the program that started this one)" : "");
 }
 #endif
 
@@ -1037,7 +1204,8 @@ int main(int argc, char** argv) {
     }
     mods::codesInit();  // cheat codes (codes.ini), applied every retrace
     rt::update::init();  // a newer release on GitHub? (setting check_updates; a worker thread)
-    viSetRate(settings::get().fps);
+    rt::discord::init();  // Discord Rich Presence (setting discord_presence; a worker thread)
+    viSetRateHz(frameRateHz());  // (no window yet: the setting; gfx::init applies V-Sync's)
     profilerStart();
     diagStart();  // stall reports and perf lines in the log (profiler.cpp)
     s_t0Tb = tbNow();
@@ -1079,6 +1247,7 @@ int main(int argc, char** argv) {
     }
     if (!discOpen(disc)) fatal("cannot open the disc image %s", disc.c_str());
     loadFst();
+    loadLevelDirs();
     Ctx* boot = nullptr;
     threadsInit(boot);
     Ctx& c = *boot;
@@ -1093,6 +1262,7 @@ int main(int argc, char** argv) {
     }
     audio::init();
     hwInit();
+    clockInit();  // the console's clock: the PC's local time (time of day in missions, issue #49)
     c.msr = 0x2032;  // FP, IR, DR, RI; interrupts off until the OS enables them
     logf("boot", "%u recompiled functions; jumping to %s", g_funcCount, describeAddr(entry).c_str());
     threadsRun(entry);  // the boot fiber runs the game; this thread only takes save states now
