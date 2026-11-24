@@ -212,7 +212,7 @@ request** for an idea): the form asks for what helps. Please check the open issu
 report one problem per issue. What to have at hand:
 
 - **Red Two's version**: under the menu's title (F1, or the controller's Back / Select), e.g.
-  "VERSION 1.2". Newer versions may already fix it: the menu offers updates at the top of its
+  "VERSION 1.3". Newer versions may already fix it: the menu offers updates at the top of its
   first page.
 - **What happened and where**: the mission (or menu, cutscene) and the moment, whether it happens
   every time, and how to get there.
