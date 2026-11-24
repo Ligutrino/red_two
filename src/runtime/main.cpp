@@ -45,6 +45,7 @@ static long gettid() {  // (macOS has no gettid: the thread's system-wide id)
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <csignal>
 #include <cstdarg>
 #include <cstdio>
@@ -62,6 +63,7 @@ static long gettid() {  // (macOS has no gettid: the thread's system-wide id)
 #include "hw/gx_fifo.h"
 #include "mods.h"
 #include "achievements.h"
+#include "discord.h"
 #include "runtime.h"
 #include "update.h"
 #include "settings.h"
@@ -580,6 +582,73 @@ static void loadFst() {
         const std::string path = dirs.back().first + name;
         if (e[0]) dirs.push_back({path + "/", be32(e + 8)});
         else s_files.push_back({path, be32(e + 4), be32(e + 8)});
+    }
+}
+
+// The level resources of Rogue2/lvlPackNN.dat (their .dir: a header line, then "resname offset
+// length attrib depth" per row; depth 0 rows lNN hold a whole level, its pieces lNN/... follow).
+// Test runs (R2_DVD_LOG): boot reads l22 (the front end), SELECT CRAFT one of l18-l21 (the
+// hangars), then the mission's: l01 Death Star Attack, l03 Battle of Hoth, l04 Prisons of the
+// Maw, l11 Death Star Escape (discord.cpp missionName).
+struct LevelRes {
+    u64 begin, end;  // on the disc
+    int level;
+};
+static std::vector<LevelRes> s_levels;
+
+static void loadLevelDirs() {
+    for (const DiscFile& f : s_files) {
+        const std::string pre = "Rogue2/lvlPack", dir = ".dir";
+        if (f.path.compare(0, pre.size(), pre) || f.path.size() < dir.size() ||
+            f.path.compare(f.path.size() - dir.size(), dir.size(), dir) || f.size > (1u << 20))
+            continue;
+        const std::string datName = f.path.substr(0, f.path.size() - dir.size()) + ".dat";
+        const DiscFile* dat = nullptr;
+        for (const DiscFile& d : s_files)
+            if (d.path == datName) dat = &d;
+        std::string text(f.size, '\0');
+        if (!dat || !discRead(f.off, text.data(), f.size)) continue;
+        size_t at = text.find('\n');  // (the header line)
+        while (at != std::string::npos && at + 1 < text.size()) {
+            const size_t end = text.find('\n', at + 1);
+            const std::string line = text.substr(at + 1, end == std::string::npos ? std::string::npos : end - at - 1);
+            at = end;
+            char name[64];
+            unsigned long long off = 0, len = 0;
+            unsigned attrib = 0, depth = 0;
+            if (sscanf(line.c_str(), "%63s %llu %llu %u %u", name, &off, &len, &attrib, &depth) != 5 || depth != 0 ||
+                name[0] != 'l' || !isdigit(u8(name[1])) || !isdigit(u8(name[2])) || name[3])
+                continue;
+            if (off + len <= dat->size) s_levels.push_back({u64(dat->off) + off, u64(dat->off) + off + len, atoi(name + 1)});
+        }
+    }
+    logf("disc", "%zu level resources in Rogue2/lvlPack*.dat", s_levels.size());
+}
+
+static std::atomic<int> s_level{-1};
+int discLevel() { return s_level.load(std::memory_order_relaxed); }
+
+// A level from a save state just loaded (savestate.cpp; -1: none yet when it was saved)
+void discSetLevel(int level) {
+    if (level == s_level.load(std::memory_order_relaxed)) return;
+    s_level = level;
+    if (level < 0) return;
+    const char* what = discord::missionName(level);
+    if (!*what) {
+        if (level == 22) what = "the front end: title and menus";
+        else if (level >= 18 && level <= 21) what = "a hangar: SELECT CRAFT";
+        else if (level >= 1 && level <= 17) what = "a mission";
+        else what = "not seen in a test yet";
+    }
+    logf("level", "level l%02d (%s)", level, what);
+    discord::setLevel(level);
+}
+
+void discNoteRead(u64 off) {
+    for (const LevelRes& l : s_levels) {
+        if (off < l.begin || off >= l.end) continue;
+        discSetLevel(l.level);  // (logged when it changes)
+        return;
     }
 }
 
@@ -1135,7 +1204,8 @@ int main(int argc, char** argv) {
     }
     mods::codesInit();  // cheat codes (codes.ini), applied every retrace
     rt::update::init();  // a newer release on GitHub? (setting check_updates; a worker thread)
-    viSetRate(settings::get().fps);
+    rt::discord::init();  // Discord Rich Presence (setting discord_presence; a worker thread)
+    viSetRateHz(frameRateHz());  // (no window yet: the setting; gfx::init applies V-Sync's)
     profilerStart();
     diagStart();  // stall reports and perf lines in the log (profiler.cpp)
     s_t0Tb = tbNow();
@@ -1177,6 +1247,7 @@ int main(int argc, char** argv) {
     }
     if (!discOpen(disc)) fatal("cannot open the disc image %s", disc.c_str());
     loadFst();
+    loadLevelDirs();
     Ctx* boot = nullptr;
     threadsInit(boot);
     Ctx& c = *boot;
@@ -1191,6 +1262,7 @@ int main(int argc, char** argv) {
     }
     audio::init();
     hwInit();
+    clockInit();  // the console's clock: the PC's local time (time of day in missions, issue #49)
     c.msr = 0x2032;  // FP, IR, DR, RI; interrupts off until the OS enables them
     logf("boot", "%u recompiled functions; jumping to %s", g_funcCount, describeAddr(entry).c_str());
     threadsRun(entry);  // the boot fiber runs the game; this thread only takes save states now

@@ -112,8 +112,10 @@ void setAudioSpeed(double speed, bool mute) {
 }
 void setDvdBoost(double boost) { s_dvdBoost = boost < 1.0 ? 1.0 : boost; }
 
-void viSetRate(int fps) {
-    s_viHz = fps == 60 ? 60000.0 / 1001.0 : double(fps);
+void viSetRate(int fps) { viSetRateHz(fps == 60 ? 60000.0 / 1001.0 : double(fps)); }
+void viSetRateHz(double hz) {
+    if (hz < 1.0) hz = 60000.0 / 1001.0;
+    s_viHz = hz;
     kViPeriod = u64(double(kTbClock) / s_viHz + 0.5);
     logf("vi", "retrace rate %.2f Hz", s_viHz);
 }
@@ -321,6 +323,7 @@ void diStart() {
             logf("dvd", "read %08llX len %X -> %08X  %s", (unsigned long long)o, s_diOp.len, s_diOp.mar, discFileAt(o).c_str());
         }
         s_diDueTb = 0;
+        discNoteRead(diDiscOffset());  // which level the game loads (the log, Discord Rich Presence)
         discPrefetch(diDiscOffset(), s_diOp.len);
         break;
     case 0xAB: break;  // seek
@@ -540,7 +543,7 @@ u8 iplReadByte() {
     const u32 a = (s_ipl.cmd & 0x7FFFFFFF) >> 6;
     u8 v = 0;
     if ((s_ipl.cmd & 0x7FFFFF00) == 0x20000000) {  // RTC
-        const u32 secs = u32(time(nullptr) - 946684800);  // since 2000-01-01
+        const u32 secs = rtcSeconds();  // local time since 2000-01-01 (cpu.cpp clockInit)
         v = u8(secs >> (24 - 8 * (s_ipl.pos & 3)));
     } else if ((s_ipl.cmd & 0x7FFFFF00) == 0x20000100) {  // SRAM
         v = s_sram[s_ipl.pos & 63];

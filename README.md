@@ -2,6 +2,10 @@
 
 [![release](https://img.shields.io/github/v/release/gminustwo/red_two?filter=v%2A&sort=semver&display_name=tag&label=release&color=orange)](https://github.com/gminustwo/red_two/releases/latest)
 [![downloads](https://img.shields.io/github/downloads/gminustwo/red_two/total?label=downloads&color=brightgreen)](https://github.com/gminustwo/red_two/releases)
+[![Discord](https://img.shields.io/discord/1574134109800894704?label=Discord&logo=discord&logoColor=white&color=5865F2)](https://discord.gg/cc65jQwbqG)
+[![Patreon](https://img.shields.io/badge/Patreon-support-F96854?logo=patreon&logoColor=white)](https://www.patreon.com/rengar1)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/rengar12707)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/rengar)
 
 A static recompilation of **Star Wars: Rogue Squadron II – Rogue Leader** (GameCube) for PC.
 
@@ -94,18 +98,41 @@ choose Open Anyway in System Settings > Privacy & Security (or run
   the setting for one start. A reset from the menu goes straight back into the game.
 - Gamepads work through SDL (with rumble), also while the window is in the background. On an
   Xbox-style pad the face buttons follow the GameCube positions: A = A (fire), X (left) = B,
-  B (right) = X, Y = Y; LT/RT = L/R, RB = Z, right stick = C-stick, Menu = Start. Keyboard: WASD or arrows steer, Space = A (fire),
+  B (right) = X, Y = Y; LT/RT = L/R, RB = Z, right stick = C-stick, Menu = Start (a PlayStation
+  controller: cross = A, circle = B, square = X, triangle = Y). Keyboard: WASD or arrows steer, Space = A (fire),
   Left Shift = B, E = X, Q = Y, R = Z, 1/2 = L/R, Enter = Start, IJKL = C-stick, TFGH = D-pad.
 - The game's button prompts show your controller's buttons (the one each GameCube button is
   bound to, e.g. "PRESS (Y)" and SELECT CRAFT's "(B) > pilot"): the PlayStation symbols on a
   PS3 / PS4 / PS5 controller, the Xbox buttons on any other. F1 > Controls > Button prompts
   picks Automatic, Xbox, PlayStation or the original GameCube ones. The C-stick icon stays.
-- **Control stick** (F1 > Controls): stick sensitivity (25-200%) and a round deadzone (0-50%,
-  both sticks; the output grows from zero at its edge, so small aiming moves are smooth), with a
-  meter showing the stick and what the game gets.
+- **Sticks** (F1 > Controls): the control stick and the C-stick each have a sensitivity (25-200%)
+  and a round deadzone (0-50%; the output grows from zero at its edge), and the stick's whole
+  travel past the deadzone is the game's range. **Response** sets how the craft's turning follows
+  the control stick: Smooth (default: gentle near the center, building up evenly to full speed),
+  Linear, or the game's own GameCube curve. A meter for each stick shows where it is and what the
+  game gets (the turn and pitch speed for the control stick).
+- **Triggers**: L and R are analog, as on a GameCube controller: throttle and brake build up over
+  the whole pull, and the click at the end gives full boost or full brake. **Trigger clicks on LB /
+  RB** (Controls) moves the clicks to the bumpers, so the triggers only throttle and brake (Z then
+  moves to the right stick click). Bars on the Controls page show both triggers and what the game
+  gets.
+- **Gyro aiming** (Controls): turn and tilt the controller to steer in flight, on top of the stick,
+  with the Steam Deck, a DualSense, DualShock 4 or Switch Pro Controller (Xbox controllers have no
+  gyro): always on, while a button is held, toggled, or off while held - the Deck's left stick
+  touch or a finger on the touchpad keeps it on while it rests there. Steam Input hides the gyro:
+  turn it off for Red Two (Properties > Controller).
 - F11 or Alt+Enter toggles fullscreen; `--fullscreen` starts that way.
 - **Graphics** (F1, DISPLAY): internal resolution up to 4K, 4x MSAA anti-aliasing (from the next
-  start; WebGPU offers no other sample count) and anisotropic filtering up to 16x.
+  start; WebGPU offers no other sample count) and anisotropic filtering up to 16x. **Widescreen**
+  (16:9, 16:10, 21:9 or the window's shape) widens the 3D view, puts the flight HUD at the screen
+  edges and fills the screen in cutscenes; wider windows get bars at the sides. **Frame rate**: 60,
+  90, 120 or 144 frames a second, the game at its normal speed. **V-Sync** (off by default) shows
+  each frame in step with the display's refresh: no tearing, a little more input lag. With it on, a
+  frame rate at or above the display's refresh runs at the refresh (144 on a 120 Hz display: 120),
+  and cutscene skips still run at full speed.
+- **Loading**: Fast loading (Gameplay, on) reads the disc at SSD speed instead of the GameCube
+  drive's 3 MB/s. The disc image is read ahead of the game on a thread of its own, so it can sit on
+  a hard disk or a network drive without the game stuttering while it streams music and voices.
 - **Where your files are**: on Windows a `user` folder next to `red_two.exe` (the zip has one)
   holds settings, the memory card, save states, logs, texture packs, codes and the shader cache,
   so the folder can live anywhere (another drive, a NAS). An install that has no `user` folder
@@ -138,8 +165,11 @@ choose Open Anyway in System Settings > Privacy & Security (or run
   `Load\Textures`; `.dds` and `.png`, mip files and wildcards work), or stay wherever you unpacked
   them: MODS -> Texture pack folder opens a folder browser (d-pad / stick, A opens, X goes up, B
   back) - pick the pack's folder (the one holding `GSWE64`, or `GSWE64` itself), e.g. in Downloads
-  or on an SD card. Back + D-pad up (F9) turns the texture packs off and on again at once, to
-  compare (rebindable in Controls). Gecko / Action Replay codes and
+  or on an SD card. The Texture pack folder row shows how many textures loaded from it, and says
+  why when there are none (an archive still to unpack, images not named `tex1_...`). The IMPORT
+  FROM DOLPHIN rows are only about copying things from Dolphin. Back + D-pad up (F9) turns the
+  texture packs off and on again at once, to compare (rebindable in Controls). Gecko / Action
+  Replay codes and
   patches go in the user folder's `codes.ini` (Dolphin's GameSettings format) and can be switched
   in the menu. The game is recompiled ahead of time, so codes that change its code (Gecko C2
   "insert ASM", writes into code) cannot work; the menu marks them as not supported.
@@ -151,10 +181,29 @@ choose Open Anyway in System Settings > Privacy & Security (or run
   its codes (with their on/off states). `R2_DOLPHIN_DIR=<User folder>` points it elsewhere.
 - **Shaders** (F1, DISPLAY -> PERFORMANCE): "Prepare shaders at start" (on) compiles every shader
   the game has used on this device before it starts; off, the game starts at once and objects may
-  pop in while their shaders compile. "Ubershaders" (on; off on a Steam Deck's first start) draws
-  not-yet-compiled objects with a generic shader instead of skipping them.
-- `R2_NO_AUDIO=1` runs without sound. Every session writes a log to the user folder's `logs`
-  (Linux: `~/.local/share/Red Two/logs`); `--console` shows it in a console window on Windows.
+  pop in while their shaders compile. The downloads bring a starter list of the game's shaders, so
+  a new install's first start compiles them before the game begins (about 20 seconds on a desktop,
+  once; later starts take about a second). "Ubershaders" (on; off on a Steam Deck's first start)
+  draws not-yet-compiled objects with a generic shader instead of skipping them.
+- **Sound** (F1, AUDIO): the game mixes for Dolby Pro Logic II. **Speakers**: Automatic follows
+  the system's speaker setup; Stereo sends the encoded mix for a receiver's Pro Logic II decoder;
+  5.1 and 7.1 give the rear its own speakers (7.1 splits it into side and back pairs). Keep the
+  game's own sound setting (Options > Sound Settings) on STEREO. `R2_NO_AUDIO=1` runs without
+  sound.
+- **Updates**: at start Red Two asks GitHub whether a newer version is out and offers it at the top
+  of the menu's first page: download and install, then a restart into it, with your settings,
+  saves, states and texture packs kept (the download is checked against the release's
+  checksums). The AppImage replaces itself under the same name, so a Steam shortcut keeps
+  working. DISPLAY > Check for updates turns the check off; the version is under the menu's title.
+- **Discord**: with the Discord app open on the same PC, your Discord profile shows that you're
+  playing Red Two, the mission you're in (flying, paused or in a cutscene; the hangar, the menus,
+  the launcher) and for how long. Only the Discord app on your PC is told, nothing else is sent;
+  DISPLAY > Discord Rich Presence turns it off. DISPLAY > Red Two's Discord (in the launcher and
+  in game) opens the invite to [Red Two's Discord server](https://discord.gg/cc65jQwbqG) for chat
+  and news; bug reports go on GitHub Issues (see below).
+- Every session writes a log to the user folder's `logs` (Linux: `~/.local/share/Red Two/logs`),
+  also when another program starts Red Two (RecompLauncher, a terminal): that program gets a copy
+  of it as well. `--console` shows it in a console window on Windows.
 
 ## Reporting a problem
 
@@ -180,7 +229,7 @@ report one problem per issue. What to have at hand:
   freeze or a crash. It also shows folder paths, which can include your user name: edit those
   out if you like.
 - **Your setup**: the controller (and whether Steam starts Red Two), your display and aspect
-  ratio, a texture pack if you use one.
+  ratio, a texture pack if you use one, your PC's CPU and graphics card.
 - **A screenshot or a short video** for anything you can see.
 
 A save state from just before the problem can help too, but states only load into the build that

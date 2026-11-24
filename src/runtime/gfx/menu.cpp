@@ -23,6 +23,7 @@
 #include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_video.h>
 #include <aurora/aurora.h>
+#include <aurora/gfx.h>
 #include <aurora/input.hpp>
 #include <aurora/pad.hpp>
 #include <dolphin/gx/GXAurora.h>
@@ -48,6 +49,7 @@
 #include "../hw/musyx_dsp.h"
 #include "../mods.h"
 #include "../achievements.h"
+#include "../discord.h"
 #include "../update.h"
 #include "../gyro.h"
 #include "../runtime.h"
@@ -1117,6 +1119,20 @@ void pageDisplay(settings::Settings& s) {
             if (s.checkUpdates) update::check();
         }
     }
+#ifndef __ANDROID__
+    {
+        // Discord Rich Presence (discord.cpp): on and off at once
+        const std::string help = "Your Discord profile shows that you're playing Red Two, the mission you're in and for how "
+                                 "long. It needs the Discord app open on this PC; nothing else is sent anywhere. " +
+                                 discord::statusText();
+        if (toggleRow("Discord Rich Presence", s.discordPresence, help.c_str())) s_changed = true;
+    }
+#endif
+    if (*discord::invite() &&
+        buttonRow("Red Two's Discord", "JOIN",
+                  "Chat and news on Red Two's Discord server: opens the invite in your browser. Bug reports go on "
+                  "GitHub Issues (see the README's \"Reporting a problem\")."))
+        openUrl(discord::invite());
     if (confirmRow("Quit to desktop", "QUIT", "PRESS AGAIN: QUIT", s_confirmQuit,
                    "Close Red Two. What the game saved to its memory card and your save states are kept; a mission in "
                    "progress is not.")) {
@@ -1172,6 +1188,15 @@ void pageDisplay(settings::Settings& s) {
     heading("PERFORMANCE");
     if (fpsRow("Frame rate", s.fps, "Above 60 the game runs more frames per second at its normal speed."))
         s_changed = s_display = true;
+    {
+        std::string help = "Shows each frame in step with your display's refresh: no tearing, a little more input lag. "
+                           "Best with the frame rate at your display's refresh rate";
+        const int hz = displayRefreshHz();
+        help += hz > 0 ? " (this display: " + std::to_string(hz) + " Hz)." : ".";
+        if (hz > 0 && s.vsync && s.fps > hz + 1)
+            help += " WITH V-SYNC ON THE GAME RUNS AT " + std::to_string(hz) + " FRAMES A SECOND.";
+        if (toggleRow("V-Sync", s.vsync, help.c_str())) s_changed = s_display = true;
+    }
     if (toggleRow("Show frame rate", s.showFps, "Frames per second in the top-left corner.")) s_changed = true;
     if (toggleRow("Prepare shaders at start", s.precompileShaders,
                   s_launcher ? "Before the game starts, compiles every shader it has used on this device (PREPARING "
@@ -2927,6 +2952,13 @@ void menuImGuiInit(const void*) {
 
 void menuEvent(const void* p) {
     const SDL_Event& e = *static_cast<const SDL_Event*>(p);
+    // the window moved to another display, or the display's mode changed: with V-Sync the
+    // retrace follows its refresh
+    if ((e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED || e.type == SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED) &&
+        settings::get().vsync && !cinematicSkip()) {
+        logf("gfx", "display now %d Hz", displayRefreshHz());
+        viSetRateHz(frameRateHz());
+    }
     if (rebindingNow()) return;  // rebinding takes these
     if (s_launcher) {  // no opening or closing: Esc only leaves the folder browser / the disc page
         if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_ESCAPE && !s_textEditing) menuStepBack();
@@ -3004,13 +3036,14 @@ void applyDisplaySettings() {
     applyDisplayAspect();
     AuroraSetUberShaders(uberShaderMode());
     AuroraSetForcedAnisotropy(u16(s.anisotropy));  // (Aurora patch 0030)
+    aurora_enable_vsync(s.vsync);  // (the surface is set up again on the render worker when it changes)
     // widescreen: letterboxed cinematics fill the screen (4:3 keeps the original bars)
     AuroraSetLetterboxFill(s.aspect != settings::Aspect::R4_3);
     if (SDL_Window* w = aurora_get_window()) {
         const bool full = (SDL_GetWindowFlags(w) & SDL_WINDOW_FULLSCREEN) != 0;
         if (full != s.fullscreen) SDL_SetWindowFullscreen(w, s.fullscreen);
     }
-    viSetRate(s.fps);
+    viSetRateHz(frameRateHz());  // (the frame rate setting; with V-Sync in step with the display)
 }
 
 // Before the game starts, every pipeline in the cache is built (gx_bridge.cpp precompileShaders);

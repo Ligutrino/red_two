@@ -198,7 +198,8 @@ set(R2_RUNTIME_SOURCES
     src/runtime/hotkeys.cpp
     src/runtime/achievements.cpp
     src/runtime/http.cpp
-    src/runtime/update.cpp)
+    src/runtime/update.cpp
+    src/runtime/discord.cpp)
 if(ANDROID)
     add_library(red_two SHARED ${R2_RUNTIME_SOURCES})
     set_target_properties(red_two PROPERTIES OUTPUT_NAME main)  # libmain.so, what SDLActivity loads
@@ -216,6 +217,12 @@ if(R2_RELEASE)
     list(APPEND _r2_update_defs R2_RELEASE_BUILD=1)
 endif()
 set_source_files_properties(src/runtime/update.cpp PROPERTIES COMPILE_DEFINITIONS "${_r2_update_defs}")
+# Discord (discord.cpp): Red Two's application on Discord's developer portal, for Rich Presence
+# (empty: none), and its server's invite (the menu's Join button and a Rich Presence button)
+set(R2_DISCORD_APP_ID "1574605819603984604" CACHE STRING "Discord application ID for Rich Presence (empty: no Rich Presence)")
+set(R2_DISCORD_INVITE "https://discord.gg/cc65jQwbqG" CACHE STRING "Red Two's Discord invite (empty: no Join button)")
+set_source_files_properties(src/runtime/discord.cpp PROPERTIES COMPILE_DEFINITIONS
+                            "R2_DISCORD_APP_ID=\"${R2_DISCORD_APP_ID}\";R2_DISCORD_INVITE=\"${R2_DISCORD_INVITE}\"")
 # Program icon: your own res/icon.ico (not in the repository) when it exists, else Red Two's
 # own res/red_two.ico (no game artwork; what public builds use: -DR2_ICON=res/red_two.ico).
 if(EXISTS "${CMAKE_SOURCE_DIR}/res/icon.ico")
