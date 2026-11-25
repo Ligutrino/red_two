@@ -16,3 +16,6 @@ saves/
 red_two.log
 # The exe icon is the user's own image (res/icon.ico, built in when present)
 res/icon.ico
+# Android signing keys stay on the build machine
+*.jks
+keystore/

@@ -42,6 +42,10 @@
 #include <filesystem>
 #include <future>
 #include <mutex>
+#include <thread>
+#ifdef __ANDROID__
+#include <unistd.h>
+#endif
 #include <string>
 #include <vector>
 
@@ -1789,7 +1793,11 @@ bool discChoose(const std::string& path) {
     s_discProblem.clear();
     s_discNote.clear();
     s_discEdit = p;
-    settings::get().discPath = p;
+#ifdef __ANDROID__
+    // ("fd:<n>" is this process's: the activity keeps the document's URI for the next starts)
+    if (p.compare(0, 3, "fd:") != 0)
+#endif
+        settings::get().discPath = p;
     settings::save();
     if (changed && !s_launcher) s_discChanged = true;
     logf("menu", "disc chosen: %s (%s)", p.c_str(), what.c_str());
@@ -1802,9 +1810,29 @@ bool discChoose(const std::string& path) {
 std::mutex s_dialogMutex;
 bool s_dialogOpen = false, s_dialogDone = false, s_dialogFailed = false;
 std::string s_dialogFile, s_dialogErrorText;
+#ifdef __ANDROID__
+std::string s_dialogUri;  // the picked document (kept by the activity once it is the disc)
+#endif
 
 void discDialogOpen() {
     if (s_dialogOpen) return;
+#ifdef __ANDROID__
+    // Android: the system's document picker (RedTwoActivity.pickDisc waits for it: on a thread of
+    // its own, so the menu keeps drawing); the document comes as a descriptor, "fd:<n>"
+    s_dialogOpen = true;
+    logf("menu", "disc: document picker");
+    std::thread([] {
+        const std::string uri = android::callString("pickDisc");
+        const int fd = uri.empty() ? -1 : android::callIntWithString("openUriFd", uri);
+        std::lock_guard lk(s_dialogMutex);
+        s_dialogDone = true;
+        s_dialogFailed = !uri.empty() && fd < 0;
+        if (s_dialogFailed) s_dialogErrorText = "cannot open " + uri;
+        s_dialogFile = fd >= 0 ? "fd:" + std::to_string(fd) : "";
+        s_dialogUri = uri;
+    }).detach();
+    return;
+#endif
     static const SDL_DialogFileFilter filters[] = {{"GameCube disc images (.iso, .gcm, .rvz, .wia)", "iso;gcm;rvz;wia"},
                                                    {"All files", "*"}};
     std::string start;
@@ -1839,6 +1867,17 @@ void discDialogPoll() {
         }
         file = s_dialogFile;
     }
+#ifdef __ANDROID__
+    if (file.empty()) return;  // (canceled)
+    std::string uri;
+    {
+        std::lock_guard lk(s_dialogMutex);
+        uri = s_dialogUri;
+    }
+    if (discChoose(file)) android::callVoidWithString("saveDiscUri", uri);
+    else close(atoi(file.c_str() + 3));  // (not the disc: its descriptor is not needed)
+    return;
+#endif
     if (!file.empty()) discChoose(file);  // (empty: canceled)
 }
 
@@ -1895,6 +1934,12 @@ void pageDisc() {
         logf("menu", "launcher: start (disc page)");
         s_launch = true;
     }
+#ifdef __ANDROID__
+    // Android: apps see the files of other folders only through the system's document picker
+    if (buttonRow("Choose the file", s_dialogOpen ? "OPEN..." : "BROWSE",
+                  "Pick the image in Android's file picker: any folder, an SD card or a USB drive. Red Two remembers it."))
+        discDialogOpen();
+#else
     if (textRow("Path", s_discEdit, false,
                 "Type or paste the full path of your disc image (Ctrl+V), then Enter. Quotes around it are fine."))
         discChoose(s_discEdit);
@@ -1904,6 +1949,7 @@ void pageDisc() {
     if (buttonRow("Find it", "OPEN", "Look through your folders here, with the controller or the keyboard: Rogue Leader "
                                      "images are marked."))
         browseBegin(BrowseMode::Disc, Display, s_discPath.empty() ? std::string() : u8str(u8path(s_discPath).parent_path()));
+#endif
     if ((!s_launcher || ready) &&
         buttonRow(s_launcher ? "Other settings" : "Back", "DONE", "Back to the rest of this page (B / Esc too)."))
         discPageClose();

@@ -15,6 +15,7 @@
 #include <condition_variable>
 #endif
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -27,6 +28,8 @@ namespace rt {
 void (*g_eventHandlers[EV_COUNT])() = {};
 u64 g_timerFlags = 0;  // times the timer thread raised g_irqPending (R2_GX_LOG)
 volatile u32 g_irqLine = 0;
+
+bool timePaused();  // (POSIX: timePause until timeResume)
 
 namespace {
 #ifdef _WIN32
@@ -120,6 +123,12 @@ void raisePending() {
 
 void timerThread() {
     for (;;) {
+#ifndef _WIN32
+        if (timePaused()) {  // (nothing comes due meanwhile)
+            sleepUs(20000, false);
+            continue;
+        }
+#endif
         const u64 e = s_earliest.load();
         const u64 now = tbNow();
         if (e <= now) {
@@ -136,7 +145,12 @@ void timerThread() {
         const u64 waitUs = (e - now) * 1000000 / kTbClock;
         if (waitUs > 300) sleepUs(waitUs - 150, true);  // wake a little early, then spin
         else
-            while (tbNow() < e && s_earliest.load() == e) cpuRelax();
+            while (tbNow() < e && s_earliest.load() == e
+#ifndef _WIN32
+                   && !timePaused()
+#endif
+            )
+                cpuRelax();
     }
 }
 }  // namespace
@@ -161,11 +175,35 @@ void eventsInit() {
     std::thread(timerThread).detach();
 }
 #else
-u64 tbNow() {
+// Paused time (timePause / timeResume): s_frozenNs holds the time it stopped at (0: running),
+// s_offsetNs the time spent paused so far, taken off the clock.
+static std::atomic<u64> s_offsetNs{0}, s_frozenNs{0};
+static std::mutex s_pauseMutex;  // (SDL's app events and Aurora's pause can both come)
+static u64 rawNs() {
     timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
-    const u64 ns = u64(t.tv_sec - s_start.tv_sec) * 1000000000ull + u64(t.tv_nsec) - u64(s_start.tv_nsec);
+    return u64(t.tv_sec - s_start.tv_sec) * 1000000000ull + u64(t.tv_nsec) - u64(s_start.tv_nsec);
+}
+u64 tbNow() {
+    const u64 frozen = s_frozenNs.load(std::memory_order_acquire);
+    const u64 ns = frozen ? frozen : rawNs() - s_offsetNs.load(std::memory_order_acquire);
     return (ns / 1000000000ull) * kTbClock + (ns % 1000000000ull) * kTbClock / 1000000000ull;
+}
+bool timePaused() { return s_frozenNs.load(std::memory_order_acquire) != 0; }
+void timePause() {
+    std::lock_guard lock{s_pauseMutex};
+    if (timePaused()) return;
+    s_frozenNs.store(std::max<u64>(rawNs() - s_offsetNs.load(), 1), std::memory_order_release);
+    logf("time", "paused (the app is in the background)");
+}
+void timeResume() {
+    std::lock_guard lock{s_pauseMutex};
+    const u64 frozen = s_frozenNs.load(std::memory_order_acquire);
+    if (!frozen) return;
+    const u64 raw = rawNs(), before = s_offsetNs.load();
+    s_offsetNs.store(raw - frozen, std::memory_order_release);  // (before the clock runs again)
+    s_frozenNs.store(0, std::memory_order_release);
+    logf("time", "running again (%.1f s in the background left out)", double(raw - frozen - before) / 1e9);
 }
 
 void eventsInit() {

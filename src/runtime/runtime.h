@@ -68,6 +68,10 @@ extern u64 g_idleTb;  // time the guest's host thread waited for the next event 
 // --- time and events ------------------------------------------------------------------
 constexpr u64 kBusClock = 162000000, kCpuClock = 486000000, kTbClock = kBusClock / 4;
 u64 tbNow();                       // guest time base (40.5 MHz)
+// events.cpp (POSIX): the time base stands still between timePause and timeResume (Android: the
+// app in the background; the game's clocks and timers do not run on meanwhile)
+void timePause();
+void timeResume();
 void clockInit();                  // cpu.cpp: the console's clock (time base, RTC) at the PC's local time
 u32 rtcSeconds();                  // cpu.cpp: the RTC (local seconds since 2000-01-01)
 void schedule(int id, u64 atTb);   // (re)arm event id at time base value
@@ -135,6 +139,15 @@ void discLate(u64 off, u32 len, double ms);
 // "" if so, else why not in a sentence; *what: what it is ("Star Wars Rogue Squadron II (GSWE64),
 // RVZ image, 1.4 GiB") when it could be read
 std::string discProblem(const std::string& path, std::string* what = nullptr);
+#ifdef __ANDROID__
+// main.cpp: static methods of the activity (RedTwoActivity.java), from any thread
+namespace android {
+std::string callString(const char* name);
+int callIntWithString(const char* name, const std::string& arg);
+void callVoidWithString(const char* name, const std::string& arg);
+bool callVoid(const char* name);
+}  // namespace android
+#endif
 std::string discFileAt(u64 off);  // "path+0xoffset" of the disc file containing off (debugging)
 // main.cpp: a DVD read starting at off (hw.cpp diStart). Inside a level resource of
 // Rogue2/lvlPackNN.dat (lNN in its .dir) the level the game loads: logged when it changes, and

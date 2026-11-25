@@ -19,6 +19,7 @@
 #include <aurora/gfx.hpp>
 #include <dolphin/gx/GXStruct.h>
 #include <aurora/texture.hpp>
+#include <SDL3/SDL_events.h>
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_init.h>
 #include <SDL3/SDL_keyboard.h>
@@ -135,6 +136,12 @@ void pollEvents() {
             logf("gfx", "window closed");
             quitToDesktop();
         }
+#ifdef __ANDROID__
+        // In the background Aurora holds this thread (no surface): the game's clock stops with it,
+        // so its timers and the mission clock do not run on and no missed retraces pile up
+        if (e->type == AURORA_PAUSED) timePause();
+        if (e->type == AURORA_UNPAUSED) timeResume();
+#endif
         if (e->type == AURORA_SDL_EVENT) {
             menuEvent(&e->sdl);
             touchEvent(&e->sdl);
@@ -1924,6 +1931,18 @@ bool init(int argc, char** argv, std::string& disc, const std::string& discNote)
     // (patch 0028) - Aurora's own default is on, and applyDisplaySettings below comes too late.
     AuroraSetUberShaders(uberShaderMode());
     const AuroraInfo info = aurora_initialize(argc, argv, &cfg);
+#ifdef __ANDROID__
+    // In a mission the app goes to the background inside SDL's event pump, which then holds this
+    // thread until it is back (before Aurora can say AURORA_PAUSED): SDL's app events come
+    // right then, on this thread, so the game's clock stops and restarts with them
+    SDL_AddEventWatch(
+        [](void*, SDL_Event* e) -> bool {
+            if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND || e->type == SDL_EVENT_DID_ENTER_BACKGROUND) timePause();
+            if (e->type == SDL_EVENT_DID_ENTER_FOREGROUND) timeResume();
+            return true;
+        },
+        nullptr);
+#endif
     if (background) {
         if (SDL_Window* w = aurora_get_window()) {
             if (void* hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(w), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr))

@@ -118,10 +118,31 @@ public class RedTwoActivity extends SDLActivity {
                 }
                 uri = u.toString();
             }
+            android.util.Log.i("RedTwo", "disc picker: " + (uri == null ? "canceled (result " + resultCode + ")" : uri));
             pickFinished(uri);
             return;
         }
         super.onActivityResult(requestCode, resultCode, data);
+    }
+
+    // --- quit (the menu's Quit): finished and out of the recent apps --------------------------------
+    // Called on the game's thread: the request goes straight to the system (the UI thread may be
+    // busy with SDL's own pause handling, and a posted Runnable would not run before the exit)
+    // Every task of the app goes (ActivityManager.AppTask: a call to the system, from any thread)
+    public static void quitApp() {
+        int n = 0;
+        try {
+            android.app.ActivityManager am =
+                (android.app.ActivityManager) mSingleton.getSystemService(Context.ACTIVITY_SERVICE);
+            for (android.app.ActivityManager.AppTask t : am.getAppTasks()) {
+                t.finishAndRemoveTask();
+                n++;
+            }
+            android.util.Log.i("RedTwo", "quit: " + n + " task(s) removed from the recent apps");
+        } catch (Exception e) {
+            android.util.Log.w("RedTwo", "quit: removing the tasks failed", e);
+        }
+        if (n == 0) mSingleton.runOnUiThread(() -> mSingleton.finishAndRemoveTask());
     }
 
     // --- restart (the menu's reset, after importing a save) ------------------------------------

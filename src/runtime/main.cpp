@@ -18,6 +18,7 @@
 #include <jni.h>
 #include <unwind.h>
 #include <SDL3/SDL_hints.h>
+#include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_main.h>
 #include <SDL3/SDL_system.h>
 #else
@@ -86,6 +87,13 @@ static std::string selfExe() {
     const ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
     return n > 0 ? std::string(buf, size_t(n)) : std::string();
 #endif
+}
+#endif
+#ifdef __ANDROID__
+// Android: the library this code is in (libmain.so, inside the app's install folder)
+static std::string selfExe() {
+    Dl_info info{};
+    return dladdr(reinterpret_cast<void*>(&selfExe), &info) && info.dli_fname ? std::string(info.dli_fname) : std::string();
 }
 #endif
 
@@ -282,6 +290,14 @@ bool callVoid(const char* name) {
 void quitToDesktop() {
     state::finishWrites();  // a save state still being written
     cardFlushNow();         // (written once a retrace: the last one's writes may be pending)
+#ifdef __ANDROID__
+    // Android: the activity finishes and leaves the recent apps (RedTwoActivity.quitApp, on the UI
+    // thread); the process ends a moment later, everything of the game already on disk. When the
+    // system is the one closing the activity (AURORA_EXIT), the same holds.
+    logf("main", "quit");
+    android::callVoid("quitApp");
+    SDL_Delay(1000);  // (the system takes the task out of the recent apps before the process ends)
+#endif
     quit(0);
 }
 
@@ -1223,7 +1239,11 @@ int main(int argc, char** argv) {
             discNote = "The disc image given with --disc (" + disc + ") cannot be used: " + problem;
             disc.clear();
         }
-    } else if (const std::string saved = settings::get().discPath; !saved.empty()) {
+    } else if (const std::string saved = settings::get().discPath; !saved.empty()
+#ifdef __ANDROID__
+               && saved.compare(0, 3, "fd:") != 0  // (a descriptor of an earlier process: the picked document is in its URI)
+#endif
+    ) {
         if (const std::string problem = discProblem(saved); problem.empty()) {
             disc = saved;
         } else {

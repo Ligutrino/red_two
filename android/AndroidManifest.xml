@@ -31,6 +31,7 @@
         <activity android:name=".RedTwoActivity"
             android:label="@string/app_name"
             android:alwaysRetainTaskState="true"
+            android:autoRemoveFromRecents="true"
             android:launchMode="singleInstance"
             android:screenOrientation="sensorLandscape"
             android:configChanges="layoutDirection|locale|grammaticalGender|fontScale|fontWeightAdjustment|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
