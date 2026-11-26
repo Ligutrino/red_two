@@ -67,6 +67,13 @@ same folder (or the disc into `~/Emulation/roms/gc`), make the AppImage executab
 to Steam as a non-Steam game. The first start on a Deck is fullscreen with the picture as wide
 as the screen. Settings, saves, states and logs live in `~/.local/share/Red Two/`.
 
+## Building (Android, on Linux with Docker)
+
+The `android` branch of this fork builds an APK for arm64 Android devices on a Linux PC with
+Docker, from your own disc image like every other build: see
+[tools/android-docker/README.md](tools/android-docker/README.md) (Spanish). The APK contains code
+generated from your disc: never share it.
+
 ## Building (macOS, Apple Silicon)
 
 Requirements: the Xcode command line tools (`xcode-select --install`), CMake 3.25+ and Ninja
